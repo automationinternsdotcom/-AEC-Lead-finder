@@ -9,7 +9,7 @@ Fetches Arizona commercial real estate news, scores each story for cleaning/faci
 
 **Client:** Jordan Whitehurst, Aether Facility Services (Phoenix, AZ)
 **Sheet ID:** `1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4`
-**Tab:** `Final Sheet`
+**Tabs:** `Leads` (filtered results), `Feed History` (full audit log)
 
 ## Prerequisites
 
@@ -66,54 +66,90 @@ For each article, assess whether it represents a real opportunity for commercial
 Arizona only: Goodyear east to Apache Junction, plus Tucson. Penalize stories about other states.
 
 ### For each scored lead, extract:
-- **company**: The company or developer involved
-- **property_name**: Specific property or project name if mentioned
-- **market**: Phoenix, Scottsdale, Tempe, Mesa, Chandler, Gilbert, Goodyear, Glendale, Apache Junction, Tucson, or "Arizona"
-- **asset_type**: industrial, office, retail, multifamily, hospitality, medical office, mixed-use, or other
-- **decision_maker_role**: Who to contact (Property manager, Facilities manager, Project manager, Operations manager)
-- **contact_search_query**: A Google search string to find the decision maker (e.g., "Lincoln Property Phoenix facilities manager")
+- **article_link**: The article URL
+- **article_title**: The article headline (will be displayed as a hyperlink in sheets)
+- **date_posted**: Publication date
+- **deal_size**: Estimated property/deal value if mentioned in article (e.g., "$45M", "$120M redevelopment", "N/A" if not stated)
+- **score**: 0-100 opportunity score
+- **priority**: HIGH, MEDIUM, or LOW
+- **filter_reason**: One sentence explaining why this article scored the way it did (e.g., "New retail tenants actively leasing in high-growth corridor" or "Macro market commentary with no specific property activity")
+- **lead_1_name**: Best-guess name of a specific decision maker (search for actual people, not just roles). Use format "FirstName LastName, Title at Company". If no specific person can be identified, use "Property Manager at [Company]" as placeholder.
+- **lead_1_source**: Where the lead info came from or a Google search query to find/verify them
+- **lead_2_name**: Second potential contact (different role or company), same format
+- **lead_2_source**: Source/search query for lead 2
+- **lead_3_name**: Third potential contact, same format
+- **lead_3_source**: Source/search query for lead 3
 - **service_angle**: Why Aether should reach out, in one sentence using their voice (asset preservation, not "cleaning services")
-- **news_context**: One-sentence summary of the article's relevance
 
-Sort results by score descending. Keep the top 20-25 leads.
+Sort results by score descending. Keep the top 20-25 leads (score >= 40).
 
 ## Step 3: Write to Google Sheets
 
-### Clear existing data (preserve header row)
+### Sheet 1: "Leads" (filtered results)
+
+#### Clear existing data (preserve header row)
 
 ```bash
-GOG_KEYRING_PASSWORD=aether gog sheets clear 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Sheet1!A2:Z1000" --no-input -a norgordjacob@gmail.com
+GOG_KEYRING_PASSWORD=aether gog sheets clear 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Leads!A2:Z1000" --no-input -a norgordjacob@gmail.com
 ```
 
-### Write leads
+#### Write header row (if tab is new)
 
-Build a JSON 2D array of rows. Column order:
-
+```bash
+GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Leads!A1" --values-json '[["Article","Date Posted","Deal Size","Score","Priority","Filter Reason","Lead 1","Lead 1 Source","Lead 2","Lead 2 Source","Lead 3","Lead 3 Source","Service Angle"]]' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
 ```
-Company | Property | Market | Asset Type | Score | Priority | Decision Maker | Contact Search | Service Angle | News Context | Title | Link | Published
+
+#### Write leads
+
+Build a JSON 2D array. For the Article column, use a Google Sheets HYPERLINK formula: `=HYPERLINK("url","title")`
+
+Column order:
+```
+Article (hyperlink) | Date Posted | Deal Size | Score | Priority | Filter Reason | Lead 1 | Lead 1 Source | Lead 2 | Lead 2 Source | Lead 3 | Lead 3 Source | Service Angle
 ```
 
 ```bash
-GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Sheet1!A2" --values-json '<JSON_ARRAY>' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
+GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Leads!A2" --values-json '<JSON_ARRAY>' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
 ```
 
-If the Leads tab doesn't exist yet or has no headers, write the header row first:
+### Sheet 2: "Feed History" (full audit log)
+
+This sheet keeps ALL articles from every run, both filtered and unfiltered, so we can audit the filtering logic.
+
+#### Write header row (if tab is new)
 
 ```bash
-GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Sheet1!A1" --values-json '[["Company","Property","Market","Asset Type","Score","Priority","Decision Maker","Contact Search","Service Angle","News Context","Title","Link","Published"]]' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
+GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "'Feed History'!A1" --values-json '[["Run Date","Article","Date Posted","Source Feed","Score","Priority","Filter Reason","Included in Leads"]]' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
+```
+
+#### Append all articles (never clear this sheet, it accumulates history)
+
+For EVERY article from the feed (not just filtered ones), append a row with:
+- Run Date: today's date
+- Article: `=HYPERLINK("url","title")`
+- Date Posted: publication date
+- Source Feed: which RSS feed it came from (az-cre, phoenix-dev, tucson-cre)
+- Score: the assigned score
+- Priority: HIGH/MEDIUM/LOW
+- Filter Reason: why it scored this way
+- Included in Leads: "Yes" or "No"
+
+```bash
+GOG_KEYRING_PASSWORD=aether gog sheets append 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "'Feed History'!A1" --values-json '<JSON_ARRAY>' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
 ```
 
 ### Verify
 
 ```bash
-GOG_KEYRING_PASSWORD=aether gog sheets get 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Sheet1!A1:F5" --no-input -a norgordjacob@gmail.com
+GOG_KEYRING_PASSWORD=aether gog sheets get 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "Leads!A1:E5" --no-input -a norgordjacob@gmail.com
 ```
 
 ## Output
 
 After writing, report to Jacob:
-- How many leads were written
-- The top 3 leads with company, market, score, and service angle
+- How many leads were written to the Leads sheet
+- How many total articles were logged to Feed History
+- The top 3 leads with article title, deal size, score, and service angle
 - Any feed fetch errors
 - Link to the sheet: https://docs.google.com/spreadsheets/d/1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4/edit
 
@@ -122,4 +158,5 @@ After writing, report to Jacob:
 - Jordan's brand voice is "Straight Shooter": direct, asset-minded, ROI/NOI-focused. Use terms like "asset preservation" and "strategic partner", not "cleaning" or "janitor".
 - Sales cycle is long. A lead that seems early-stage (land acquisition, construction start) is still valuable since it may take 1-2 years to convert.
 - The existing prospect lists in the Claude project have the ICP: locally-owned 20-600 unit multifamily properties.
+- For contact enrichment: Claude provides best-guess leads based on article context. For verified contact info (emails, phone numbers, LinkedIn profiles), a dedicated enrichment tool like Apollo.io, Vayne.io, or LinkedIn Sales Navigator should be used as a follow-up step.
 - If gog commands fail, fall back to exporting the leads as a CSV and tell Jacob to import manually.
