@@ -17,6 +17,13 @@
 3. **Scope** — this plan only updates the `aether-leads` skill ([SKILL.md](../../../skill/SKILL.md)). The `phoenix-new-property-leads-daily` skill ([SKILLS_Scheduled.md](../../../skill/SKILLS_Scheduled.md)) is untouched; wire-up there is a follow-on plan.
 4. **Custom field hashed keys** — after Task 1 (Pipedrive UI setup), record the four hashed keys Pipedrive assigns to the custom Lead fields. They populate env vars used by `push_pipedrive.py`.
 
+### Design decisions baked into this revision
+
+- **Source Feed field is Text, not Single Option.** Pipedrive single-option fields require the option's numeric ID, not the label — that would force an extra lookup pass and four more env vars. Text accepts `phoenix-dev` / `az-cre` / `tucson-cre` directly; the trade-off is no UI dropdown enforcement, which is acceptable for a three-value enum the skill controls.
+- **Lead 1/2/3 string format is `"<Name>, <Role> at <Company>"`.** Pipedrive Persons are created with just the name (everything before the first comma); the full string is preserved on the Lead Note. Document this contract in `skill/SKILL.md`'s extraction guidance.
+- **Notes are attached on the create branch only.** Re-running the skill on the same article PATCHes the existing Lead and skips the Note POST, so the audit doesn't accumulate duplicate Notes. If contacts genuinely change later, edit the Note in the Pipedrive UI.
+- **Article URLs are normalized before dedup and storage.** `utm_*`, `fbclid`, `gclid`, `mc_cid`/`mc_eid`, `_hsenc`/`_hsmi`, `ref`, and the URL fragment are stripped. Two visits with different tracking params dedup against each other.
+
 ---
 
 ## Pipedrive UI Setup (Task 1, manual, one-time)
@@ -59,7 +66,7 @@ Pipedrive → Settings → Data fields → Lead → "+ Custom field". Create all
 | Article URL | Text | record the hash key |
 | Date Posted | Date | record the hash key |
 | Deal Size | Text | record the hash key |
-| Source Feed | Single option (`az-cre`, `phoenix-dev`, `tucson-cre`) | record the hash key |
+| Source Feed | Text (free-form; expected values: `az-cre`, `phoenix-dev`, `tucson-cre`) | record the hash key |
 
 - [ ] **Step 3: Capture hashed field keys**
 
@@ -153,11 +160,10 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the test, verify it fails**
 
 ```bash
-cd /Users/jon/Code/Master-AetherCleaning
 python3 -m unittest skill.tests.test_push_pipedrive -v
 ```
 
-Expected: `ModuleNotFoundError: No module named 'push_pipedrive'`.
+Run from the repo root. Expected: `ModuleNotFoundError: No module named 'push_pipedrive'`.
 
 - [ ] **Step 3: Create minimal `push_pipedrive.py` to make the test pass**
 
@@ -272,6 +278,15 @@ class TestApiRequest(unittest.TestCase):
 
         self.assertEqual(json.loads(captured["body"]), {"title": "x"})
         self.assertEqual(captured["content_type"], "application/json")
+
+    def test_raises_on_success_false(self):
+        def fake_urlopen(req):
+            return self._mock_urlopen({"success": False, "error": "bad field"})
+
+        with patch("push_pipedrive.urlopen", fake_urlopen):
+            with self.assertRaises(RuntimeError) as ctx:
+                push_pipedrive.api_request("POST", "/leads", {"title": "x"})
+        self.assertIn("bad field", str(ctx.exception))
 ```
 
 - [ ] **Step 2: Run, verify it fails**
@@ -284,26 +299,51 @@ Expected: AttributeError on `push_pipedrive.api_request` and `push_pipedrive.url
 
 - [ ] **Step 3: Implement `api_request` in `push_pipedrive.py`**
 
-Add imports and function:
+Add imports and function. `api_request` raises `RuntimeError` when Pipedrive returns
+HTTP 200 with `{"success": false, ...}` (a common validation-failure shape), and
+retries 429 / 5xx with exponential backoff so a transient blip doesn't drop a lead.
 
 ```python
 import json
+import time
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+RETRY_STATUSES = {429, 500, 502, 503, 504}
 
-def api_request(method: str, path: str, body: dict | None = None) -> dict:
-    """Call the Pipedrive REST API. Returns parsed JSON response."""
+
+def api_request(method: str, path: str, body: dict | None = None,
+                attempts: int = 3) -> dict:
+    """Call the Pipedrive REST API. Returns parsed JSON response.
+
+    Raises RuntimeError on Pipedrive `success: false` envelopes.
+    Retries on 429 and 5xx with exponential backoff.
+    """
     sep = "&" if "?" in path else "?"
-    url = f"{BASE_URL}{path}{sep}api_token={API_TOKEN}"
-    data = None
+    url = f"{BASE_URL}{path}{sep}api_token={quote(API_TOKEN, safe='')}"
+    data = json.dumps(body).encode() if body is not None else None
     headers = {"Accept": "application/json"}
     if body is not None:
-        data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
     req = Request(url, data=data, headers=headers, method=method)
-    with urlopen(req) as resp:
-        return json.loads(resp.read())
+
+    for attempt in range(attempts):
+        try:
+            with urlopen(req) as resp:
+                result = json.loads(resp.read())
+            break
+        except HTTPError as e:
+            if e.code in RETRY_STATUSES and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    if result.get("success") is False:
+        raise RuntimeError(
+            f"Pipedrive {method} {path} failed: {result.get('error') or result}"
+        )
+    return result
 ```
 
 - [ ] **Step 4: Run, verify all tests pass**
@@ -312,7 +352,7 @@ def api_request(method: str, path: str, body: dict | None = None) -> dict:
 python3 -m unittest skill.tests.test_push_pipedrive -v
 ```
 
-Expected: 3 tests, OK.
+Expected: 4 tests, OK.
 
 - [ ] **Step 5: Commit**
 
@@ -323,24 +363,57 @@ git commit -m "Add api_request helper to push_pipedrive"
 
 ---
 
-## Task 4: Dedup-by-article-url (`find_lead_by_url`)
+## Task 4: URL normalization + dedup-by-article-url
 
 **Files:**
 - Modify: `skill/push_pipedrive.py`
 - Modify: `skill/tests/test_push_pipedrive.py`
+
+Two pieces here. First, a `normalize_url` helper that strips marketing/analytics
+tracking params so two visits to the same article don't create duplicate leads.
+Second, `find_lead_by_url` — the dedup query, scoped to the Article URL custom
+field (otherwise Pipedrive searches default fields like title and silently
+misses matches).
+
+**Pipedrive Lead IDs are UUID strings, not ints.** All return types and tests
+reflect that.
 
 - [ ] **Step 1: Write the failing tests**
 
 Append to test file:
 
 ```python
+class TestNormalizeUrl(unittest.TestCase):
+    def test_strips_tracking_params(self):
+        url = "https://example.com/a?utm_source=x&utm_medium=y&id=42"
+        self.assertEqual(
+            push_pipedrive.normalize_url(url),
+            "https://example.com/a?id=42",
+        )
+
+    def test_strips_fragment(self):
+        self.assertEqual(
+            push_pipedrive.normalize_url("https://example.com/a#section"),
+            "https://example.com/a",
+        )
+
+    def test_leaves_clean_url_unchanged(self):
+        self.assertEqual(
+            push_pipedrive.normalize_url("https://example.com/a?id=42"),
+            "https://example.com/a?id=42",
+        )
+
+
 class TestFindLeadByUrl(unittest.TestCase):
-    def test_returns_lead_id_when_search_matches(self):
+    def test_scopes_search_to_article_url_field(self):
+        captured = {}
+
         def fake_urlopen(req):
+            captured["url"] = req.full_url
             mock = MagicMock()
             mock.read.return_value = json.dumps({
                 "success": True,
-                "data": {"items": [{"item": {"id": 99}}]},
+                "data": {"items": [{"item": {"id": "lead-uuid-abc"}}]},
             }).encode()
             mock.__enter__ = MagicMock(return_value=mock)
             mock.__exit__ = MagicMock(return_value=False)
@@ -348,7 +421,9 @@ class TestFindLeadByUrl(unittest.TestCase):
 
         with patch("push_pipedrive.urlopen", fake_urlopen):
             result = push_pipedrive.find_lead_by_url("https://example.com/x")
-        self.assertEqual(result, 99)
+        self.assertEqual(result, "lead-uuid-abc")
+        self.assertIn("fields=field_article_url_hash", captured["url"])
+        self.assertIn("exact_match=true", captured["url"])
 
     def test_returns_none_when_no_match(self):
         def fake_urlopen(req):
@@ -368,17 +443,44 @@ class TestFindLeadByUrl(unittest.TestCase):
 
 - [ ] **Step 2: Run, verify fail**
 
-Expected: AttributeError on `find_lead_by_url`.
+Expected: AttributeError on `normalize_url` and `find_lead_by_url`.
 
 - [ ] **Step 3: Implement**
 
 ```python
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref",
+})
 
 
-def find_lead_by_url(article_url: str) -> int | None:
-    """Search Leads by the Article URL custom field. Returns Lead id or None."""
-    query = urlencode({"term": article_url, "exact_match": "true"})
+def normalize_url(url: str) -> str:
+    """Strip marketing/analytics tracking params and the fragment.
+
+    Two visits to the same article with different `utm_*` etc. should
+    dedup against each other in Pipedrive.
+    """
+    parsed = urlparse(url)
+    kept = [
+        (k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+        if k.lower() not in TRACKING_PARAMS
+    ]
+    return urlunparse(parsed._replace(query=urlencode(kept), fragment=""))
+
+
+def find_lead_by_url(article_url: str) -> str | None:
+    """Search Leads by the Article URL custom field. Returns Lead id (UUID) or None.
+
+    `fields=<custom-field-key>` is required — without it, Pipedrive searches
+    default fields (title, etc.) and silently misses matches against custom fields.
+    """
+    query = urlencode({
+        "term": article_url,
+        "exact_match": "true",
+        "fields": FIELD_ARTICLE_URL,
+    })
     resp = api_request("GET", f"/leads/search?{query}")
     items = resp.get("data", {}).get("items", [])
     return items[0]["item"]["id"] if items else None
@@ -386,12 +488,12 @@ def find_lead_by_url(article_url: str) -> int | None:
 
 - [ ] **Step 4: Run, verify pass**
 
-Expected: 5 tests, OK.
+Expected: 9 tests, OK (4 prior + 3 normalize + 2 find).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "Add find_lead_by_url for article-URL dedup"
+git commit -am "Add normalize_url and find_lead_by_url for article-URL dedup"
 ```
 
 ---
@@ -451,7 +553,22 @@ class TestFindOrCreateOrg(unittest.TestCase):
 
 - [ ] **Step 3: Implement**
 
+The skill emits decision-maker fields as a single string like
+`"Jane Doe, VP Operations at Acme"` (name, then role/affiliation after a comma).
+`parse_person_name` extracts just the name portion before the comma so we don't
+create Persons literally named `"Jane Doe, VP Operations at Acme"` in Pipedrive.
+The full string (with title) is preserved on the Lead Note attached in Task 7.
+
 ```python
+def parse_person_name(raw: str) -> str:
+    """Extract the name from formats like 'Jane Doe, VP Operations at Acme'.
+
+    The skill writes `<name>, <role> at <company>` — Pipedrive Persons should
+    hold only the name. The full string is preserved in the Lead Note.
+    """
+    return raw.split(",", 1)[0].strip()
+
+
 def find_or_create_org(name: str) -> int:
     """Find an Organization by exact name; create if missing. Returns id."""
     query = urlencode({"term": name, "exact_match": "true", "fields": "name"})
@@ -475,12 +592,29 @@ def find_or_create_person(name: str, org_id: int) -> int:
     return created["data"]["id"]
 ```
 
+Add a quick test for `parse_person_name`:
+
+```python
+class TestParsePersonName(unittest.TestCase):
+    def test_strips_role_and_company(self):
+        self.assertEqual(
+            push_pipedrive.parse_person_name("Jane Doe, VP Operations at Acme"),
+            "Jane Doe",
+        )
+
+    def test_passes_bare_name_through(self):
+        self.assertEqual(push_pipedrive.parse_person_name("Jane Doe"), "Jane Doe")
+
+    def test_trims_whitespace(self):
+        self.assertEqual(push_pipedrive.parse_person_name("  Jane Doe  , VP"), "Jane Doe")
+```
+
 - [ ] **Step 4: Run, verify pass**
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "Add find_or_create_org/person helpers"
+git commit -am "Add find_or_create_org/person + parse_person_name helpers"
 ```
 
 ---
@@ -499,6 +633,13 @@ Two cases: (a) no existing match → POST `/leads`; (b) existing match → PATCH
 
 - [ ] **Step 3: Implement**
 
+`push_lead` is the boundary that normalizes the URL once, then uses the normalized
+value for both the dedup lookup and the stored custom field — so a second run with
+the same article (even with different `utm_*` params) updates the existing lead
+instead of creating a duplicate. Person names get run through `parse_person_name`
+so Pipedrive Persons hold clean names; the full `"Name, Role at Company"` string is
+preserved on the Note attached in Task 7.
+
 ```python
 def push_lead(
     article_title: str,
@@ -509,14 +650,17 @@ def push_lead(
     lead_names: list[str],
     organization: str | None,
 ) -> dict:
-    """Create or update one Pipedrive Lead. Idempotent on article_url."""
+    """Create or update one Pipedrive Lead. Idempotent on normalized article_url."""
+    article_url = normalize_url(article_url)
     existing_id = find_lead_by_url(article_url)
     org_id = find_or_create_org(organization) if organization else None
+
     person_id = None
     if org_id is not None:
         non_empty = [n for n in lead_names if n and n.strip()]
         if non_empty:
-            person_id = find_or_create_person(non_empty[0], org_id)
+            person_id = find_or_create_person(parse_person_name(non_empty[0]), org_id)
+
     body = build_lead_body(
         article_title=article_title,
         article_url=article_url,
@@ -526,41 +670,63 @@ def push_lead(
         org_id=org_id,
         person_id=person_id,
     )
+
     if existing_id is not None:
+        # Update path: don't re-attach a Note — it would duplicate on every re-run.
         return api_request("PATCH", f"/leads/{existing_id}", body)
-    return api_request("POST", "/leads", body)
+
+    created = api_request("POST", "/leads", body)
+    new_lead_id = created["data"]["id"]
+    add_lead_note(new_lead_id, lead_names)
+    return created
 ```
 
-Note: Pipedrive Leads accept only a single `person_id`. Additional named decision-makers (Lead 2, Lead 3) are still created as Persons attached to the Org so they're searchable later — Task 7 adds a Lead Note that lists all of them inline.
+Notes:
+- Pipedrive Leads accept only a single `person_id`. Additional named decision-makers (Lead 2, Lead 3) are still created as Persons attached to the Org so they're searchable later — Task 7's Note preserves the full list, including titles, inline.
+- Note is attached **only on the create branch**. On PATCH (re-run for the same article) the existing Note is left alone, which keeps the operation idempotent. If contacts genuinely change later, edit the Note in the Pipedrive UI.
 
 - [ ] **Step 4: Run, verify pass**
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "Add push_lead with create/update branching"
+git commit -am "Add push_lead with URL normalization and create/update branching"
 ```
 
 ---
 
-## Task 7: Attach a Note listing all named contacts
+## Task 7: Attach a Note listing all named contacts (create branch only)
 
 **Files:**
 - Modify: `skill/push_pipedrive.py`
 - Modify: `skill/tests/test_push_pipedrive.py`
 
-Pipedrive Leads only hold one primary Person. To preserve the Lead 1/2/3 list visibly, attach a Note to the Lead with the full named-contacts list.
+Pipedrive Leads only hold one primary Person. To preserve the Lead 1/2/3 list
+visibly — and to keep the role/affiliation that `parse_person_name` strips from
+the Person — attach a Note to the Lead with the full named-contacts list.
 
-- [ ] **Step 1: Write failing test**
+**Only on create.** Re-running the skill against the same article PATCHes the
+existing Lead; if we also POSTed a Note every PATCH, every re-run would leave
+a duplicate Note. The Note is therefore wired into the create branch of
+`push_lead` (already done in Task 6); this task adds the helper and tests.
 
-Verifies that after `push_lead`, when 2+ contact names are provided, a POST to `/notes` is made with `lead_id` and a `content` body that contains every non-empty name.
+- [ ] **Step 1: Write failing tests**
+
+Two cases: (a) on create with ≥1 named contact, POST to `/notes` includes every
+non-empty name in the `content`; (b) on the update branch, no `/notes` request
+is made even when contacts are present.
 
 - [ ] **Step 2: Run, verify fail**
 
-- [ ] **Step 3: Implement: extend `push_lead` to call a new `add_lead_note(lead_id, names)` after lead creation when ≥1 named contact exists.**
+- [ ] **Step 3: Implement**
 
 ```python
 def add_lead_note(lead_id: str, names: list[str]) -> None:
+    """Attach a Note to a newly-created Lead listing every named contact.
+
+    Called only from the create branch of push_lead — never on PATCH —
+    so re-running on the same article never produces duplicate Notes.
+    """
     non_empty = [n for n in names if n and n.strip()]
     if not non_empty:
         return
@@ -568,14 +734,14 @@ def add_lead_note(lead_id: str, names: list[str]) -> None:
     api_request("POST", "/notes", {"lead_id": lead_id, "content": content})
 ```
 
-Wire into `push_lead` after the POST/PATCH; use the returned `data.id` for new leads or `existing_id` for updates.
+(`push_lead` already calls this on the create branch — see Task 6.)
 
 - [ ] **Step 4: Run, verify pass**
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "Attach Pipedrive Note listing all named contacts"
+git commit -am "Attach Pipedrive Note listing named contacts (create-only)"
 ```
 
 ---
@@ -586,7 +752,11 @@ git commit -am "Attach Pipedrive Note listing all named contacts"
 - Modify: `skill/push_pipedrive.py`
 - Modify: `skill/tests/test_push_pipedrive.py`
 
-Input contract (JSON written by Claude during the skill run):
+Input contract (JSON written by Claude during the skill run). `lead_1/2/3` use
+the format **`"<Name>, <Role> at <Company>"`** — `push_pipedrive.parse_person_name`
+strips everything after the first comma when creating the Pipedrive Person, while
+`add_lead_note` preserves the full string verbatim. Leave a field as `""` if the
+article doesn't name a high-confidence decision-maker (no fabrication).
 
 ```json
 {
@@ -606,7 +776,7 @@ Input contract (JSON written by Claude during the skill run):
 }
 ```
 
-- [ ] **Step 1: Write failing test** — feed stdin a 2-lead payload (one with contacts, one with all blanks); assert `push_lead` called twice with correct args; assert returned summary `{"pushed": 2, "errors": []}`.
+- [ ] **Step 1: Write failing test** — feed stdin a 2-lead payload (one with contacts, one with all blanks); assert `push_lead` called twice with correct args; assert returned summary `{"pushed": 2, "errors": []}`. Add a third case where `push_lead` raises `RuntimeError` and verify it's captured in `errors` (not propagated).
 
 - [ ] **Step 2: Run, verify fail**
 
@@ -632,7 +802,9 @@ def main() -> int:
                 organization=lead.get("organization"),
             )
             summary["pushed"] += 1
-        except HTTPError as e:
+        except (HTTPError, RuntimeError) as e:
+            # HTTPError = transport/HTTP-level failure (after retries exhausted).
+            # RuntimeError = Pipedrive responded 200 but envelope was success: false.
             summary["errors"].append({"url": lead.get("article_link"), "error": str(e)})
     json.dump(summary, sys.stdout, indent=2)
     sys.stdout.write("\n")
@@ -687,13 +859,30 @@ Clear `A2:Z1000` each run (preserves header). Write filtered leads to `A2`, colu
 
 - [ ] **Step 3: Replace the Feed History header to add filter-audit columns**
 
+**Pre-flight schema guard.** Before writing any audit rows, read the current
+`Feed History!A1:G1` header. If column A is not `Run Date` OR column E is not
+`Passed Filter?`, the sheet still has the legacy 4-column schema (`Score`,
+`Priority`, `Filter Reason`, `Included in Leads`). Stop the run with an error
+asking the operator to either rename the existing tab to `Feed History (legacy)`
+or clear it — otherwise new-schema rows will be appended below old-schema rows
+and the audit log becomes unreadable.
+
+```bash
+# Pre-flight check (run BEFORE the header update below):
+header=$(GOG_KEYRING_PASSWORD=aether gog sheets read 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "'Feed History'!A1:G1" -a norgordjacob@gmail.com)
+case "$header" in
+  *"Run Date"*"Passed Filter?"*) echo "Feed History schema OK" ;;
+  *) echo "ERROR: Feed History uses legacy schema. Rename tab to 'Feed History (legacy)' or clear it before continuing." >&2; exit 1 ;;
+esac
+```
+
+Then write the new header:
+
 ```bash
 GOG_KEYRING_PASSWORD=aether gog sheets update 1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4 "'Feed History'!A1" --values-json '[["Run Date","Article","Date Posted","Source Feed","Passed Filter?","Reason","Pushed to Pipedrive?"]]' --input USER_ENTERED --no-input -a norgordjacob@gmail.com
 ```
 
 Append every article (kept or rejected). `Passed Filter?` = Yes/No, `Pushed to Pipedrive?` = Yes/No/N/A (N/A when filter rejected).
-
-Existing Feed History rows from prior runs have the old schema (`Score`, `Priority`, `Filter Reason`, `Included in Leads`). Document the cutover in the skill: do not migrate old rows; new rows use new columns. Old rows can be archived to a `Feed History (legacy)` tab by Jacob, manually, before first run.
 
 - [ ] **Step 4: Add "## Step 4: Push to Pipedrive"**
 
