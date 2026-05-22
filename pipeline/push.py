@@ -187,23 +187,37 @@ def _lead_payload(
     return payload
 
 
+def _oneline(s: str | None) -> str:
+    """Collapse newlines + tabs so they don't break Pipedrive note line structure.
+
+    LLM-produced fields (summary_2sent, filter_reason, service_angle) can contain
+    embedded newlines; without this, every \\n becomes a top-level row in the
+    rendered Pipedrive note, breaking the field-per-line format.
+    """
+    if not s:
+        return ""
+    return s.replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
+
+
 def _note_body(a: ExtractedArticle, lead: Lead | None, basis: str, url: str) -> str:
     """Pipedrive Note body. Uses Aether's brand voice (asset preservation,
     strategic partner) via the service_angle field — NOT 'cleaning' / 'janitor'
-    language. service_angle should be populated for high/medium priority (which
-    is everything that reaches push since is_qualifying drops low-priority).
+    language. service_angle is required for high/medium priority articles
+    (schema enforces this); only low-priority articles can have it null, and
+    those don't reach push.
     """
     lines = [
-        a.summary_2sent,
+        _oneline(a.summary_2sent),
         f"Source: {url}",
         f"Signal: {a.signal_type} | Property: {a.property_type} | "
         f"City: {a.city or 'AZ'} | Priority: {a.priority}",
-        f"Filter reason: {a.filter_reason}",
+        f"Filter reason: {_oneline(a.filter_reason)}",
     ]
     if a.service_angle:
-        lines.append(f"Aether angle: {a.service_angle}")
+        lines.append(f"Aether angle: {_oneline(a.service_angle)}")
     lines.append(f"Est-value basis: {basis}")
-    lines.append(
-        f"Contact: {lead.name + ' / ' + lead.title if lead else 'lead_gap'}"
-    )
+    if lead:
+        lines.append(f"Contact: {lead.name} / {lead.title}")
+    else:
+        lines.append("Contact: (no decision-maker found)")
     return "\n".join(lines)

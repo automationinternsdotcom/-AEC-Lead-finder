@@ -48,6 +48,118 @@ def _article(**overrides):
     return ExtractedArticle.model_validate(base)
 
 
+class TestNoteBodyFormatting(unittest.TestCase):
+    """The Pipedrive note assembles fields with newlines as line breaks. Any
+    interpolated field containing its own newline would break the line
+    structure (every embedded \\n becomes a top-level row in Jordan's view)."""
+
+    def test_multiline_filter_reason_collapses_to_single_line(self):
+        from pipeline.push import _note_body
+        art = _article(filter_reason="Line one.\nSecondary line that would break the note.")
+        body = _note_body(art, lead=None, basis="none", url="https://x.com/a")
+        lines = body.split("\n")
+        # No line in the output should be just the secondary text from filter_reason
+        for line in lines:
+            self.assertNotEqual(line.strip(), "Secondary line that would break the note.")
+        # The collapsed filter_reason content must still be present somewhere
+        self.assertIn("Secondary line that would break the note.", body)
+
+    def test_multiline_summary_2sent_collapses(self):
+        from pipeline.push import _note_body
+        art = _article(summary_2sent="First sentence.\nSecond on its own line.")
+        body = _note_body(art, lead=None, basis="none", url="https://x.com/a")
+        # The summary line should appear as a single concatenated line
+        first_line = body.splitlines()[0]
+        self.assertIn("First sentence.", first_line)
+        self.assertIn("Second on its own line.", first_line)
+
+    def test_multiline_service_angle_collapses(self):
+        from pipeline.push import _note_body
+        art = _article(service_angle="Reach out.\nLine two.")
+        body = _note_body(art, lead=None, basis="none", url="https://x.com/a")
+        # Find the Aether angle line; it should contain BOTH halves on one line
+        aether_lines = [l for l in body.splitlines() if l.startswith("Aether angle:")]
+        self.assertEqual(len(aether_lines), 1)
+        self.assertIn("Reach out.", aether_lines[0])
+        self.assertIn("Line two.", aether_lines[0])
+
+    def test_lead_gap_uses_human_readable_text(self):
+        """'lead_gap' was internal jargon visible to Jordan in the note. Use
+        plainer language so the note reads naturally."""
+        from pipeline.push import _note_body
+        art = _article()
+        body = _note_body(art, lead=None, basis="none", url="https://x.com/a")
+        self.assertNotIn("lead_gap", body)
+        # The Contact line should explain absence in plain language
+        contact_lines = [l for l in body.splitlines() if l.startswith("Contact:")]
+        self.assertEqual(len(contact_lines), 1)
+        self.assertIn("no decision-maker", contact_lines[0].lower())
+
+
+class TestSchemaValidation(unittest.TestCase):
+    """Tightened schema rules (commit reviewed-as-LOW findings 3 & 4):
+       - filter_reason must be non-empty (audit trail can't be blank)
+       - service_angle must be non-empty when priority is high/medium
+         (the Aether-voice line in the note depends on it)
+    """
+
+    def _payload(self, **overrides):
+        base = {
+            "title": "x", "published_date": None, "summary_2sent": "x",
+            "signal_type": "lease", "company_name": "Acme",
+            "company_domain_guess": None, "property_type": "retail",
+            "address": None, "city": "Tempe", "square_footage": None,
+            "dollar_value": None, "unit_count": None,
+            "az_relevant": True, "confidence": 0.7,
+            "priority": "high", "filter_reason": "x", "service_angle": "x",
+        }
+        base.update(overrides)
+        return base
+
+    def test_rejects_empty_filter_reason(self):
+        from schema import ExtractedArticle
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ExtractedArticle.model_validate(self._payload(filter_reason=""))
+
+    def test_rejects_whitespace_only_filter_reason(self):
+        from schema import ExtractedArticle
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ExtractedArticle.model_validate(self._payload(filter_reason="   "))
+
+    def test_rejects_empty_service_angle_when_high_priority(self):
+        from schema import ExtractedArticle
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ExtractedArticle.model_validate(
+                self._payload(priority="high", service_angle="")
+            )
+
+    def test_rejects_null_service_angle_when_high_priority(self):
+        from schema import ExtractedArticle
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ExtractedArticle.model_validate(
+                self._payload(priority="high", service_angle=None)
+            )
+
+    def test_rejects_empty_service_angle_when_medium_priority(self):
+        from schema import ExtractedArticle
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            ExtractedArticle.model_validate(
+                self._payload(priority="medium", service_angle="")
+            )
+
+    def test_allows_null_service_angle_when_low_priority(self):
+        """Low articles get dropped before push so service_angle is irrelevant."""
+        from schema import ExtractedArticle
+        ExtractedArticle.model_validate(
+            self._payload(priority="low", service_angle=None)
+        )
+
+
 class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
     """Pipedrive returns HTTP 200 with {"success": false, "error": "..."}
     for validation failures (bad field, missing required, etc.). Without an
