@@ -63,6 +63,12 @@ The pipeline enriches qualifying leads with decision-maker contact info. Two pat
 - When `APOLLO_API_KEY` is set in your env, the routine uses Apollo and skips Grok entirely.
 - Useful for headless CI or environments without an active Chrome session.
 
+### 2.6 Create the `NOT RELEVANT` Lead label
+
+Jordan flags article-sourced Leads that aren't relevant by applying a Pipedrive Lead label named **`NOT RELEVANT`** (Settings → Lead labels → + Add label). The daily routine polls these flags at the end of each run and surfaces them in the run report so the operator can spot patterns and manually tune the routine's filter protocol (`skill/aether_daily_routine.md` Step 2b).
+
+**Important:** no automated suppression — flagging the same company multiple times doesn't change pipeline behavior. The signal is informational only. If `NOT RELEVANT` flags become high-volume, the operator updates the routine's HIGH/MEDIUM/LOW protocol or disables noisy source feeds.
+
 ### 3. Recommend: set up a saved Leads view for Jordan
 
 In the Pipedrive UI, open **Leads Inbox**, click **+ Add filter**, and save a filter like `Article URL is not empty` named **"Aether Article Leads"**. Configure the visible columns: Title, Organization, Value, Article URL, Labels, Created, Owner. This gives Jordan a single-click daily review surface — and avoids the "902 unreviewed leads" graveyard scenario.

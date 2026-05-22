@@ -227,7 +227,25 @@ Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedri
 uv run python -m pipeline.cli.mark "$URL_HASH" pushed
 ```
 
-## Step 3: Summary
+## Step 3: Jordan's feedback (since last run)
+
+Pull the current set of Leads Jordan has flagged as not relevant — these are signals to manually tune the protocol over time (no automated suppression).
+
+```bash
+uv run python -m pipeline.cli.feedback > /tmp/feedback.json
+FEEDBACK_RC=$?
+```
+
+If `FEEDBACK_RC == 3`: the `NOT RELEVANT` label doesn't exist in Pipedrive yet. Note this in the report and tell Jacob to create it in **Pipedrive → Settings → Lead labels**. Skip the rest of this step.
+
+Otherwise read `/tmp/feedback.json` (a JSON array, possibly empty). For each flagged Lead, include in the report:
+- Lead title
+- Article URL
+- Flagged-at timestamp
+
+These flags don't change pipeline behavior — they're shown so the operator can spot patterns (e.g., "Tucson articles get flagged 80% of the time → consider disabling the tucson source") and update `skill/aether_daily_routine.md` Step 2b accordingly.
+
+## Step 4: Summary
 
 After the loop, report:
 - Total URLs fetched
@@ -235,5 +253,6 @@ After the loop, report:
 - Skipped (already existed in Pipedrive)
 - Filtered (didn't pass qualification rules)
 - Failed (extract errors — usually paywalls or JS-rendered pages)
+- **Jordan's feedback:** count of `NOT RELEVANT`-flagged Leads + the list from Step 3
 
 Log a final `run_finished` event with the counts.
