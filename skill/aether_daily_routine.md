@@ -166,18 +166,13 @@ ENRICH_VIA=grok
 
 ```bash
 if [ "$(cat /tmp/lead.json | tr -d '[:space:]')" != "null" ]; then
-  uv run python <<PYEOF
-from pipeline import db
-from pipeline.enrich import Lead
-import json, sys
-conn = db.connect()
-lead = Lead(**json.load(open('/tmp/lead.json')))
-db.cache_enrichment(conn, "$COMPANY", lead, source="${ENRICH_VIA:-grok}")
-conn.commit()
-conn.close()
-PYEOF
+  cat /tmp/lead.json | uv run python -m pipeline.cli.cache_write "$COMPANY" "${ENRICH_VIA:-grok}"
 fi
 ```
+
+(CLI args handle shell quoting correctly — company names with embedded
+quotes or other punctuation pass through unchanged. The earlier heredoc
+approach broke Python syntax on names like `Some "Quoted" Co`.)
 
 ### 2e. Push to Pipedrive Leads
 
