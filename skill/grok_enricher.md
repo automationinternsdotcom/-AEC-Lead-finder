@@ -47,10 +47,12 @@ editor.focus();
 document.execCommand('insertText', false, /* PROMPT_TEXT */);
 ```
 
-Standardized prompt template — fill the four slots:
+Standardized prompt template — fill the four slots.
+
+Note: the prompt deliberately uses the literal **"janitorial/cleaning service contracts"** wording — that matches how these contracts are described in Grok's search index (procurement databases, vendor directories, etc.) and produces higher-precision matches than abstract "asset preservation" framing. The Aether brand voice is for the Pipedrive note (operator-facing); the Grok prompt is for retrieval (search-tool-facing).
 
 ```
-Find decision-makers at {company_name}{city_phrase}{description_phrase}{owner_phrase}. Return 1-3 people who would have buying authority for facility-services and asset-preservation contracts (operations, facilities, property management — NOT sales or marketing). Priority roles: Owner, Principal, COO, VP/Director of Facilities, Asset Manager, General Manager, Operations Manager, Property Manager. For each: full name, current title, LinkedIn URL if findable, professional email if findable. Numbered list, no preamble.
+Find decision-makers at {company_name}{city_phrase}{description_phrase}{owner_phrase}. Return 1-3 people who would have buying authority for janitorial/cleaning service contracts (operations, facilities, property management — NOT sales or marketing). Priority roles: Owner, Principal, COO, VP/Director of Facilities, Asset Manager, General Manager, Operations Manager, Property Manager. For each: full name, current title, LinkedIn URL if findable, professional email if findable. Numbered list, no preamble.
 ```
 
 Where:
