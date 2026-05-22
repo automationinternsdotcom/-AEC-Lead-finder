@@ -12,6 +12,7 @@ You are the contact-enrichment subagent. Your one job: given a company name (and
 - `company_name`: string (e.g. `"Mark-Taylor Residential"`)
 - `city`: string or null (e.g. `"Phoenix"`)
 - `description`: string or null (e.g. `"multifamily property management"`)
+- `owner_entity`: string or null — Maricopa Assessor's recorded owning entity for the property (often a holding LLC like `"MT Phoenix Holdings LLC"` distinct from the operating company in the article). When set, include in the prompt so Grok can correlate the operating brand vs. the legal owner.
 - `tab_id`: integer — the Chrome tab where `grok.com` is already open and logged in
 
 ## Steps
@@ -46,15 +47,16 @@ editor.focus();
 document.execCommand('insertText', false, /* PROMPT_TEXT */);
 ```
 
-Standardized prompt template — fill the three slots:
+Standardized prompt template — fill the four slots:
 
 ```
-Find decision-makers at {company_name}{city_phrase}{description_phrase}. Return 1-3 people who would have buying authority for janitorial/cleaning service contracts. Priority roles: Owner, COO, VP/Director of Facilities, Asset Manager, Operations Manager. For each: full name, current title, LinkedIn URL if findable, professional email if findable. Numbered list, no preamble.
+Find decision-makers at {company_name}{city_phrase}{description_phrase}{owner_phrase}. Return 1-3 people who would have buying authority for janitorial/cleaning service contracts. Priority roles: Owner, COO, VP/Director of Facilities, Asset Manager, Operations Manager. For each: full name, current title, LinkedIn URL if findable, professional email if findable. Numbered list, no preamble.
 ```
 
 Where:
 - `city_phrase` = ` ({city})` if city is set, else `""`
 - `description_phrase` = ` — {description}` if description is set, else `""`
+- `owner_phrase` = ` (note: the property's recorded owner per Maricopa County records is "{owner_entity}" — this may be a holding LLC distinct from the operating company)` if `owner_entity` is set, else `""`
 
 ### 4. Submit
 

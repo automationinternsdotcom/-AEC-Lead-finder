@@ -96,48 +96,87 @@ Continue to next article.
 
 ### 2d. Enrich the lead
 
-Two enrichment paths — pick based on env config:
+The enrichment order: **cache → Apollo (if configured) OR Grok with optional Assessor hint → cache the result.**
+
+#### Cache check (always first)
 
 ```bash
-if [ -n "$APOLLO_API_KEY" ]; then
-  ENRICH_VIA=apollo
-else
-  ENRICH_VIA=grok
+COMPANY=$(echo '<extracted_json>' | jq -r '.company_name')
+uv run python -m pipeline.cli.cache_lookup "$COMPANY" > /tmp/lead.json
+if [ "$(cat /tmp/lead.json | tr -d '[:space:]')" != "null" ]; then
+  echo "Cache hit for $COMPANY — skipping external enrichment"
+  # Skip to 2e (push) — /tmp/lead.json already contains the cached Lead
 fi
 ```
+
+If `/tmp/lead.json` is not `null`, skip ahead to 2e.
+
+#### Maricopa Assessor hint (when address is present)
+
+Aether is AZ-CRE, so most acquisition / development articles include a Maricopa-area property address. The Assessor returns the **legally-recorded owning entity** — often a holding LLC distinct from the operating company in the article. Used as an extra hint for the Grok query downstream.
+
+```bash
+ADDRESS=$(echo '<extracted_json>' | jq -r '.address // empty')
+if [ -n "$ADDRESS" ]; then
+  uv run python -m pipeline.cli.assessor_lookup "$ADDRESS" > /tmp/assessor.json
+  OWNER_HINT=$(jq -r '.owner // empty' /tmp/assessor.json)
+else
+  OWNER_HINT=""
+fi
+```
+
+The Assessor short-circuits non-Maricopa cities (Tucson, Flagstaff, etc.) with no HTTP request.
 
 #### Apollo path (when `APOLLO_API_KEY` is set)
 
 ```bash
 DOMAIN=$(echo '<extracted_json>' | jq -r '.company_domain_guess // empty')
-if [ -n "$DOMAIN" ]; then
+if [ -n "$APOLLO_API_KEY" ] && [ -n "$DOMAIN" ]; then
   uv run python -m pipeline.cli.enrich "$DOMAIN" > /tmp/lead.json
-else
-  echo 'null' > /tmp/lead.json
+  ENRICH_VIA=apollo
 fi
 ```
 
 #### Grok path (default — uses Claude in Chrome + SuperGrok)
 
-**One-time setup per run (first article only):** confirm the Claude-in-Chrome tab is open at `grok.com`, logged in as the user, with **Fast mode** selected. If not, set it up before continuing.
+**One-time setup per run (first article only):** confirm the Claude-in-Chrome tab is open at `grok.com`, logged in as the user, with **Fast mode** selected.
 
 **Per article:** dispatch a subagent following `skill/grok_enricher.md` with these inputs:
 
 - `company_name` — from `<extracted_json>.company_name`
 - `city` — from `<extracted_json>.city` (or null)
 - `description` — short paraphrase using `<extracted_json>.property_type` (e.g. `"multifamily property management"`)
+- `owner_entity` — `$OWNER_HINT` from the Assessor step (or null if unset)
 - `tab_id` — the Chrome tab ID from `tabs_context_mcp`
 
 The subagent returns one of:
 
 - `{"company_name": "...", "lead": {<Lead JSON>}}` — success
-- `{"company_name": "...", "lead": null}` — no decision-maker found → `lead_gap=True` downstream (still create the Pipedrive Lead, just without an attached Person)
+- `{"company_name": "...", "lead": null}` — no decision-maker found → `lead_gap=True` downstream
 - `{"error": "session_invalid", ...}` — re-check the Chrome login, then retry the article
 
 Extract the `lead` field for the push step:
 
 ```bash
 echo '<subagent_output>' | jq '.lead' > /tmp/lead.json
+ENRICH_VIA=grok
+```
+
+#### Cache the successful enrichment
+
+```bash
+if [ "$(cat /tmp/lead.json | tr -d '[:space:]')" != "null" ]; then
+  uv run python <<PYEOF
+from pipeline import db
+from pipeline.enrich import Lead
+import json, sys
+conn = db.connect()
+lead = Lead(**json.load(open('/tmp/lead.json')))
+db.cache_enrichment(conn, "$COMPANY", lead, source="${ENRICH_VIA:-grok}")
+conn.commit()
+conn.close()
+PYEOF
+fi
 ```
 
 ### 2e. Push to Pipedrive Leads
