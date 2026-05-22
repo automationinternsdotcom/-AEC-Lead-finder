@@ -128,6 +128,26 @@ def mark_seen_status(conn: sqlite3.Connection, url_hash: str, status: str) -> No
     conn.execute("UPDATE seen_urls SET status=? WHERE url_hash=?", (status, url_hash))
 
 
+def get_unprocessed_urls(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Backlog: seen_urls rows that never reached a terminal state.
+
+    Returns rows with status IN ('new', 'extracted') ordered oldest-first,
+    so the orchestrator's slice-to-max_articles doesn't starve older URLs.
+
+    - 'new'       = recorded by fetch but never extracted (over-sliced on a
+                    prior run, or fetch returned more than max_articles).
+    - 'extracted' = extracted but never pushed (process crashed between
+                    push.sync_to_pipedrive and mark_seen_status('pushed')).
+
+    Terminal states ('pushed', 'filtered', 'failed') are excluded — operators
+    can recover 'failed' rows manually.
+    """
+    return conn.execute(
+        "SELECT url_hash, url, source, title, first_seen_at FROM seen_urls "
+        "WHERE status IN ('new', 'extracted') ORDER BY first_seen_at"
+    ).fetchall()
+
+
 def upsert_article(
     conn: sqlite3.Connection, url_hash: str, extracted_json: str,
     est_value: int | None, lead_gap: bool,
