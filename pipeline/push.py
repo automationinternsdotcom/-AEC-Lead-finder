@@ -188,10 +188,22 @@ def _lead_payload(
 
 
 def _note_body(a: ExtractedArticle, lead: Lead | None, basis: str, url: str) -> str:
-    return "\n".join([
+    """Pipedrive Note body. Uses Aether's brand voice (asset preservation,
+    strategic partner) via the service_angle field — NOT 'cleaning' / 'janitor'
+    language. service_angle should be populated for high/medium priority (which
+    is everything that reaches push since is_qualifying drops low-priority).
+    """
+    lines = [
         a.summary_2sent,
         f"Source: {url}",
-        f"Signal: {a.signal_type} | Property: {a.property_type} | City: {a.city or 'AZ'}",
-        f"Est-value basis: {basis}",
-        f"Lead: {lead.name + ' / ' + lead.title if lead else 'lead_gap'}",
-    ])
+        f"Signal: {a.signal_type} | Property: {a.property_type} | "
+        f"City: {a.city or 'AZ'} | Priority: {a.priority}",
+        f"Filter reason: {a.filter_reason}",
+    ]
+    if a.service_angle:
+        lines.append(f"Aether angle: {a.service_angle}")
+    lines.append(f"Est-value basis: {basis}")
+    lines.append(
+        f"Contact: {lead.name + ' / ' + lead.title if lead else 'lead_gap'}"
+    )
+    return "\n".join(lines)

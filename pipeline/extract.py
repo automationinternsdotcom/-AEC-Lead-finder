@@ -47,8 +47,13 @@ def extract_article_text(url: str, http: httpx.Client) -> str:
 OTHER_MIN_CONFIDENCE = 0.6      # signal_type='other' is noisier; demand more proof
 GENERAL_MIN_CONFIDENCE = 0.5    # baseline LLM confidence floor
 
+# Drop rules apply in order; first match wins. Jordan's protocol assigns
+# priority during extraction (per skill markdown's HIGH/MEDIUM/LOW criteria);
+# anything tagged low gets dropped here. Confidence rules are guardrails for
+# when Claude rates a low-quality article highly anyway.
 DROP_RULES = (
     (lambda a: not a.az_relevant,                                                "not_az"),
+    (lambda a: a.priority == "low",                                              "low_priority"),
     (lambda a: a.signal_type == "other" and a.confidence < OTHER_MIN_CONFIDENCE, "other_low_conf"),
     (lambda a: a.confidence < GENERAL_MIN_CONFIDENCE,                            "low_conf"),
 )

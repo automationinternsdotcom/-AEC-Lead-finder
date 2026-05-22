@@ -58,6 +58,8 @@ class TestIsQualifying(unittest.TestCase):
             address=None, city="Tempe", square_footage=None,
             dollar_value=None, unit_count=None,
             az_relevant=True, confidence=0.7,
+            priority="high", filter_reason="x",
+            service_angle="x",
         )
         base.update(overrides)
         return ExtractedArticle.model_validate(base)
@@ -84,6 +86,26 @@ class TestIsQualifying(unittest.TestCase):
         self.assertFalse(passes)
         self.assertEqual(reason, "low_conf")
 
+    def test_drops_low_priority(self):
+        """Jordan's protocol: low-priority articles (macro commentary, mortgage
+        news, rankings, etc.) should never reach Pipedrive even if Claude
+        rated them confidently."""
+        passes, reason = extract.is_qualifying(self._article(priority="low"))
+        self.assertFalse(passes)
+        self.assertEqual(reason, "low_priority")
+
+    def test_passes_medium_priority(self):
+        passes, _ = extract.is_qualifying(self._article(priority="medium"))
+        self.assertTrue(passes)
+
+    def test_not_az_beats_low_priority_in_reason(self):
+        """When both rules would fire, not_az wins (it's first in DROP_RULES)."""
+        passes, reason = extract.is_qualifying(
+            self._article(az_relevant=False, priority="low")
+        )
+        self.assertFalse(passes)
+        self.assertEqual(reason, "not_az")
+
 
 class TestEstimateDealSize(unittest.TestCase):
     def _article(self, **overrides):
@@ -95,6 +117,8 @@ class TestEstimateDealSize(unittest.TestCase):
             address=None, city="Tempe", square_footage=None,
             dollar_value=None, unit_count=None,
             az_relevant=True, confidence=0.7,
+            priority="high", filter_reason="x",
+            service_angle="x",
         )
         base.update(overrides)
         return ExtractedArticle.model_validate(base)

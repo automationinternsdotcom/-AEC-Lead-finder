@@ -42,6 +42,7 @@ def _article(**overrides):
         "address": None, "city": "Tempe", "square_footage": None,
         "dollar_value": None, "unit_count": None,
         "az_relevant": True, "confidence": 0.7,
+        "priority": "high", "filter_reason": "x", "service_angle": "x",
     }
     base.update(overrides)
     return ExtractedArticle.model_validate(base)

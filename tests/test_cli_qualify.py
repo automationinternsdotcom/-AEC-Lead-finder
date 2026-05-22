@@ -18,6 +18,7 @@ def _article_json(**overrides) -> str:
         "address": None, "city": "Tempe", "square_footage": None,
         "dollar_value": None, "unit_count": None,
         "az_relevant": True, "confidence": 0.7,
+        "priority": "high", "filter_reason": "x", "service_angle": "x",
     }
     base.update(overrides)
     return json.dumps(base)
@@ -35,6 +36,16 @@ class TestQualifyCli(unittest.TestCase):
             rc = qualify_cli.main()
         self.assertEqual(rc, 1)
         self.assertIn("not_az", stderr.getvalue())
+
+    def test_exit_1_with_reason_when_low_priority(self):
+        """Jordan's protocol: low-priority (macro commentary etc.) drops here."""
+        with patch("sys.stdin",
+                   io.StringIO(_article_json(priority="low",
+                                             service_angle=None))), \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            rc = qualify_cli.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("low_priority", stderr.getvalue())
 
     def test_exit_1_with_reason_when_low_confidence(self):
         with patch("sys.stdin", io.StringIO(_article_json(confidence=0.3))), \
