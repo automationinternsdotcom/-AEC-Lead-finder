@@ -6,8 +6,9 @@ on:
   #   - cron: '0 14 * * *'  # 07:00 Arizona (UTC-7 year-round, AZ has no DST)
   workflow_dispatch:
 
+# `contents: read` is enough — db.sqlite state lives in actions/cache, not git.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   run:
@@ -24,6 +25,19 @@ jobs:
       - name: Sync deps
         run: uv sync
 
+      # State persistence. Unique key per run so save always happens; restore-keys
+      # falls back to the most recent prior cache. GH Actions cache has a 7-day
+      # idle TTL — if the pipeline doesn't run for > 7 days, state is lost and
+      # the pipeline rediscovers URLs from scratch. For longer pauses or
+      # cross-fork persistence, migrate to S3 / Turso / Supabase.
+      - name: Restore db.sqlite from cache
+        uses: actions/cache@v4
+        with:
+          path: db.sqlite
+          key: db-sqlite-${{ github.run_id }}
+          restore-keys: |
+            db-sqlite-
+
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -33,11 +47,3 @@ jobs:
           PIPEDRIVE_PIPELINE_ID: ${{ secrets.PIPEDRIVE_PIPELINE_ID }}
           PIPEDRIVE_STAGE_ID: ${{ secrets.PIPEDRIVE_STAGE_ID }}
         run: uv run python main.py
-
-      - name: Commit db.sqlite back
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add db.sqlite
-          git diff --cached --quiet || git commit -m "daily run $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push

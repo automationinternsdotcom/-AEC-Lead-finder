@@ -24,4 +24,8 @@ Thumbs.db
 credentials.json
 client_secret_*.json
 
-# NOTE: db.sqlite is intentionally NOT ignored — committed back each run (§4)
+# DB state — persisted via actions/cache, not git.
+# Long-term: migrate to S3 / Turso / Supabase if 7-day cache TTL becomes a problem.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
