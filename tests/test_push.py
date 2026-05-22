@@ -13,11 +13,12 @@ from pipeline import config, push
 def _settings() -> config.Settings:
     return config.Settings(
         anthropic_api_key="test-anthropic",
-        apollo_api_key="test-apollo",
         pipedrive_api_token="test-pd-token",
         pipedrive_domain="test-co",
         pipedrive_pipeline_id=4,
         pipedrive_stage_id=20,
+        pipedrive_field_article_url="test-field-key",
+        apollo_api_key="test-apollo",
     )
 
 
