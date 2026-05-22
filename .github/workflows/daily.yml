@@ -1,0 +1,43 @@
+name: daily-leads
+
+on:
+  # Schedule enabled Mon 5/25 per build sequence §13. Until then, manual only.
+  # schedule:
+  #   - cron: '0 14 * * *'  # 07:00 Arizona (UTC-7 year-round, AZ has no DST)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync deps
+        run: uv sync
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          PIPEDRIVE_DOMAIN: ${{ secrets.PIPEDRIVE_DOMAIN }}
+          PIPEDRIVE_PIPELINE_ID: ${{ secrets.PIPEDRIVE_PIPELINE_ID }}
+          PIPEDRIVE_STAGE_ID: ${{ secrets.PIPEDRIVE_STAGE_ID }}
+        run: uv run python main.py
+
+      - name: Commit db.sqlite back
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add db.sqlite
+          git diff --cached --quiet || git commit -m "daily run $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push

@@ -1,0 +1,71 @@
+"""Env + YAML config loader. One Settings instance per process via lru_cache.
+
+Reuses: python-dotenv, pyyaml, dataclass, functools.lru_cache.
+Extend: add a field to Settings, then add one `need()`/`env.get()` line in settings().
+Required env vars are listed in .env.example.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCES_YAML = ROOT / "sources.yaml"
+RATES_YAML = ROOT / "rates.yaml"
+
+# Static defaults — change in code, not via env.
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+HTTP_TIMEOUT_SEC = 15
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    anthropic_api_key: str
+    apollo_api_key: str
+    pipedrive_api_token: str
+    pipedrive_domain: str
+    pipedrive_pipeline_id: int
+    pipedrive_stage_id: int
+    dry_run: bool = False
+    max_articles_per_run: int = 50
+    log_level: str = "INFO"
+
+
+@lru_cache(maxsize=1)
+def settings() -> Settings:
+    """Load .env once and freeze a Settings instance for the process lifetime."""
+    load_dotenv(ROOT / ".env", override=False)
+    env = os.environ
+
+    def need(key: str) -> str:
+        v = env.get(key)
+        if not v:
+            raise RuntimeError(f"Missing required env var: {key}")
+        return v
+
+    return Settings(
+        anthropic_api_key=need("ANTHROPIC_API_KEY"),
+        apollo_api_key=need("APOLLO_API_KEY"),
+        pipedrive_api_token=need("PIPEDRIVE_API_TOKEN"),
+        pipedrive_domain=need("PIPEDRIVE_DOMAIN"),
+        pipedrive_pipeline_id=int(need("PIPEDRIVE_PIPELINE_ID")),
+        pipedrive_stage_id=int(need("PIPEDRIVE_STAGE_ID")),
+        dry_run=env.get("DRY_RUN", "0") == "1",
+        max_articles_per_run=int(env.get("MAX_ARTICLES_PER_RUN") or 50),
+        log_level=env.get("LOG_LEVEL", "INFO"),
+    )
+
+
+def load_sources() -> list[dict]:
+    """sources.yaml → list of {name, method, endpoint, enabled} dicts."""
+    return yaml.safe_load(SOURCES_YAML.read_text(encoding="utf-8")) or []
+
+
+def load_rates() -> dict[str, float]:
+    """rates.yaml → {property_type: $/sqft/month or $/unit/month for multifamily}."""
+    return yaml.safe_load(RATES_YAML.read_text(encoding="utf-8")) or {}

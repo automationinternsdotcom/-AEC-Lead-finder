@@ -1,0 +1,102 @@
+# Lead discovery sources. Two strategies in use:
+#
+#   method: rss          → direct publication feed (high precision, narrow set)
+#   method: google_news  → Google News search-as-RSS (broad recall, mixed quality)
+#                          endpoint is the search query, e.g. "Arizona commercial real estate when:30d"
+#                          fetch.py builds the actual URL via build_google_news_url()
+#
+# All entries start disabled — flip enabled:true once verified by scripts/audit_sources.py.
+
+# ──── Google News search RSS (ported from legacy skill/fetch_feeds.py) ────
+
+- name: google_news_az_cre
+  method: google_news
+  endpoint: "Arizona commercial real estate when:30d"
+  enabled: true
+
+- name: google_news_phoenix_dev
+  method: google_news
+  endpoint: "Phoenix office industrial retail development when:30d"
+  enabled: true
+
+- name: google_news_tucson_cre
+  method: google_news
+  endpoint: "Tucson commercial real estate development when:30d"
+  enabled: true
+
+# ──── Tier-1 publication RSS feeds (per implementation plan §8) ────
+
+- name: bisnow_phoenix
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: azbigmedia_commercial_re
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: azbigmedia_site_selection
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: azbex
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizona_commerce_authority
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: abc15_business
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizona_daily_star_tucson_business
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizona_digital_free_press
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizona_progress_gazette
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: azbigmedia_azre
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: business_facilities_southwest
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizcc_blog
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: avison_young_phoenix
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: buildcentral_blog
+  method: rss
+  endpoint: TODO
+  enabled: false
+
+- name: arizona_multihousing_association
+  method: rss
+  endpoint: TODO
+  enabled: false
