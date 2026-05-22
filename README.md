@@ -46,6 +46,23 @@ curl "https://<domain>.pipedrive.com/api/v1/dealFields?api_token=<token>" \
 
 (You can also use `/leadFields` — same hash either way.)
 
+### 2.5 Configure enrichment (choose one)
+
+The pipeline enriches qualifying leads with decision-maker contact info. Two paths:
+
+**Path A: SuperGrok via Claude in Chrome (default — no extra API costs)**
+
+- Open SuperGrok ([grok.com](https://grok.com)) in Chrome with the [Claude in Chrome](https://www.anthropic.com/news/claude-in-chrome) extension active.
+- Log in to your SuperGrok account.
+- Verify **Fast** mode is selected in the chat input (not Heavy / Expert / Auto). Heavy mode takes 5+ minutes per query and blows the daily time budget.
+- The daily routine's enricher subagent (`skill/grok_enricher.md`) drives the session per-article via Chrome MCP. ~6-10s per query.
+
+**Path B: Apollo.io API (set `APOLLO_API_KEY` in `.env`)**
+
+- Requires an Apollo subscription (~$99/mo+).
+- When `APOLLO_API_KEY` is set in your env, the routine uses Apollo and skips Grok entirely.
+- Useful for headless CI or environments without an active Chrome session.
+
 ### 3. Recommend: set up a saved Leads view for Jordan
 
 In the Pipedrive UI, open **Leads Inbox**, click **+ Add filter**, and save a filter like `Article URL is not empty` named **"Aether Article Leads"**. Configure the visible columns: Title, Organization, Value, Article URL, Labels, Created, Owner. This gives Jordan a single-click daily review surface — and avoids the "902 unreviewed leads" graveyard scenario.

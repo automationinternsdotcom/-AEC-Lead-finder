@@ -94,7 +94,19 @@ uv run python -m pipeline.cli.mark "$URL_HASH" filtered
 ```
 Continue to next article.
 
-### 2d. Enrich (optional — only if a domain is present)
+### 2d. Enrich the lead
+
+Two enrichment paths — pick based on env config:
+
+```bash
+if [ -n "$APOLLO_API_KEY" ]; then
+  ENRICH_VIA=apollo
+else
+  ENRICH_VIA=grok
+fi
+```
+
+#### Apollo path (when `APOLLO_API_KEY` is set)
 
 ```bash
 DOMAIN=$(echo '<extracted_json>' | jq -r '.company_domain_guess // empty')
@@ -103,6 +115,29 @@ if [ -n "$DOMAIN" ]; then
 else
   echo 'null' > /tmp/lead.json
 fi
+```
+
+#### Grok path (default — uses Claude in Chrome + SuperGrok)
+
+**One-time setup per run (first article only):** confirm the Claude-in-Chrome tab is open at `grok.com`, logged in as the user, with **Fast mode** selected. If not, set it up before continuing.
+
+**Per article:** dispatch a subagent following `skill/grok_enricher.md` with these inputs:
+
+- `company_name` — from `<extracted_json>.company_name`
+- `city` — from `<extracted_json>.city` (or null)
+- `description` — short paraphrase using `<extracted_json>.property_type` (e.g. `"multifamily property management"`)
+- `tab_id` — the Chrome tab ID from `tabs_context_mcp`
+
+The subagent returns one of:
+
+- `{"company_name": "...", "lead": {<Lead JSON>}}` — success
+- `{"company_name": "...", "lead": null}` — no decision-maker found → `lead_gap=True` downstream (still create the Pipedrive Lead, just without an attached Person)
+- `{"error": "session_invalid", ...}` — re-check the Chrome login, then retry the article
+
+Extract the `lead` field for the push step:
+
+```bash
+echo '<subagent_output>' | jq '.lead' > /tmp/lead.json
 ```
 
 ### 2e. Push to Pipedrive Leads
