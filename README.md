@@ -1,113 +1,101 @@
-# Aether CRE Lead Finder (Claude Skill)
+# Aether CRE Lead Pipeline
 
-A Claude Code skill that scrapes Arizona commercial real estate news, scores each story for cleaning/facility service opportunity using AI judgment, and writes ranked leads to Google Sheets.
+A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies leads, optionally enriches them with decision-maker contact info via Apollo, and pushes qualified deals into Pipedrive. A Claude Code session reads `skill/aether_daily_routine.md` and drives the pipeline step by step.
 
-**Client:** Jordan Whitehurst, Aether Facility Services (Phoenix, AZ)
+**Client:** Jordan Whitehurst, Aether Facility Services
 
-## How It Works
+## Architecture
 
-1. **`fetch_feeds.py`** fetches 3 Google News RSS feeds in parallel (~1-2 seconds, stdlib Python, no dependencies)
-2. **Claude scores** each article against Jordan's domain criteria (new tenants, renovations, business openings, property manager changes, etc.)
-3. **Results written** to two Google Sheets tabs via `gog` CLI:
-   - **Leads** - filtered, scored, and enriched with contact info
-   - **Feed History** - full audit log of every article seen, with filter reasons
+Six stdlib CLI sub-tools, each reading from stdin or arguments and writing JSON to stdout:
+
+```
+pipeline.cli.fetch    — discover new article URLs via Google News + RSS; filters against seen_urls (SQLite)
+pipeline.cli.extract  — fetch + clean article text for a single URL
+pipeline.cli.qualify  — gate: pass only Arizona CRE signals above confidence threshold
+pipeline.cli.enrich   — Apollo people lookup by company domain (optional)
+pipeline.cli.push     — create Pipedrive org + deal; dedup on Article URL custom field
+pipeline.cli.mark     — record URL state in seen_urls (pushed / filtered / failed)
+```
+
+Claude orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive deals is the secondary dedup gate.
+
+No GHA workflow. No Anthropic SDK. No remote scheduled job — execution is local.
 
 ## Setup
 
-### 1. Install the skill
-
-Copy the `skill/` directory contents to `~/.claude/skills/aether-leads/`:
+### 1. Clone and install dependencies
 
 ```bash
-mkdir -p ~/.claude/skills/aether-leads
-cp skill/SKILL.md skill/fetch_feeds.py skill/setup_sheets.py ~/.claude/skills/aether-leads/
+git clone <repo-url>
+cd aether-cre-lead-pipeline
+uv sync   # installs Python 3.12 + all deps
 ```
 
-### 2. Install and authenticate gog CLI
+### 2. Configure Pipedrive
+
+In your Pipedrive account:
+
+1. Create a pipeline named **"Aether Article Sources"** with stages: New, Reviewing, Pursuing, Discarded.
+2. Add a custom field named **"Article URL"** of type Text on the Deal entity.
+3. Capture the pipeline ID, stage ID, and field key:
 
 ```bash
-brew install pterm/tap/gog
+# Pipeline and stage IDs
+curl "https://<domain>.pipedrive.com/api/v1/pipelines?api_token=<token>" | jq '.data[] | {id, name}'
+curl "https://<domain>.pipedrive.com/api/v1/stages?api_token=<token>" | jq '.data[] | {id, name, pipeline_id}'
+
+# Article URL field key (looks like a hash, e.g. abc123def...)
+curl "https://<domain>.pipedrive.com/api/v1/dealFields?api_token=<token>" \
+  | jq '.data[] | select(.name=="Article URL")'
 ```
 
-Set up Google Cloud OAuth credentials (one-time):
-1. Create a Google Cloud project at https://console.cloud.google.com
-2. Enable the Google Sheets API
-3. Create OAuth 2.0 Desktop credentials
-4. Download the JSON and run: `gog auth credentials set --file <path-to-json>`
-5. Add your email as a test user in the OAuth consent screen
-6. Authenticate: `GOG_KEYRING_PASSWORD=aether gog login <your-email>`
-
-### 3. Set up the Google Sheet tabs
+### 3. Create your env file
 
 ```bash
-GOG_KEYRING_PASSWORD=aether python3 ~/.claude/skills/aether-leads/setup_sheets.py
+cp .env.example ~/.aether-pipedrive.env
+chmod 600 ~/.aether-pipedrive.env
+# Edit and fill in real values
 ```
 
-This creates the "Leads" and "Feed History" tabs in the target spreadsheet.
+### 4. Verify setup
 
-### 4. Run
+```bash
+source ~/.aether-pipedrive.env
+env | grep -E '^PIPEDRIVE_' | wc -l   # should print 5
+```
 
-In Claude Code, say any of:
-- "run aether leads"
-- "CRE leads"
-- "aether pipeline"
-- "Jordan's leads"
+## How to Run
 
-## Output
+The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Claude Code session in the repo root and trigger it one of two ways:
 
-### Leads tab
+### Option A: Interactive via `/loop` in a Claude Code session
 
-Top 20-25 scored leads with columns:
+Open a Claude Code session in the repo directory and run:
 
-| Column | Description |
-|--------|-------------|
-| Article | Hyperlinked article title |
-| Date Posted | Publication date |
-| Deal Size | Estimated property/deal value (if available) |
-| Score | 0-100 opportunity score |
-| Priority | HIGH (70-100), MEDIUM (40-69), LOW (<40) |
-| Filter Reason | Why this article scored the way it did |
-| Lead 1-3 | Specific contact names with titles and companies |
-| Lead 1-3 Source | Google/LinkedIn search queries to find/verify each contact |
-| Service Angle | One-sentence pitch using Aether's brand voice |
+```
+/loop 24h follow skill/aether_daily_routine.md
+```
 
-### Feed History tab
+Claude will re-execute the pipeline every 24 hours while the session stays open. This is the easiest option for development and testing.
 
-Full audit log of every article from every run:
+### Option B: Local cron via `claude code --headless`
 
-| Column | Description |
-|--------|-------------|
-| Run Date | When the pipeline ran |
-| Article | Hyperlinked article title |
-| Date Posted | Publication date |
-| Source Feed | Which RSS feed (az-cre, phoenix-dev, tucson-cre) |
-| Score | Assigned score |
-| Priority | HIGH/MEDIUM/LOW |
-| Filter Reason | Why it was included or excluded |
-| Included in Leads | Yes/No |
+Add a crontab entry to run the pipeline autonomously:
 
-## Scoring Criteria
+```
+0 7 * * * cd /path/to/repo && source ~/.aether-pipedrive.env && claude code --headless 'follow skill/aether_daily_routine.md'
+```
 
-**HIGH (70-100):** New tenant occupancy, lease signings, renovations, construction completions, new business openings, property management changes, major expansions, multifamily lease-up, HOA stand-ups
+This runs at 7am daily. The machine must be on at that time. The exact `claude code --headless` invocation is approximate — verify against current Claude Code CLI docs.
 
-**MEDIUM (40-69):** Land acquisitions, industrial/warehouse deals, general commercial transactions
+## Testing
 
-**LOW (<40):** Market commentary, rate news, editorials, residential consumer stories, out-of-state mentions
+```bash
+uv run python -m unittest discover tests -v
+```
 
-## Contact Enrichment
+Currently 40 tests covering the CLI tools and helper modules.
 
-Claude provides best-guess leads based on article context (names, titles, companies, LinkedIn search queries). For verified contact info (emails, phone numbers, direct LinkedIn profiles), a dedicated enrichment step is recommended:
-- Grok (current best option for quick enrichment)
-- Apollo.io, Vayne.io, or LinkedIn Sales Navigator (for production-grade lead finding)
+## Status
 
-## Architecture Decision
-
-This is intentionally a Claude Code skill rather than a standalone Python application. Claude IS the scoring engine, so there's no need to call the Claude API from Python. The skill approach is lower maintenance, has no API costs (covered by Claude subscription), and keeps the scoring logic in natural language where it's easy to adjust.
-
-Python components:
-- `fetch_feeds.py` - parallel RSS fetching (stdlib, no dependencies)
-- `setup_sheets.py` - one-time tab creation via Sheets API
-
-## Sheet
-
-https://docs.google.com/spreadsheets/d/1DM5qOV3mfPcVbgx_Fj3gVEKS_PPYtAsinIu9Zg5Oxy4/edit
+POC, not production. See [docs/superpowers/plans/2026-05-21-claude-routine-refactor.md](docs/superpowers/plans/2026-05-21-claude-routine-refactor.md) for the refactor that produced this architecture.
