@@ -53,7 +53,16 @@ class PipedriveClient:
         if resp.status_code in (401, 403):
             raise PipedriveError(f"auth failed: {resp.status_code} on {path}")
         resp.raise_for_status()
-        return resp.json().get("data") or {}
+        payload = resp.json()
+        # Pipedrive returns HTTP 200 with {"success": false, "error": "..."}
+        # on validation failures. Without this check, search_id/post silently
+        # drop the call and post_id crashes downstream with KeyError('id').
+        if payload.get("success") is False:
+            raise PipedriveError(
+                f"{method} {path} success:false — "
+                f"{payload.get('error') or payload.get('error_info') or payload}"
+            )
+        return payload.get("data") or {}
 
     def search_id(self, resource: str, **params) -> int | None:
         """GET {resource}/search → first hit's id, or None."""
