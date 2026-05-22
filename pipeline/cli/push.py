@@ -1,6 +1,11 @@
 """`python -m pipeline.cli.push` (stdin JSON) — create Pipedrive Lead, print result.
 
-Input:  {"article": <ExtractedArticle>, "lead": <Lead | null>, "url": "..."}
+Input:  {
+  "article": <ExtractedArticle>,
+  "lead": <Lead | null>,
+  "url": "...",
+  "extra_contacts": [<Lead>, <Lead>]   # optional — fills Lead 2 / Lead 3 fields
+}
 Output: {"lead_id": <uuid-str>, "org_id": <int | null>,
          "person_id": <int | null>, "skipped": <bool>}
 """
@@ -18,6 +23,8 @@ def main() -> int:
     article = ExtractedArticle.model_validate(raw["article"])
     lead_dict = raw.get("lead")
     lead = enrich.Lead(**lead_dict) if lead_dict else None
+    extra_raw = raw.get("extra_contacts") or []
+    extras = [enrich.Lead(**c) for c in extra_raw] if extra_raw else None
     url = raw["url"]
 
     settings = config.settings()
@@ -26,6 +33,7 @@ def main() -> int:
 
     org_id, person_id, lead_id = push.sync_to_pipedrive(
         article, lead, est_value, basis, url, settings,
+        extra_contacts=extras,
     )
     skipped = org_id is None  # sync returns (None, None, existing_uuid) on dedup hit
     json.dump({

@@ -35,13 +35,13 @@ class FlaggedLead:
 def get_not_relevant_label_id(http: httpx.Client) -> str | None:
     """Look up the UUID of the NOT RELEVANT Lead label, or None if absent.
 
-    Returns None (rather than raising) when the label doesn't exist — that
-    just means Jordan hasn't created it yet. The caller surfaces a friendly
-    'create the label first' message instead of crashing.
+    Returns None when the label doesn't exist (200 + label not in list) — the
+    common case before Jordan creates it. Raises on non-200 (auth, network,
+    Pipedrive outage) so the operator doesn't misread an API failure as
+    "label not found."
     """
     resp = http.get("leadLabels")
-    if resp.status_code != 200:
-        return None
+    resp.raise_for_status()
     labels = (resp.json().get("data") or [])
     target = NOT_RELEVANT_LABEL_NAME.lower()
     for label in labels:
@@ -50,21 +50,42 @@ def get_not_relevant_label_id(http: httpx.Client) -> str | None:
     return None
 
 
+# Pipedrive's v1 paginates Leads via start/limit + an
+# additional_data.pagination.more_items_in_collection / next_start cursor.
+# 500 is the v1 max page size.
+_LEADS_PAGE_SIZE = 500
+
+
 def list_flagged_leads(
     http: httpx.Client, label_id: str, article_url_field_key: str,
 ) -> list[FlaggedLead]:
-    """Fetch all Leads currently tagged with the given label.
+    """Fetch all Leads currently tagged with the given label, across all pages.
 
-    Note: Pipedrive's /leads?label_id=... returns ALL leads with that label
-    (not just newly-tagged). The routine should de-dup against its own
-    log of previously-surfaced flags if it wants a 'since last run' view —
-    this module returns the raw current state.
+    Pipedrive's v1 `/leads?label_id=...` filter is silently ignored — the
+    endpoint returns ALL leads regardless. We post-filter by checking each
+    lead's `label_ids` array against the target id. (Verified 2026-05-22:
+    filter param has no effect.)
+
+    Paginates until `additional_data.pagination.more_items_in_collection` is
+    false. Necessary because the underlying /leads endpoint returns *all*
+    leads (not just label-matching ones), so once Jordan's pipeline reaches
+    the first page boundary, earlier flags would silently drop without this.
     """
-    resp = http.get("leads", params={"label_id": label_id, "limit": 500})
-    if resp.status_code != 200:
-        return []
-    data = resp.json().get("data") or []  # Pipedrive returns null when empty
-    return [_to_flagged(d, article_url_field_key) for d in data]
+    flagged: list[dict] = []
+    start = 0
+    while True:
+        resp = http.get("leads", params={"limit": _LEADS_PAGE_SIZE, "start": start})
+        resp.raise_for_status()
+        body = resp.json()
+        data = body.get("data") or []  # Pipedrive returns null when empty
+        flagged.extend(d for d in data if label_id in (d.get("label_ids") or []))
+        pagination = (body.get("additional_data") or {}).get("pagination") or {}
+        if not pagination.get("more_items_in_collection"):
+            break
+        start = pagination.get("next_start")
+        if start is None:  # defensive — shouldn't happen if more_items_in_collection is True
+            break
+    return [_to_flagged(d, article_url_field_key) for d in flagged]
 
 
 def _to_flagged(d: dict[str, Any], article_url_field_key: str) -> FlaggedLead:

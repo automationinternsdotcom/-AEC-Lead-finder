@@ -288,15 +288,140 @@ class TestLeadPayload(unittest.TestCase):
         self.assertNotIn("org_id", payload)
 
 
+class TestArticleTitleAndExtraFields(unittest.TestCase):
+    """Lead title = article headline; Date Posted + Lead 1/2/3 populated when
+    field hashes are configured, silently skipped when blank."""
+
+    def _settings_with_extras(self) -> config.Settings:
+        return config.Settings(
+            pipedrive_api_token="t", pipedrive_domain="d",
+            pipedrive_field_article_url="art-url-hash",
+            pipedrive_field_date_posted="date-hash",
+            pipedrive_field_lead_1="l1-hash",
+            pipedrive_field_lead_2="l2-hash",
+            pipedrive_field_lead_3="l3-hash",
+        )
+
+    def _lead(self, name="Jane Doe", title="VP Ops", email="jane@x.com", phone=None):
+        from pipeline.enrich import Lead
+        return Lead(name=name, title=title, email=email, phone=phone,
+                    linkedin_url=None, seniority="vp", apollo_id="grok")
+
+    def test_lead_title_is_article_headline(self):
+        art = _article(title="Foundation 8 plans $120M redevelopment of Sheraton Crescent")
+        self.assertEqual(
+            push._lead_title(art),
+            "Foundation 8 plans $120M redevelopment of Sheraton Crescent",
+        )
+
+    def test_lead_title_truncated_to_255_chars(self):
+        long_title = "x" * 300
+        art = _article(title=long_title)
+        self.assertEqual(len(push._lead_title(art)), 255)
+
+    def test_lead_payload_includes_date_posted_when_published_date_set(self):
+        art = _article(published_date="2026-05-11")
+        payload = push._lead_payload(
+            art, est_value=None, org_id=1, person_id=None,
+            settings=self._settings_with_extras(), url="https://x.com/a",
+        )
+        self.assertEqual(payload["date-hash"], "2026-05-11")
+
+    def test_lead_payload_omits_date_posted_when_published_date_null(self):
+        art = _article(published_date=None)
+        payload = push._lead_payload(
+            art, est_value=None, org_id=1, person_id=None,
+            settings=self._settings_with_extras(), url="https://x.com/a",
+        )
+        self.assertNotIn("date-hash", payload)
+
+    def test_lead_payload_omits_date_posted_when_field_hash_unset(self):
+        """If PIPEDRIVE_FIELD_DATE_POSTED isn't configured, never write it —
+        we can't guess the hash and a wrong key would 400."""
+        art = _article(published_date="2026-05-11")
+        payload = push._lead_payload(
+            art, est_value=None, org_id=1, person_id=None,
+            settings=_settings(),  # default: no date_posted hash
+            url="https://x.com/a",
+        )
+        # No custom field added beyond article_url
+        self.assertNotIn("date-hash", payload)
+
+    def test_lead_payload_populates_lead_1_2_3_in_order(self):
+        contacts = [
+            self._lead("Alice A", "COO", "alice@x.com"),
+            self._lead("Bob B", "VP Facilities", "bob@x.com"),
+            self._lead("Carol C", "Asset Manager", "carol@x.com"),
+        ]
+        payload = push._lead_payload(
+            _article(), est_value=None, org_id=1, person_id=None,
+            settings=self._settings_with_extras(),
+            url="https://x.com/a", contacts=contacts,
+        )
+        self.assertEqual(payload["l1-hash"], "Alice A | COO | alice@x.com")
+        self.assertEqual(payload["l2-hash"], "Bob B | VP Facilities | bob@x.com")
+        self.assertEqual(payload["l3-hash"], "Carol C | Asset Manager | carol@x.com")
+
+    def test_lead_payload_caps_extra_contacts_at_3(self):
+        # Realistic two-token names so is_lead_generic doesn't filter them.
+        contacts = [self._lead(f"Person {i}A") for i in range(5)]
+        all_contacts = push._all_contacts(None, contacts)
+        self.assertEqual(len(all_contacts), 3)
+
+    def test_all_contacts_filters_generic_placeholders(self):
+        """Defensive filter: even if the enricher passes a "Property Manager"
+        placeholder through, push.py drops it so it never lands in Lead 1/2/3.
+        See pipeline.grok_parse.is_lead_generic for the heuristic."""
+        good = self._lead("Real Person")
+        generic = self._lead("Property Manager")
+        out = push._all_contacts(generic, [good])
+        self.assertEqual([c.name for c in out], ["Real Person"])
+
+    def test_lead_payload_fewer_than_3_contacts_leaves_remaining_blank(self):
+        contacts = [self._lead("Alice A", "COO", "alice@x.com")]
+        payload = push._lead_payload(
+            _article(), est_value=None, org_id=1, person_id=None,
+            settings=self._settings_with_extras(),
+            url="https://x.com/a", contacts=contacts,
+        )
+        self.assertEqual(payload["l1-hash"], "Alice A | COO | alice@x.com")
+        self.assertNotIn("l2-hash", payload)
+        self.assertNotIn("l3-hash", payload)
+
+    def test_fmt_contact_omits_null_parts(self):
+        lead = self._lead(name="Solo", title=None, email=None, phone=None)
+        self.assertEqual(push._fmt_contact(lead), "Solo")
+
+    def test_fmt_contact_includes_phone(self):
+        lead = self._lead(name="Pat", title="Mgr", email=None, phone="480-555-0000")
+        self.assertEqual(push._fmt_contact(lead), "Pat | Mgr | 480-555-0000")
+
+    def test_all_contacts_primary_then_extras(self):
+        """Primary (the email-matching Person) goes first, extras fill the rest."""
+        primary = self._lead("Primary P")
+        extras = [self._lead("Extra E"), self._lead("Other O")]
+        out = push._all_contacts(primary, extras)
+        self.assertEqual([c.name for c in out], ["Primary P", "Extra E", "Other O"])
+
+    def test_all_contacts_empty_when_no_inputs(self):
+        self.assertEqual(push._all_contacts(None, None), [])
+        self.assertEqual(push._all_contacts(None, []), [])
+
+
 class TestFindLeadByUrl(unittest.TestCase):
     def test_returns_uuid_when_found(self):
+        """find_lead_by_url truncates the search term (Pipedrive rejects >255
+        char terms) and post-filters items by exact custom_field URL match."""
         captured = {}
 
         def handler(request):
             captured["url"] = str(request.url)
             return httpx.Response(200, json={
                 "success": True,
-                "data": {"items": [{"item": {"id": "abc-uuid-123"}}]},
+                "data": {"items": [{"item": {
+                    "id": "abc-uuid-123",
+                    "custom_fields": ["https://example.com/x"],
+                }}]},
             })
 
         client = _client_with(handler)
@@ -308,7 +433,24 @@ class TestFindLeadByUrl(unittest.TestCase):
             # Must hit /leads/search (NOT /deals/search) with literal "custom_fields".
             self.assertIn("/leads/search", captured["url"])
             self.assertIn("fields=custom_fields", captured["url"])
-            self.assertIn("exact_match=true", captured["url"])
+        finally:
+            client.__exit__()
+
+    def test_returns_uuid_when_custom_field_is_dict(self):
+        """Pipedrive sometimes wraps each custom_field value in a {value: ...}
+        dict instead of a flat string. Both shapes must match."""
+        def handler(request):
+            return httpx.Response(200, json={
+                "success": True,
+                "data": {"items": [{"item": {
+                    "id": "xyz-uuid",
+                    "custom_fields": [{"value": "https://example.com/x"}],
+                }}]},
+            })
+
+        client = _client_with(handler)
+        try:
+            self.assertEqual(client.find_lead_by_url("https://example.com/x"), "xyz-uuid")
         finally:
             client.__exit__()
 
@@ -325,6 +467,37 @@ class TestFindLeadByUrl(unittest.TestCase):
         finally:
             client.__exit__()
 
+    def test_returns_none_when_item_url_does_not_match(self):
+        """Truncated-prefix collisions in the search index resolve to the
+        full URL — we must NOT count a different URL as a dedup hit."""
+        def handler(request):
+            return httpx.Response(200, json={
+                "success": True,
+                "data": {"items": [{"item": {
+                    "id": "other-uuid",
+                    "custom_fields": ["https://example.com/different"],
+                }}]},
+            })
+
+        client = _client_with(handler)
+        try:
+            self.assertIsNone(client.find_lead_by_url("https://example.com/x"))
+        finally:
+            client.__exit__()
+
+    def test_returns_none_on_400_too_long_term(self):
+        """Pipedrive 400s on overlong terms even after truncation in some
+        edge cases. We tolerate 400 as 'not found' so push proceeds — seen_urls
+        is the primary dedup gate anyway."""
+        def handler(request):
+            return httpx.Response(400, json={"error": "term too long"})
+
+        client = _client_with(handler)
+        try:
+            self.assertIsNone(client.find_lead_by_url("https://example.com/x"))
+        finally:
+            client.__exit__()
+
 
 class TestSyncToPipedriveSkipsWhenLeadExists(unittest.TestCase):
     def test_returns_none_none_existing_uuid_on_dedup_hit(self):
@@ -334,7 +507,10 @@ class TestSyncToPipedriveSkipsWhenLeadExists(unittest.TestCase):
             # Always responds with one match — simulates dedup hit.
             return httpx.Response(200, json={
                 "success": True,
-                "data": {"items": [{"item": {"id": "existing-uuid-xyz"}}]},
+                "data": {"items": [{"item": {
+                    "id": "existing-uuid-xyz",
+                    "custom_fields": ["https://example.com/dup"],
+                }}]},
             })
 
         # Capture the real class so _client_with doesn't recurse when patched.
@@ -342,6 +518,7 @@ class TestSyncToPipedriveSkipsWhenLeadExists(unittest.TestCase):
 
         def make_mock_client(s):
             client = RealClient.__new__(RealClient)
+            client._settings = s
             client._http = httpx.Client(
                 base_url=f"https://{s.pipedrive_domain}.pipedrive.com/api/v1/",
                 params={"api_token": s.pipedrive_api_token},

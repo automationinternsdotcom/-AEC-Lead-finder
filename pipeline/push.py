@@ -40,6 +40,7 @@ class PipedriveClient:
     def __init__(self, settings: Settings):
         # Trailing slash + relative paths: httpx joins per RFC 3986. Absolute
         # paths (leading "/") would REPLACE base_url's /api/v1 — don't do that.
+        self._settings = settings
         self._http = httpx.Client(
             base_url=f"https://{settings.pipedrive_domain}.pipedrive.com/api/v1/",
             timeout=config.HTTP_TIMEOUT_SEC,
@@ -87,27 +88,68 @@ class PipedriveClient:
 
         Pipedrive's /leads/search `fields` param only accepts the literal values
         "custom_fields", "notes", or "title" — it does NOT accept individual
-        custom-field hashes. So we scope to `custom_fields` (all of them); URL
-        strings are unique enough that a cross-field collision is negligible.
+        custom-field hashes. So we scope to `custom_fields` (all of them) and
+        post-filter the hits.
 
         Note: Pipedrive's search index has ~seconds of lag, so a Lead created
         moments earlier may not yet be findable. The orchestrator's SQLite
         seen_urls table is the primary dedup gate; this is the cross-run
         safety net.
+
+        Pipedrive rejects long URL-encoded `term` values with HTTP 400. The
+        raw-string truncation below is aggressive (100 chars) but doesn't
+        precisely target the encoded limit — heavy-escaping URLs may still
+        400, which is why we tolerate 400 as "not found" below. SQLite
+        seen_urls is the primary intra-run dedup gate, so the worst case is
+        a rare duplicate Lead.
+
+        Hit verification: when the configured Article URL custom field is
+        present in the lead's custom_fields, prefer matching against THAT key
+        — guards against a future custom field containing similar URLs being
+        mistaken for a dedup match. Falls back to scanning all custom_field
+        values when the field-keyed lookup misses (covers Pipedrive responses
+        that return custom_fields as a flat list rather than a dict).
         """
-        items = self._req(
-            "GET", "leads/search",
-            params={
-                "term": article_url, "exact_match": "true",
-                "fields": "custom_fields",
-            },
-        ).get("items", [])
-        return items[0]["item"]["id"] if items else None
+        term = article_url[:100]
+        try:
+            items = self._req(
+                "GET", "leads/search",
+                params={
+                    "term": term,
+                    "fields": "custom_fields",
+                },
+            ).get("items", [])
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                return None
+            raise
+        field_key = self._settings.pipedrive_field_article_url
+        for hit in items:
+            item = hit.get("item") or {}
+            cf = item.get("custom_fields")
+            if cf is None:
+                continue
+            # Preferred path: custom_fields is a dict keyed by field hash.
+            if isinstance(cf, dict):
+                v = cf.get(field_key)
+                if v == article_url or (isinstance(v, dict) and v.get("value") == article_url):
+                    return item["id"]
+                continue
+            # Fallback: list shape — scan for the URL value, accept either string
+            # or {value: ...} entry. Doesn't distinguish field origin, but the
+            # list shape doesn't expose field keys to us.
+            for v in cf:
+                if isinstance(v, str) and v == article_url:
+                    return item["id"]
+                if isinstance(v, dict) and v.get("value") == article_url:
+                    return item["id"]
+        return None
 
 
 def sync_to_pipedrive(
     article: ExtractedArticle, lead: Lead | None,
     est_value: int | None, basis: str, url: str, settings: Settings,
+    extra_contacts: list[Lead] | None = None,
 ) -> tuple[int | None, int | None, str]:
     """Upsert org → person → Lead (+ note). Returns (org_id, person_id, lead_id).
 
@@ -118,14 +160,25 @@ def sync_to_pipedrive(
     relies on extract.py producing a non-empty company_name (the
     ExtractedArticle pydantic schema enforces this), so the org upsert always
     succeeds.
+
+    `extra_contacts` (optional) — up to 3 Lead objects to populate the
+    "Lead 1 / Lead 2 / Lead 3" custom fields with `Name | Title | Email | Phone`
+    strings. The first contact in [lead] + extra_contacts becomes Lead 1, etc.
+    Falls back silently when the Lead-1/2/3 field hashes aren't configured.
     """
+    # After filtering, contacts[0] (if any) is the primary used BOTH for the
+    # Person record and the Lead 1 field — keep them consistent so a stray
+    # generic doesn't end up linked as a Person while Lead 1 shows someone else.
+    contacts = _all_contacts(lead, extra_contacts)
+    primary = contacts[0] if contacts else None
     if settings.dry_run:
         util.log_event(
             "dry_run_write", url=url, company=article.company_name,
             lead_title=_lead_title(article), value=est_value or 0,
-            basis=basis, lead=(lead.name if lead else None),
+            basis=basis, lead=(primary.name if primary else None),
+            extra_contact_count=max(0, len(contacts) - 1),
         )
-        return DRY_ORG_ID, (DRY_PERSON_ID if lead else None), DRY_LEAD_ID
+        return DRY_ORG_ID, (DRY_PERSON_ID if primary else None), DRY_LEAD_ID
 
     with PipedriveClient(settings) as pd:
         existing = pd.find_lead_by_url(url)
@@ -133,12 +186,30 @@ def sync_to_pipedrive(
             return None, None, existing
 
         org_id = _upsert_org(pd, article)
-        person_id = _upsert_person(pd, lead, org_id) if lead else None
+        person_id = _upsert_person(pd, primary, org_id) if primary else None
         lead_id = pd.post_id("leads", _lead_payload(
-            article, est_value, org_id, person_id, settings, url,
+            article, est_value, org_id, person_id, settings, url, contacts,
         ))
-        pd.post("notes", {"lead_id": lead_id, "content": _note_body(article, lead, basis, url)})
+        pd.post("notes", {"lead_id": lead_id, "content": _note_body(article, primary, basis, url)})
     return org_id, person_id, lead_id
+
+
+def _all_contacts(primary: Lead | None, extras: list[Lead] | None) -> list[Lead]:
+    """Merge primary + extras, drop None entries. Caps at 3 (Pipedrive has
+    Lead 1/2/3 custom fields).
+
+    Defensively filters out leads whose names look like job-title placeholders
+    rather than specific people — the Grok enricher's skill is supposed to
+    strip these but this is a belt-and-suspenders guard against polluted
+    contact fields ("Property Manager | Property Manager | ...").
+    """
+    from pipeline.grok_parse import is_lead_generic
+    out: list[Lead] = []
+    if primary is not None and not is_lead_generic(primary):
+        out.append(primary)
+    if extras:
+        out.extend(c for c in extras if not is_lead_generic(c))
+    return out[:3]
 
 
 def _upsert_org(pd: PipedriveClient, a: ExtractedArticle) -> int:
@@ -166,12 +237,29 @@ def _upsert_person(pd: PipedriveClient, lead: Lead, org_id: int) -> int:
 
 
 def _lead_title(a: ExtractedArticle) -> str:
-    return f"{a.company_name} — {a.signal_type} — {a.city or 'AZ'}"
+    """Lead title is the news article headline. Trimmed to Pipedrive's
+    255-char varchar limit. Older runs used 'Org — signal — city' but Jordan's
+    daily review surface is the article headline, so we surface that directly."""
+    return a.title[:255]
+
+
+def _fmt_contact(c: Lead) -> str:
+    """`Name | Title | Email | Phone` — joined with ` | `, null parts omitted.
+    Capped at 255 chars (Pipedrive varchar limit)."""
+    parts = [c.name]
+    if c.title:
+        parts.append(c.title)
+    if c.email:
+        parts.append(c.email)
+    if c.phone:
+        parts.append(c.phone)
+    return " | ".join(parts)[:255]
 
 
 def _lead_payload(
     a: ExtractedArticle, est_value: int | None,
     org_id: int, person_id: int | None, settings: Settings, url: str,
+    contacts: list[Lead] | None = None,
 ) -> dict:
     # Lead `value` shape is {amount, currency} dict (Deals use flat
     # value+currency at top level — easy footgun if you copy from Deal code).
@@ -184,6 +272,21 @@ def _lead_payload(
         payload["value"] = {"amount": est_value, "currency": "USD"}
     if person_id is not None:
         payload["person_id"] = person_id
+    if a.published_date and settings.pipedrive_field_date_posted:
+        # Pipedrive date fields want ISO "YYYY-MM-DD" strings; schema stores
+        # this as a datetime.date — convert here.
+        payload[settings.pipedrive_field_date_posted] = a.published_date.isoformat()
+
+    # Lead 1 / 2 / 3 custom fields — only populated if both the contact
+    # exists AND the field hash is configured.
+    lead_field_hashes = (
+        settings.pipedrive_field_lead_1,
+        settings.pipedrive_field_lead_2,
+        settings.pipedrive_field_lead_3,
+    )
+    for c, field in zip(contacts or [], lead_field_hashes):
+        if field:
+            payload[field] = _fmt_contact(c)
     return payload
 
 

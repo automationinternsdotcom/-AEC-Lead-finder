@@ -18,10 +18,14 @@ source ~/.aether-pipedrive.env
 Verify env vars are loaded:
 
 ```bash
-env | grep -E '^PIPEDRIVE_' | wc -l  # Expect 3 (PIPEDRIVE_API_TOKEN, _DOMAIN, _FIELD_ARTICLE_URL)
+# Required: PIPEDRIVE_API_TOKEN, _DOMAIN, _FIELD_ARTICLE_URL — pipeline aborts without all 3.
+env | grep -E '^PIPEDRIVE_(API_TOKEN|DOMAIN|FIELD_ARTICLE_URL)=' | wc -l  # Expect 3
+# Optional but expected for the per-lead contact schema:
+env | grep -E '^PIPEDRIVE_FIELD_(DATE_POSTED|LEAD_[123])=' | wc -l       # Expect 4 — warn if 0
 ```
 
-If you see fewer than 3, stop and report the missing variables.
+If the required count is fewer than 3, stop and report the missing variables.
+If the optional count is 0, warn that Date Posted + Lead 1/2/3 fields won't be populated and the routine will create degraded leads.
 
 ## Step 1: Discover URLs
 
@@ -213,11 +217,26 @@ approach broke Python syntax on names like `Some "Quoted" Co`.)
 
 ### 2e. Push to Pipedrive Leads
 
+The Grok enricher (skill/grok_enricher.md) now returns up to 3 leads as `{"company_name": "...", "leads": [<Lead>, <Lead>, <Lead>]}` — the first becomes the primary (linked Person record), the rest populate the Lead 2 / Lead 3 custom fields.
+
 ```bash
-jq -n --argjson article '<extracted_json>' --slurpfile lead /tmp/lead.json --arg url "$URL" \
-  '{article: $article, lead: $lead[0], url: $url}' \
+# enrich step wrote /tmp/lead.json — either {leads: [...]} or null
+LEADS=$(jq '.leads // []' /tmp/lead.json)   # [] when no enrichment
+PRIMARY=$(echo "$LEADS" | jq '.[0] // null')
+EXTRAS=$(echo "$LEADS" | jq '.[1:]')         # [] when only one or zero
+
+jq -n --argjson article '<extracted_json>' \
+      --argjson lead "$PRIMARY" \
+      --argjson extras "$EXTRAS" \
+      --arg url "$URL" \
+  '{article: $article, lead: $lead, extra_contacts: $extras, url: $url}' \
   | uv run python -m pipeline.cli.push > /tmp/push_result.json
 ```
+
+The push CLI populates:
+- Lead title = `article.title`
+- Date Posted = `article.published_date` (when set, and `PIPEDRIVE_FIELD_DATE_POSTED` configured)
+- Lead 1 / Lead 2 / Lead 3 = `Name | Title | Email | Phone` (when contacts exist + field hashes configured)
 
 Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive Leads (treat as success).
 
