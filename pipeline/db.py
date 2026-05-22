@@ -8,9 +8,13 @@ Schema invariants: all timestamps are utc_now_iso strings; seen_urls.status ∈
 """
 from __future__ import annotations
 
+import dataclasses
+import json
+import re
 import sqlite3
 from pathlib import Path
 
+from pipeline.enrich import Lead
 from pipeline.util import utc_now_iso
 
 DB_PATH = Path(__file__).resolve().parent.parent / "db.sqlite"
@@ -189,12 +193,6 @@ def attach_pipedrive_ids(
 # collapsed) so 'Mark-Taylor Residential LLC' and 'mark taylor residential'
 # resolve to the same row.
 
-import dataclasses as _dataclasses
-import json as _json
-import re as _re
-
-from pipeline.enrich import Lead as _Lead
-
 _BUSINESS_SUFFIXES = (
     "llc", "l.l.c.", "l l c",
     "inc", "inc.", "incorporated",
@@ -204,12 +202,12 @@ _BUSINESS_SUFFIXES = (
     "llp", "l.l.p.",
     "company", "co", "co.",
 )
-_SUFFIX_RE = _re.compile(
-    r"\b(" + "|".join(_re.escape(s) for s in _BUSINESS_SUFFIXES) + r")\b",
-    _re.IGNORECASE,
+_SUFFIX_RE = re.compile(
+    r"\b(" + "|".join(re.escape(s) for s in _BUSINESS_SUFFIXES) + r")\b",
+    re.IGNORECASE,
 )
-_NON_ALNUM = _re.compile(r"[^a-z0-9 ]+")
-_MULTI_SPACE = _re.compile(r"\s+")
+_NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
+_MULTI_SPACE = re.compile(r"\s+")
 
 
 def _normalize_org_name(name: str) -> str:
@@ -228,7 +226,7 @@ def _normalize_org_name(name: str) -> str:
     return s
 
 
-def get_cached_enrichment(conn: sqlite3.Connection, org_name: str) -> _Lead | None:
+def get_cached_enrichment(conn: sqlite3.Connection, org_name: str) -> Lead | None:
     """Return a cached Lead for this org, or None if uncached.
 
     Lookup key is the normalized form, so 'Mark-Taylor Residential LLC' and
@@ -240,11 +238,11 @@ def get_cached_enrichment(conn: sqlite3.Connection, org_name: str) -> _Lead | No
     ).fetchone()
     if row is None:
         return None
-    return _Lead(**_json.loads(row["lead_json"]))
+    return Lead(**json.loads(row["lead_json"]))
 
 
 def cache_enrichment(conn: sqlite3.Connection, org_name: str,
-                     lead: _Lead, source: str) -> None:
+                     lead: Lead, source: str) -> None:
     """Upsert this enrichment into the cache. Newer writes overwrite older ones."""
     conn.execute(
         "INSERT OR REPLACE INTO enriched_orgs "
@@ -252,6 +250,6 @@ def cache_enrichment(conn: sqlite3.Connection, org_name: str,
         "VALUES (?, ?, ?, ?, ?)",
         (
             _normalize_org_name(org_name), org_name,
-            _json.dumps(_dataclasses.asdict(lead)), source, utc_now_iso(),
+            json.dumps(dataclasses.asdict(lead)), source, utc_now_iso(),
         ),
     )

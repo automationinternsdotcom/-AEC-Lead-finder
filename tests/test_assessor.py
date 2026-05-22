@@ -84,18 +84,18 @@ class TestLookupByAddress(unittest.TestCase):
     def test_returns_none_on_token_extraction_failure(self):
         """If we can't find g_token in the search page, give up."""
         http = _mock_http([(200, "<html>no token here</html>")])
-        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix", http))
+        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix AZ", http))
 
     def test_returns_none_on_search_page_http_error(self):
         http = _mock_http([(500, "")])
-        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix", http))
+        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix AZ", http))
 
     def test_returns_none_on_api_http_error(self):
         http = _mock_http([
             (200, _SEARCH_PAGE_HTML),
             (500, ""),
         ])
-        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix", http))
+        self.assertIsNone(assessor.lookup_by_address("100 N Main St, Phoenix AZ", http))
 
     def test_skips_non_maricopa_cities(self):
         """Hardcoded Maricopa city list short-circuits non-Maricopa addresses."""
@@ -109,7 +109,7 @@ class TestLookupByAddress(unittest.TestCase):
             (200, _SEARCH_PAGE_HTML),
             (200, _API_SAMPLE),
         ])
-        assessor.lookup_by_address("100 N Main St, Phoenix", http)
+        assessor.lookup_by_address("100 N Main St, Phoenix AZ", http)
         # Second call was the API call; check its kwargs included headers
         second_call = http.get.call_args_list[1]
         headers = second_call.kwargs.get("headers", {})
@@ -127,10 +127,25 @@ class TestMaricopaCityFilter(unittest.TestCase):
         self.assertTrue(assessor._in_maricopa("123 anything, Queen Creek AZ 85142"))
 
     def test_tucson_rejected(self):
+        # In AZ but not Maricopa County.
         self.assertFalse(assessor._in_maricopa("100 Main St, Tucson AZ"))
 
     def test_flagstaff_rejected(self):
         self.assertFalse(assessor._in_maricopa("Flagstaff"))
+
+    def test_phoenixville_pa_rejected(self):
+        """Regression: 'phoenix' substring inside 'Phoenixville' must not match,
+        AND the non-AZ state suffix must short-circuit the lookup.
+        Previously this returned True and triggered a wasted HTTP request."""
+        self.assertFalse(assessor._in_maricopa("100 Main St, Phoenixville, PA"))
+
+    def test_mesa_verde_co_rejected(self):
+        """'mesa' substring inside 'Mesa Verde' — not in AZ."""
+        self.assertFalse(assessor._in_maricopa("Mesa Verde, CO"))
+
+    def test_phoenix_az_lowercase_compact(self):
+        """Trailing 'AZ' with no comma/space should still be detected."""
+        self.assertTrue(assessor._in_maricopa("Phoenix az"))
 
 
 if __name__ == "__main__":

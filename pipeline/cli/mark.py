@@ -22,8 +22,11 @@ def main() -> int:
         return 2
 
     conn = db.connect()
-    db.mark_seen_status(conn, url_hash, status)
-    conn.commit()
+    try:
+        db.mark_seen_status(conn, url_hash, status)
+        conn.commit()
+    finally:
+        conn.close()
     return 0
 
 

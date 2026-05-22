@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import sys
 
+from pydantic import ValidationError
+
 from pipeline import extract
 from schema import ExtractedArticle
 
@@ -16,7 +18,7 @@ def main() -> int:
     raw = sys.stdin.read()
     try:
         article = ExtractedArticle.model_validate(json.loads(raw))
-    except Exception as e:
+    except (json.JSONDecodeError, ValidationError) as e:
         sys.stderr.write(f"invalid_extracted_article: {e}\n")
         return 2
 

@@ -30,13 +30,27 @@ _MARICOPA_CITIES = frozenset({
     "paradise valley", "apache junction",
 })
 
+# One regex per city with word-boundary anchors — avoids false-positive
+# substring matches like "phoenix" inside "Phoenixville, PA".
+_CITY_PATTERNS = tuple(
+    re.compile(rf"\b{re.escape(c)}\b") for c in _MARICOPA_CITIES
+)
+
 # Token line from the search page: var g_token = '...';
 _TOKEN_RE = re.compile(r"g_token\s*=\s*'([^']+)'")
 
 
 def _in_maricopa(address: str) -> bool:
+    """True iff `address` mentions an AZ city in Maricopa County.
+
+    Uses word-boundary matching so 'Phoenix' doesn't match inside
+    'Phoenixville, PA'. Also requires 'az' in the string to filter out
+    Maricopa-named cities in other states (e.g., Mesa, CO).
+    """
     a = address.lower()
-    return any(city in a for city in _MARICOPA_CITIES)
+    if " az" not in a and ",az" not in a and a[-2:] != "az":
+        return False
+    return any(p.search(a) for p in _CITY_PATTERNS)
 
 
 def lookup_by_address(address: str, http: httpx.Client) -> dict[str, Any] | None:

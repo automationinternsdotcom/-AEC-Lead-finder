@@ -10,6 +10,20 @@ from pipeline import db
 from pipeline.cli import mark as mark_cli
 
 
+class _ConnWrapper:
+    """Wraps a real sqlite3.Connection with no-op close() so tests can inspect
+    the in-memory DB after the CLI's `finally: conn.close()` would have closed it."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):  # no-op for tests
+        pass
+
+
 def _mem_conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -18,7 +32,7 @@ def _mem_conn():
         "INSERT INTO seen_urls (url_hash, url, source, first_seen_at, title, status) "
         "VALUES ('h1', 'https://x.com', 'src', '2026-05-21T00:00:00Z', 't', 'new')"
     )
-    return conn
+    return _ConnWrapper(conn)
 
 
 class TestMarkCli(unittest.TestCase):

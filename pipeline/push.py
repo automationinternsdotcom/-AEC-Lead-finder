@@ -143,7 +143,11 @@ def sync_to_pipedrive(
 
 def _upsert_org(pd: PipedriveClient, a: ExtractedArticle) -> int:
     existing = pd.search_id("organizations", term=a.company_name, exact_match="true")
-    return existing or pd.post_id(
+    # Use `is not None` rather than truthy — Pipedrive IDs start at 1 in practice
+    # but `0 or create()` would create on the impossible-but-defensive path.
+    if existing is not None:
+        return existing
+    return pd.post_id(
         "organizations", {"name": a.company_name, "address": a.address or ""},
     )
 
@@ -151,7 +155,7 @@ def _upsert_org(pd: PipedriveClient, a: ExtractedArticle) -> int:
 def _upsert_person(pd: PipedriveClient, lead: Lead, org_id: int) -> int:
     if lead.email:
         existing = pd.search_id("persons", term=lead.email, fields="email")
-        if existing:
+        if existing is not None:
             return existing
     return pd.post_id("persons", {
         "name": lead.name,
