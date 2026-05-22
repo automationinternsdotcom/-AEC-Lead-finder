@@ -19,13 +19,11 @@ SOURCES_YAML = ROOT / "sources.yaml"
 RATES_YAML = ROOT / "rates.yaml"
 
 # Static defaults — change in code, not via env.
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 HTTP_TIMEOUT_SEC = 15
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    anthropic_api_key: str
     pipedrive_api_token: str
     pipedrive_domain: str
     pipedrive_pipeline_id: int
@@ -50,7 +48,6 @@ def settings() -> Settings:
         return v
 
     return Settings(
-        anthropic_api_key=need("ANTHROPIC_API_KEY"),
         pipedrive_api_token=need("PIPEDRIVE_API_TOKEN"),
         pipedrive_domain=need("PIPEDRIVE_DOMAIN"),
         pipedrive_pipeline_id=int(need("PIPEDRIVE_PIPELINE_ID")),

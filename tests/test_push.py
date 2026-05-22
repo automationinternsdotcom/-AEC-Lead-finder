@@ -12,7 +12,6 @@ from pipeline import config, push
 
 def _settings() -> config.Settings:
     return config.Settings(
-        anthropic_api_key="test-anthropic",
         pipedrive_api_token="test-pd-token",
         pipedrive_domain="test-co",
         pipedrive_pipeline_id=4,
