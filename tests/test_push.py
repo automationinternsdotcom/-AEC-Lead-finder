@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Callable
+from unittest.mock import patch
 
 import httpx
 
@@ -113,6 +114,124 @@ class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
                 client.post_id("deals", {"title": "X"})
         finally:
             client.__exit__()
+
+
+class TestArticleUrlCustomField(unittest.TestCase):
+    """Article URL goes into the Deal's custom field so Jordan can filter/
+    sort/column on it, AND so we have a server-side dedup gate (defense
+    in depth on top of the SQLite seen_urls check)."""
+
+    def test_deal_payload_includes_article_url_custom_field(self):
+        from pipeline.config import Settings
+        from schema import ExtractedArticle
+
+        settings = Settings(
+            apollo_api_key=None,
+            pipedrive_api_token="x",
+            pipedrive_domain="x",
+            pipedrive_pipeline_id=4,
+            pipedrive_stage_id=20,
+            pipedrive_field_article_url="field_hash_xyz",
+        )
+        article = ExtractedArticle.model_validate({
+            "title": "x", "published_date": None, "summary_2sent": "x",
+            "signal_type": "lease", "company_name": "Acme",
+            "company_domain_guess": None, "property_type": "retail",
+            "address": None, "city": "Tempe", "square_footage": None,
+            "dollar_value": None, "unit_count": None,
+            "az_relevant": True, "confidence": 0.7,
+        })
+        # Reload CUSTOM_FIELDS — populated lazily from settings
+        push.CUSTOM_FIELDS["article_url"] = "field_hash_xyz"
+        payload = push._deal_payload(
+            article, est_value=100_000, org_id=1, person_id=None,
+            settings=settings, url="https://example.com/x",
+        )
+        self.assertEqual(payload["field_hash_xyz"], "https://example.com/x")
+
+
+class TestFindDealByUrl(unittest.TestCase):
+    def test_returns_deal_id_when_found(self):
+        def handler(request):
+            return httpx.Response(200, json={
+                "success": True,
+                "data": {"items": [{"item": {"id": 999}}]},
+            })
+
+        client = _client_with(handler)
+        try:
+            client._article_url_field = "field_hash_xyz"
+            result = client.find_deal_by_url("https://example.com/x")
+            self.assertEqual(result, 999)
+        finally:
+            client.__exit__()
+
+    def test_returns_none_when_no_match(self):
+        def handler(request):
+            return httpx.Response(200, json={
+                "success": True, "data": {"items": []},
+            })
+
+        client = _client_with(handler)
+        try:
+            client._article_url_field = "field_hash_xyz"
+            result = client.find_deal_by_url("https://example.com/x")
+            self.assertIsNone(result)
+        finally:
+            client.__exit__()
+
+
+class TestSyncToPipedriveSkipsWhenDealExists(unittest.TestCase):
+    def test_returns_none_none_existing_id_on_dedup_hit(self):
+        """When find_deal_by_url returns an id, sync skips and returns it."""
+        from pipeline.config import Settings
+        from schema import ExtractedArticle
+
+        settings = Settings(
+            apollo_api_key=None,
+            pipedrive_api_token="x",
+            pipedrive_domain="test-co",
+            pipedrive_pipeline_id=4,
+            pipedrive_stage_id=20,
+            pipedrive_field_article_url="field_hash_xyz",
+        )
+        article = ExtractedArticle.model_validate({
+            "title": "x", "published_date": None, "summary_2sent": "x",
+            "signal_type": "lease", "company_name": "Acme",
+            "company_domain_guess": None, "property_type": "retail",
+            "address": None, "city": "Tempe", "square_footage": None,
+            "dollar_value": None, "unit_count": None,
+            "az_relevant": True, "confidence": 0.7,
+        })
+
+        def handler(request):
+            # Always responds with one match — simulates dedup hit
+            return httpx.Response(200, json={
+                "success": True,
+                "data": {"items": [{"item": {"id": 4242}}]},
+            })
+
+        # Capture the real class so _client_with doesn't recurse when patched.
+        RealClient = push.PipedriveClient
+
+        def make_mock_client(s):
+            client = RealClient.__new__(RealClient)
+            client._http = httpx.Client(
+                base_url=f"https://{s.pipedrive_domain}.pipedrive.com/api/v1/",
+                params={"api_token": s.pipedrive_api_token},
+                transport=httpx.MockTransport(handler),
+            )
+            client._article_url_field = s.pipedrive_field_article_url
+            return client
+
+        with patch.object(push, "PipedriveClient", make_mock_client):
+            org, person, deal = push.sync_to_pipedrive(
+                article, lead=None, est_value=0, basis="none",
+                url="https://example.com/dup", settings=settings,
+            )
+        self.assertIsNone(org)
+        self.assertIsNone(person)
+        self.assertEqual(deal, 4242)
 
 
 if __name__ == "__main__":

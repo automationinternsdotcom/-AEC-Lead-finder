@@ -41,6 +41,10 @@ class PipedriveClient:
             timeout=config.HTTP_TIMEOUT_SEC,
             params={"api_token": settings.pipedrive_api_token},
         )
+        # Populate the Article URL custom field hash once per process.
+        if not CUSTOM_FIELDS.get("article_url"):
+            CUSTOM_FIELDS["article_url"] = settings.pipedrive_field_article_url
+        self._article_url_field = CUSTOM_FIELDS["article_url"]
 
     def __enter__(self) -> "PipedriveClient":
         return self
@@ -78,12 +82,31 @@ class PipedriveClient:
         """POST {resource} with no return value (notes, activities, etc.)."""
         self._req("POST", resource, json=payload)
 
+    def find_deal_by_url(self, article_url: str) -> int | None:
+        """Search Deals by the Article URL custom field. Returns id or None.
+
+        `fields=<hash>` scopes the search to the custom field — without it,
+        Pipedrive defaults to searching title/notes/etc. and silently misses.
+        """
+        items = self._req(
+            "GET", "deals/search",
+            params={
+                "term": article_url, "exact_match": "true",
+                "fields": self._article_url_field,
+            },
+        ).get("items", [])
+        return items[0]["item"]["id"] if items else None
+
 
 def sync_to_pipedrive(
     article: ExtractedArticle, lead: Lead | None,
     est_value: int | None, basis: str, url: str, settings: Settings,
-) -> tuple[int, int | None, int]:
-    """Upsert org → person → deal (+ note). Returns the three IDs."""
+) -> tuple[int | None, int | None, int]:
+    """Upsert org → person → deal (+ note). Returns (org_id, person_id, deal_id).
+
+    Returns (None, None, existing_id) if a deal with this article_url already
+    exists — caller treats that as 'skipped' rather than 'created'.
+    """
     if settings.dry_run:
         util.log_event(
             "dry_run_write", url=url, company=article.company_name,
@@ -93,9 +116,15 @@ def sync_to_pipedrive(
         return DRY_ORG_ID, (DRY_PERSON_ID if lead else None), DRY_DEAL_ID
 
     with PipedriveClient(settings) as pd:
+        existing = pd.find_deal_by_url(url)
+        if existing is not None:
+            return None, None, existing
+
         org_id = _upsert_org(pd, article)
         person_id = _upsert_person(pd, lead, org_id) if lead else None
-        deal_id = pd.post_id("deals", _deal_payload(article, est_value, org_id, person_id, settings))
+        deal_id = pd.post_id("deals", _deal_payload(
+            article, est_value, org_id, person_id, settings, url,
+        ))
         pd.post("notes", {"deal_id": deal_id, "content": _note_body(article, lead, basis, url)})
     return org_id, person_id, deal_id
 
@@ -126,7 +155,7 @@ def _deal_title(a: ExtractedArticle) -> str:
 
 def _deal_payload(
     a: ExtractedArticle, est_value: int | None,
-    org_id: int, person_id: int | None, settings: Settings,
+    org_id: int, person_id: int | None, settings: Settings, url: str,
 ) -> dict:
     return {
         "title": _deal_title(a),
@@ -136,6 +165,7 @@ def _deal_payload(
         "person_id": person_id,
         "pipeline_id": settings.pipedrive_pipeline_id,
         "stage_id": settings.pipedrive_stage_id,
+        settings.pipedrive_field_article_url: url,
     }
 
 
