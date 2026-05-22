@@ -21,10 +21,6 @@ from schema import ExtractedArticle
 
 DRY_ORG_ID, DRY_PERSON_ID, DRY_DEAL_ID = -1, -2, -3
 
-# Future seed_pipedrive.py fills this with {logical_name: pipedrive_field_hash_id}.
-# Until populated, descriptive context lives in the deal note (see _note_body).
-CUSTOM_FIELDS: dict[str, str] = {}
-
 
 class PipedriveError(RuntimeError):
     """Hard-fail auth/server errors."""
@@ -41,10 +37,6 @@ class PipedriveClient:
             timeout=config.HTTP_TIMEOUT_SEC,
             params={"api_token": settings.pipedrive_api_token},
         )
-        # Populate the Article URL custom field hash once per process.
-        if not CUSTOM_FIELDS.get("article_url"):
-            CUSTOM_FIELDS["article_url"] = settings.pipedrive_field_article_url
-        self._article_url_field = CUSTOM_FIELDS["article_url"]
 
     def __enter__(self) -> "PipedriveClient":
         return self
@@ -83,16 +75,18 @@ class PipedriveClient:
         self._req("POST", resource, json=payload)
 
     def find_deal_by_url(self, article_url: str) -> int | None:
-        """Search Deals by the Article URL custom field. Returns id or None.
+        """Search Deals by Article URL value across all custom fields. Returns id or None.
 
-        `fields=<hash>` scopes the search to the custom field — without it,
-        Pipedrive defaults to searching title/notes/etc. and silently misses.
+        Pipedrive's /deals/search `fields` param only accepts the literal values
+        "custom_fields", "notes", or "title" — it does NOT accept individual
+        custom-field hashes. So we scope to `custom_fields` (all of them); URL
+        strings are unique enough that a cross-field collision is negligible.
         """
         items = self._req(
             "GET", "deals/search",
             params={
                 "term": article_url, "exact_match": "true",
-                "fields": self._article_url_field,
+                "fields": "custom_fields",
             },
         ).get("items", [])
         return items[0]["item"]["id"] if items else None

@@ -141,8 +141,6 @@ class TestArticleUrlCustomField(unittest.TestCase):
             "dollar_value": None, "unit_count": None,
             "az_relevant": True, "confidence": 0.7,
         })
-        # Reload CUSTOM_FIELDS — populated lazily from settings
-        push.CUSTOM_FIELDS["article_url"] = "field_hash_xyz"
         payload = push._deal_payload(
             article, est_value=100_000, org_id=1, person_id=None,
             settings=settings, url="https://example.com/x",
@@ -152,7 +150,10 @@ class TestArticleUrlCustomField(unittest.TestCase):
 
 class TestFindDealByUrl(unittest.TestCase):
     def test_returns_deal_id_when_found(self):
+        captured = {}
+
         def handler(request):
+            captured["url"] = str(request.url)
             return httpx.Response(200, json={
                 "success": True,
                 "data": {"items": [{"item": {"id": 999}}]},
@@ -160,9 +161,12 @@ class TestFindDealByUrl(unittest.TestCase):
 
         client = _client_with(handler)
         try:
-            client._article_url_field = "field_hash_xyz"
             result = client.find_deal_by_url("https://example.com/x")
             self.assertEqual(result, 999)
+            # Pipedrive only accepts the literal "custom_fields" — not a hash —
+            # so we MUST send that exact string. Caught a 400-Bad-Request live.
+            self.assertIn("fields=custom_fields", captured["url"])
+            self.assertIn("exact_match=true", captured["url"])
         finally:
             client.__exit__()
 
@@ -174,7 +178,6 @@ class TestFindDealByUrl(unittest.TestCase):
 
         client = _client_with(handler)
         try:
-            client._article_url_field = "field_hash_xyz"
             result = client.find_deal_by_url("https://example.com/x")
             self.assertIsNone(result)
         finally:
@@ -221,7 +224,6 @@ class TestSyncToPipedriveSkipsWhenDealExists(unittest.TestCase):
                 params={"api_token": s.pipedrive_api_token},
                 transport=httpx.MockTransport(handler),
             )
-            client._article_url_field = s.pipedrive_field_article_url
             return client
 
         with patch.object(push, "PipedriveClient", make_mock_client):
