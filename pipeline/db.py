@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS runs (
   duration_sec    INTEGER,
   error_summary   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS enriched_orgs (
+  name_normalized TEXT PRIMARY KEY,
+  raw_name        TEXT NOT NULL,
+  lead_json       TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  enriched_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_enriched_orgs_enriched_at ON enriched_orgs(enriched_at);
 """
 
 
@@ -169,4 +178,80 @@ def attach_pipedrive_ids(
         "UPDATE articles SET pipedrive_org_id=?, pipedrive_person_id=?, "
         "pipedrive_deal_id=?, pushed_at=? WHERE url_hash=?",
         (org_id, person_id, deal_id, utc_now_iso(), url_hash),
+    )
+
+
+# ── enriched_orgs cache: per-org Lead memoization ──────────────────────────────
+#
+# Same company appearing in multiple articles should reuse the same Grok/Apollo
+# enrichment instead of paying for it twice. The cache key is a normalized
+# version of the org name (lowercase, business-suffixes stripped, punctuation
+# collapsed) so 'Mark-Taylor Residential LLC' and 'mark taylor residential'
+# resolve to the same row.
+
+import dataclasses as _dataclasses
+import json as _json
+import re as _re
+
+from pipeline.enrich import Lead as _Lead
+
+_BUSINESS_SUFFIXES = (
+    "llc", "l.l.c.", "l l c",
+    "inc", "inc.", "incorporated",
+    "corp", "corp.", "corporation",
+    "ltd", "ltd.", "limited",
+    "lp", "l.p.",
+    "llp", "l.l.p.",
+    "company", "co", "co.",
+)
+_SUFFIX_RE = _re.compile(
+    r"\b(" + "|".join(_re.escape(s) for s in _BUSINESS_SUFFIXES) + r")\b",
+    _re.IGNORECASE,
+)
+_NON_ALNUM = _re.compile(r"[^a-z0-9 ]+")
+_MULTI_SPACE = _re.compile(r"\s+")
+
+
+def _normalize_org_name(name: str) -> str:
+    """Lowercase, strip punctuation, drop common business suffixes, collapse whitespace.
+
+    Order matters: punctuation strip BEFORE suffix strip — `L.L.C.` would
+    otherwise fail to match the `l.l.c.` suffix because `\\b` doesn't anchor
+    between `.` and end-of-string. After punctuation strip it's `l l c`,
+    which the suffix list also contains.
+    """
+    s = name.lower()
+    s = _NON_ALNUM.sub(" ", s)
+    s = _MULTI_SPACE.sub(" ", s).strip()
+    s = _SUFFIX_RE.sub(" ", s)
+    s = _MULTI_SPACE.sub(" ", s).strip()
+    return s
+
+
+def get_cached_enrichment(conn: sqlite3.Connection, org_name: str) -> _Lead | None:
+    """Return a cached Lead for this org, or None if uncached.
+
+    Lookup key is the normalized form, so 'Mark-Taylor Residential LLC' and
+    'mark taylor residential' resolve to the same row.
+    """
+    row = conn.execute(
+        "SELECT lead_json FROM enriched_orgs WHERE name_normalized = ?",
+        (_normalize_org_name(org_name),),
+    ).fetchone()
+    if row is None:
+        return None
+    return _Lead(**_json.loads(row["lead_json"]))
+
+
+def cache_enrichment(conn: sqlite3.Connection, org_name: str,
+                     lead: _Lead, source: str) -> None:
+    """Upsert this enrichment into the cache. Newer writes overwrite older ones."""
+    conn.execute(
+        "INSERT OR REPLACE INTO enriched_orgs "
+        "(name_normalized, raw_name, lead_json, source, enriched_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            _normalize_org_name(org_name), org_name,
+            _json.dumps(_dataclasses.asdict(lead)), source, utc_now_iso(),
+        ),
     )
