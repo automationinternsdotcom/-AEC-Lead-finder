@@ -1,4 +1,4 @@
-"""Tests for pipeline.cli.push — reads JSON stdin, prints deal_id JSON."""
+"""Tests for pipeline.cli.push — reads JSON stdin, prints lead_id JSON."""
 
 from __future__ import annotations
 
@@ -29,31 +29,31 @@ def _input_doc(**overrides):
 
 
 class TestPushCli(unittest.TestCase):
-    def test_prints_deal_id_on_create(self):
+    def test_prints_lead_id_on_create(self):
         with patch("pipeline.cli.push.config.settings", return_value=None), \
              patch("pipeline.cli.push.config.load_rates", return_value={}), \
              patch("pipeline.cli.push.push.sync_to_pipedrive",
-                   return_value=(7, None, 555)), \
+                   return_value=(7, None, "new-lead-uuid")), \
              patch("sys.stdin", io.StringIO(_input_doc())), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             rc = push_cli.main()
         self.assertEqual(rc, 0)
         data = json.loads(stdout.getvalue())
-        self.assertEqual(data["deal_id"], 555)
+        self.assertEqual(data["lead_id"], "new-lead-uuid")
         self.assertEqual(data["org_id"], 7)
         self.assertFalse(data["skipped"])
 
-    def test_skipped_when_existing_deal(self):
-        """Pipedrive dedup hit — sync_to_pipedrive returns (None, None, existing_id)."""
+    def test_skipped_when_existing_lead(self):
+        """Pipedrive dedup hit — sync_to_pipedrive returns (None, None, existing_uuid)."""
         with patch("pipeline.cli.push.config.settings", return_value=None), \
              patch("pipeline.cli.push.config.load_rates", return_value={}), \
              patch("pipeline.cli.push.push.sync_to_pipedrive",
-                   return_value=(None, None, 999)), \
+                   return_value=(None, None, "existing-lead-uuid")), \
              patch("sys.stdin", io.StringIO(_input_doc())), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             push_cli.main()
         data = json.loads(stdout.getvalue())
-        self.assertEqual(data["deal_id"], 999)
+        self.assertEqual(data["lead_id"], "existing-lead-uuid")
         self.assertTrue(data["skipped"])
 
 

@@ -1,11 +1,11 @@
 ---
 name: aether-daily-routine
-description: Daily Aether lead pipeline. Fetches CRE news from Google News + RSS sources, extracts structured data per article, qualifies for Arizona CRE signals, enriches via Apollo (if configured), and pushes deals to Pipedrive's Aether Article Sources pipeline. Drive this from a Claude Code session (interactive or via /loop) or a local cron with `claude code` CLI.
+description: Daily Aether lead pipeline. Fetches CRE news from Google News + RSS sources, extracts structured data per article, qualifies for Arizona CRE signals, enriches via Apollo (if configured), and pushes qualified items into Pipedrive's Leads Inbox for Jordan to triage. Drive this from a Claude Code session (interactive or via /loop) or a local cron with `claude code` CLI.
 ---
 
 # Aether Daily Lead Pipeline
 
-You are running the Aether daily lead pipeline. Your job: discover new commercial real-estate news in Arizona, decide which ones represent lead opportunities, enrich them with decision-maker contact info, and push qualified leads as deals into Pipedrive.
+You are running the Aether daily lead pipeline. Your job: discover new commercial real-estate news in Arizona, decide which ones represent lead opportunities, enrich them with decision-maker contact info, and push qualified items into **Pipedrive Leads** — the inbox surface where Jordan triages incoming opportunities and converts the promising ones to Deals.
 
 ## Setup check
 
@@ -18,10 +18,10 @@ source ~/.aether-pipedrive.env
 Verify env vars are loaded:
 
 ```bash
-env | grep -E '^PIPEDRIVE_' | wc -l  # Expect 5 (4 if APOLLO_API_KEY unset)
+env | grep -E '^PIPEDRIVE_' | wc -l  # Expect 3 (PIPEDRIVE_API_TOKEN, _DOMAIN, _FIELD_ARTICLE_URL)
 ```
 
-If you see fewer than 4, stop and report the missing variables.
+If you see fewer than 3, stop and report the missing variables.
 
 ## Step 1: Discover URLs
 
@@ -105,7 +105,7 @@ else
 fi
 ```
 
-### 2e. Push to Pipedrive
+### 2e. Push to Pipedrive Leads
 
 ```bash
 jq -n --argjson article '<extracted_json>' --slurpfile lead /tmp/lead.json --arg url "$URL" \
@@ -113,7 +113,7 @@ jq -n --argjson article '<extracted_json>' --slurpfile lead /tmp/lead.json --arg
   | uv run python -m pipeline.cli.push > /tmp/push_result.json
 ```
 
-Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive (treat as success).
+Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive Leads (treat as success).
 
 ### 2f. Mark seen
 
@@ -125,9 +125,9 @@ uv run python -m pipeline.cli.mark "$URL_HASH" pushed
 
 After the loop, report:
 - Total URLs fetched
-- Pushed (new deals)
-- Skipped (deals that already existed)
-- Filtered (didn't pass qualification)
-- Failed (extract errors)
+- Pushed (new Leads in Pipedrive's Leads Inbox, awaiting Jordan's triage)
+- Skipped (already existed in Pipedrive)
+- Filtered (didn't pass qualification rules)
+- Failed (extract errors — usually paywalls or JS-rendered pages)
 
 Log a final `run_finished` event with the counts.

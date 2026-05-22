@@ -26,9 +26,9 @@ HTTP_TIMEOUT_SEC = 15
 class Settings:
     pipedrive_api_token: str
     pipedrive_domain: str
-    pipedrive_pipeline_id: int
-    pipedrive_stage_id: int
-    pipedrive_field_article_url: str  # added Task 6 — required for push.py custom field
+    # Pipedrive shares custom field hashes between Lead and Deal entities, so the
+    # same field key works for either. Required for push.py's custom field write.
+    pipedrive_field_article_url: str
     apollo_api_key: str | None = None
     dry_run: bool = False
     max_articles_per_run: int = 50
@@ -50,8 +50,6 @@ def settings() -> Settings:
     return Settings(
         pipedrive_api_token=need("PIPEDRIVE_API_TOKEN"),
         pipedrive_domain=need("PIPEDRIVE_DOMAIN"),
-        pipedrive_pipeline_id=int(need("PIPEDRIVE_PIPELINE_ID")),
-        pipedrive_stage_id=int(need("PIPEDRIVE_STAGE_ID")),
         pipedrive_field_article_url=need("PIPEDRIVE_FIELD_ARTICLE_URL"),
         apollo_api_key=env.get("APOLLO_API_KEY") or None,
         dry_run=env.get("DRY_RUN", "0") == "1",

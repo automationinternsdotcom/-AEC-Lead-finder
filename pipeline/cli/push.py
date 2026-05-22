@@ -1,7 +1,7 @@
-"""`python -m pipeline.cli.push` (stdin JSON) — create Pipedrive deal, print result.
+"""`python -m pipeline.cli.push` (stdin JSON) — create Pipedrive Lead, print result.
 
 Input:  {"article": <ExtractedArticle>, "lead": <Lead | null>, "url": "..."}
-Output: {"deal_id": <int>, "org_id": <int | null>,
+Output: {"lead_id": <uuid-str>, "org_id": <int | null>,
          "person_id": <int | null>, "skipped": <bool>}
 """
 from __future__ import annotations
@@ -24,12 +24,12 @@ def main() -> int:
     rates = config.load_rates()
     est_value, basis = extract.estimate_deal_size(article, rates)
 
-    org_id, person_id, deal_id = push.sync_to_pipedrive(
+    org_id, person_id, lead_id = push.sync_to_pipedrive(
         article, lead, est_value, basis, url, settings,
     )
-    skipped = org_id is None  # sync returns (None, None, existing_id) on dedup hit
+    skipped = org_id is None  # sync returns (None, None, existing_uuid) on dedup hit
     json.dump({
-        "deal_id": deal_id, "org_id": org_id,
+        "lead_id": lead_id, "org_id": org_id,
         "person_id": person_id, "skipped": skipped,
     }, sys.stdout)
     sys.stdout.write("\n")

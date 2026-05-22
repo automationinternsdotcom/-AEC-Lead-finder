@@ -15,8 +15,6 @@ def _settings() -> config.Settings:
     return config.Settings(
         pipedrive_api_token="test-pd-token",
         pipedrive_domain="test-co",
-        pipedrive_pipeline_id=4,
-        pipedrive_stage_id=20,
         pipedrive_field_article_url="test-field-key",
         apollo_api_key="test-apollo",
     )
@@ -34,27 +32,40 @@ def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> push.Pip
     return client
 
 
+def _article(**overrides):
+    """Minimal valid ExtractedArticle for tests."""
+    from schema import ExtractedArticle
+    base = {
+        "title": "x", "published_date": None, "summary_2sent": "x",
+        "signal_type": "lease", "company_name": "Acme",
+        "company_domain_guess": None, "property_type": "retail",
+        "address": None, "city": "Tempe", "square_footage": None,
+        "dollar_value": None, "unit_count": None,
+        "az_relevant": True, "confidence": 0.7,
+    }
+    base.update(overrides)
+    return ExtractedArticle.model_validate(base)
+
+
 class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
     """Pipedrive returns HTTP 200 with {"success": false, "error": "..."}
-    for validation failures (bad field, missing required, stage_id mismatch,
-    etc.). Without an envelope check, _req returns {} silently and downstream
-    code either crashes with a KeyError (post_id) or just drops the call
-    (search_id, post). All three cases lose data."""
+    for validation failures (bad field, missing required, etc.). Without an
+    envelope check, _req returns {} silently and downstream code either
+    crashes with a KeyError (post_id) or just drops the call (search_id,
+    post). All three cases lose data."""
 
     def test_raises_PipedriveError_on_success_false(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={
                 "success": False,
-                "error": "Pipeline_id must be a positive integer",
+                "error": "Title field is required",
             })
 
         client = _client_with(handler)
         try:
             with self.assertRaises(push.PipedriveError) as ctx:
-                client.post_id("deals", {"title": "X"})
-            self.assertIn(
-                "Pipeline_id must be a positive integer", str(ctx.exception),
-            )
+                client.post_id("leads", {"organization_id": 1})
+            self.assertIn("Title field is required", str(ctx.exception))
         finally:
             client.__exit__()
 
@@ -70,7 +81,7 @@ class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
         client = _client_with(handler)
         try:
             with self.assertRaises(push.PipedriveError):
-                client.search_id("deals", term="x")
+                client.search_id("leads", term="x")
         finally:
             client.__exit__()
 
@@ -85,7 +96,7 @@ class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
         client = _client_with(handler)
         try:
             with self.assertRaises(push.PipedriveError):
-                client.post("notes", {"deal_id": 1, "content": "X"})
+                client.post("notes", {"lead_id": "uuid", "content": "X"})
         finally:
             client.__exit__()
 
@@ -111,60 +122,78 @@ class TestSuccessFalseEnvelopeCheck(unittest.TestCase):
         client = _client_with(handler)
         try:
             with self.assertRaises(push.PipedriveError):
-                client.post_id("deals", {"title": "X"})
+                client.post_id("leads", {"title": "X", "organization_id": 1})
         finally:
             client.__exit__()
 
 
-class TestArticleUrlCustomField(unittest.TestCase):
-    """Article URL goes into the Deal's custom field so Jordan can filter/
-    sort/column on it, AND so we have a server-side dedup gate (defense
-    in depth on top of the SQLite seen_urls check)."""
+class TestLeadPayload(unittest.TestCase):
+    """Lead payload differs from Deal: value is {amount, currency} dict;
+    no pipeline_id / stage_id (Leads aren't in pipelines); organization_id
+    not org_id; Article URL goes in the custom field for filterable column
+    + server-side dedup."""
 
-    def test_deal_payload_includes_article_url_custom_field(self):
-        from pipeline.config import Settings
-        from schema import ExtractedArticle
-
-        settings = Settings(
-            apollo_api_key=None,
-            pipedrive_api_token="x",
-            pipedrive_domain="x",
-            pipedrive_pipeline_id=4,
-            pipedrive_stage_id=20,
-            pipedrive_field_article_url="field_hash_xyz",
+    def test_lead_payload_includes_article_url_custom_field(self):
+        payload = push._lead_payload(
+            _article(), est_value=100_000, org_id=1, person_id=None,
+            settings=_settings(), url="https://example.com/x",
         )
-        article = ExtractedArticle.model_validate({
-            "title": "x", "published_date": None, "summary_2sent": "x",
-            "signal_type": "lease", "company_name": "Acme",
-            "company_domain_guess": None, "property_type": "retail",
-            "address": None, "city": "Tempe", "square_footage": None,
-            "dollar_value": None, "unit_count": None,
-            "az_relevant": True, "confidence": 0.7,
-        })
-        payload = push._deal_payload(
-            article, est_value=100_000, org_id=1, person_id=None,
-            settings=settings, url="https://example.com/x",
+        self.assertEqual(payload["test-field-key"], "https://example.com/x")
+
+    def test_lead_payload_value_is_amount_currency_dict(self):
+        """Lead /value is a dict, NOT flat value+currency at top level."""
+        payload = push._lead_payload(
+            _article(), est_value=45_000_000, org_id=1, person_id=None,
+            settings=_settings(), url="https://example.com/x",
         )
-        self.assertEqual(payload["field_hash_xyz"], "https://example.com/x")
+        self.assertEqual(payload["value"], {"amount": 45_000_000, "currency": "USD"})
+
+    def test_lead_payload_omits_value_when_none(self):
+        """Don't push value:{amount:0,currency:USD} for unparseable deal sizes."""
+        payload = push._lead_payload(
+            _article(), est_value=None, org_id=1, person_id=None,
+            settings=_settings(), url="https://example.com/x",
+        )
+        self.assertNotIn("value", payload)
+
+    def test_lead_payload_no_pipeline_or_stage_keys(self):
+        """Leads aren't in pipelines — these keys would 400."""
+        payload = push._lead_payload(
+            _article(), est_value=100, org_id=1, person_id=None,
+            settings=_settings(), url="https://example.com/x",
+        )
+        self.assertNotIn("pipeline_id", payload)
+        self.assertNotIn("stage_id", payload)
+
+    def test_lead_payload_uses_organization_id_not_org_id(self):
+        """Lead API uses 'organization_id' (full word) — Deal uses 'org_id'."""
+        payload = push._lead_payload(
+            _article(), est_value=None, org_id=42, person_id=None,
+            settings=_settings(), url="https://example.com/x",
+        )
+        self.assertEqual(payload["organization_id"], 42)
+        self.assertNotIn("org_id", payload)
 
 
-class TestFindDealByUrl(unittest.TestCase):
-    def test_returns_deal_id_when_found(self):
+class TestFindLeadByUrl(unittest.TestCase):
+    def test_returns_uuid_when_found(self):
         captured = {}
 
         def handler(request):
             captured["url"] = str(request.url)
             return httpx.Response(200, json={
                 "success": True,
-                "data": {"items": [{"item": {"id": 999}}]},
+                "data": {"items": [{"item": {"id": "abc-uuid-123"}}]},
             })
 
         client = _client_with(handler)
         try:
-            result = client.find_deal_by_url("https://example.com/x")
-            self.assertEqual(result, 999)
-            # Pipedrive only accepts the literal "custom_fields" — not a hash —
-            # so we MUST send that exact string. Caught a 400-Bad-Request live.
+            result = client.find_lead_by_url("https://example.com/x")
+            # Lead IDs are UUID strings, not ints.
+            self.assertEqual(result, "abc-uuid-123")
+            self.assertIsInstance(result, str)
+            # Must hit /leads/search (NOT /deals/search) with literal "custom_fields".
+            self.assertIn("/leads/search", captured["url"])
             self.assertIn("fields=custom_fields", captured["url"])
             self.assertIn("exact_match=true", captured["url"])
         finally:
@@ -178,40 +207,21 @@ class TestFindDealByUrl(unittest.TestCase):
 
         client = _client_with(handler)
         try:
-            result = client.find_deal_by_url("https://example.com/x")
+            result = client.find_lead_by_url("https://example.com/x")
             self.assertIsNone(result)
         finally:
             client.__exit__()
 
 
-class TestSyncToPipedriveSkipsWhenDealExists(unittest.TestCase):
-    def test_returns_none_none_existing_id_on_dedup_hit(self):
-        """When find_deal_by_url returns an id, sync skips and returns it."""
-        from pipeline.config import Settings
-        from schema import ExtractedArticle
-
-        settings = Settings(
-            apollo_api_key=None,
-            pipedrive_api_token="x",
-            pipedrive_domain="test-co",
-            pipedrive_pipeline_id=4,
-            pipedrive_stage_id=20,
-            pipedrive_field_article_url="field_hash_xyz",
-        )
-        article = ExtractedArticle.model_validate({
-            "title": "x", "published_date": None, "summary_2sent": "x",
-            "signal_type": "lease", "company_name": "Acme",
-            "company_domain_guess": None, "property_type": "retail",
-            "address": None, "city": "Tempe", "square_footage": None,
-            "dollar_value": None, "unit_count": None,
-            "az_relevant": True, "confidence": 0.7,
-        })
+class TestSyncToPipedriveSkipsWhenLeadExists(unittest.TestCase):
+    def test_returns_none_none_existing_uuid_on_dedup_hit(self):
+        """When find_lead_by_url returns a UUID, sync skips and returns it."""
 
         def handler(request):
-            # Always responds with one match — simulates dedup hit
+            # Always responds with one match — simulates dedup hit.
             return httpx.Response(200, json={
                 "success": True,
-                "data": {"items": [{"item": {"id": 4242}}]},
+                "data": {"items": [{"item": {"id": "existing-uuid-xyz"}}]},
             })
 
         # Capture the real class so _client_with doesn't recurse when patched.
@@ -227,13 +237,13 @@ class TestSyncToPipedriveSkipsWhenDealExists(unittest.TestCase):
             return client
 
         with patch.object(push, "PipedriveClient", make_mock_client):
-            org, person, deal = push.sync_to_pipedrive(
-                article, lead=None, est_value=0, basis="none",
-                url="https://example.com/dup", settings=settings,
+            org, person, lead_id = push.sync_to_pipedrive(
+                _article(), lead=None, est_value=0, basis="none",
+                url="https://example.com/dup", settings=_settings(),
             )
         self.assertIsNone(org)
         self.assertIsNone(person)
-        self.assertEqual(deal, 4242)
+        self.assertEqual(lead_id, "existing-uuid-xyz")
 
 
 if __name__ == "__main__":
