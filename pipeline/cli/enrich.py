@@ -18,10 +18,7 @@ def main() -> int:
         return 2
 
     domain = sys.argv[1]
-    try:
-        settings = config.settings()
-    except RuntimeError:
-        settings = None  # No env config — find_lead will return None gracefully
+    settings = config.settings()
     lead = enrich.find_lead(domain, settings)
     if lead is None:
         sys.stdout.write("null\n")

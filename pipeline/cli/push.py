@@ -20,16 +20,8 @@ def main() -> int:
     lead = enrich.Lead(**lead_dict) if lead_dict else None
     url = raw["url"]
 
-    try:
-        settings = config.settings()
-    except RuntimeError:
-        settings = None  # No env config — sync_to_pipedrive mock handles it in tests
-
-    try:
-        rates = config.load_rates()
-    except Exception:
-        rates = {}
-
+    settings = config.settings()
+    rates = config.load_rates()
     est_value, basis = extract.estimate_deal_size(article, rates)
 
     org_id, person_id, deal_id = push.sync_to_pipedrive(

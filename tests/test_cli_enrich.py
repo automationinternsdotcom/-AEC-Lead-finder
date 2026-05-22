@@ -18,7 +18,8 @@ class TestEnrichCli(unittest.TestCase):
             phone="+15551234567", linkedin_url="https://linkedin.com/in/jane",
             seniority="vp", apollo_id="abc123",
         )
-        with patch("pipeline.cli.enrich.enrich.find_lead", return_value=lead), \
+        with patch("pipeline.cli.enrich.config.settings", return_value=None), \
+             patch("pipeline.cli.enrich.enrich.find_lead", return_value=lead), \
              patch("sys.argv", ["prog", "acme.com"]), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             rc = enrich_cli.main()
@@ -28,7 +29,8 @@ class TestEnrichCli(unittest.TestCase):
         self.assertEqual(data["email"], "jane@acme.com")
 
     def test_prints_null_when_no_lead(self):
-        with patch("pipeline.cli.enrich.enrich.find_lead", return_value=None), \
+        with patch("pipeline.cli.enrich.config.settings", return_value=None), \
+             patch("pipeline.cli.enrich.enrich.find_lead", return_value=None), \
              patch("sys.argv", ["prog", "acme.com"]), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
             enrich_cli.main()

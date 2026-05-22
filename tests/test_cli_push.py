@@ -30,7 +30,9 @@ def _input_doc(**overrides):
 
 class TestPushCli(unittest.TestCase):
     def test_prints_deal_id_on_create(self):
-        with patch("pipeline.cli.push.push.sync_to_pipedrive",
+        with patch("pipeline.cli.push.config.settings", return_value=None), \
+             patch("pipeline.cli.push.config.load_rates", return_value={}), \
+             patch("pipeline.cli.push.push.sync_to_pipedrive",
                    return_value=(7, None, 555)), \
              patch("sys.stdin", io.StringIO(_input_doc())), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
@@ -43,7 +45,9 @@ class TestPushCli(unittest.TestCase):
 
     def test_skipped_when_existing_deal(self):
         """Pipedrive dedup hit — sync_to_pipedrive returns (None, None, existing_id)."""
-        with patch("pipeline.cli.push.push.sync_to_pipedrive",
+        with patch("pipeline.cli.push.config.settings", return_value=None), \
+             patch("pipeline.cli.push.config.load_rates", return_value={}), \
+             patch("pipeline.cli.push.push.sync_to_pipedrive",
                    return_value=(None, None, 999)), \
              patch("sys.stdin", io.StringIO(_input_doc())), \
              patch("sys.stdout", new_callable=io.StringIO) as stdout:
