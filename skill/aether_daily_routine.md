@@ -143,14 +143,17 @@ The enrichment order: **cache → Apollo (if configured) OR Grok with optional A
 
 ```bash
 COMPANY=$(echo '<extracted_json>' | jq -r '.company_name')
-uv run python -m pipeline.cli.cache_lookup "$COMPANY" > /tmp/lead.json
-if [ "$(cat /tmp/lead.json | tr -d '[:space:]')" != "null" ]; then
+uv run python -m pipeline.cli.cache_lookup "$COMPANY" \
+  | jq 'if . == null then {leads: []} else {leads: [.]} end' > /tmp/lead.json
+if [ "$(jq '.leads | length' /tmp/lead.json)" -gt 0 ]; then
   echo "Cache hit for $COMPANY — skipping external enrichment"
-  # Skip to 2e (push) — /tmp/lead.json already contains the cached Lead
+  # Skip to 2e (push) — /tmp/lead.json holds {leads:[<cached Lead>]}
 fi
 ```
 
-If `/tmp/lead.json` is not `null`, skip ahead to 2e.
+`/tmp/lead.json` is the **canonical enrichment envelope** for the rest of the per-article loop: always `{"leads": [<Lead>, ...]}` (zero-or-more entries). Cache hit / Apollo / Grok all converge on this shape, and Step 2e reads `.leads` from it.
+
+If `.leads | length` is > 0, skip ahead to 2e.
 
 #### Maricopa Assessor hint (when address is present)
 
@@ -173,7 +176,8 @@ The Assessor short-circuits non-Maricopa cities (Tucson, Flagstaff, etc.) with n
 ```bash
 DOMAIN=$(echo '<extracted_json>' | jq -r '.company_domain_guess // empty')
 if [ -n "$APOLLO_API_KEY" ] && [ -n "$DOMAIN" ]; then
-  uv run python -m pipeline.cli.enrich "$DOMAIN" > /tmp/lead.json
+  uv run python -m pipeline.cli.enrich "$DOMAIN" \
+    | jq 'if . == null then {leads: []} else {leads: [.]} end' > /tmp/lead.json
   ENRICH_VIA=apollo
 fi
 ```
@@ -190,24 +194,29 @@ fi
 - `owner_entity` — `$OWNER_HINT` from the Assessor step (or null if unset)
 - `tab_id` — the Chrome tab ID from `tabs_context_mcp`
 
-The subagent returns one of:
+The subagent returns one of (matches `skill/grok_enricher.md` Step 8):
 
-- `{"company_name": "...", "lead": {<Lead JSON>}}` — success
-- `{"company_name": "...", "lead": null}` — no decision-maker found → `lead_gap=True` downstream
+- `{"company_name": "...", "mode": "fast"|"heavy", "leads": [<Lead>, <Lead>, <Lead>]}` — success (1–3 leads)
+- `{"company_name": "...", "mode": "fast", "leads": []}` — no decision-maker found → `lead_gap=True` downstream
 - `{"error": "session_invalid", ...}` — re-check the Chrome login, then retry the article
 
-Extract the `lead` field for the push step:
+Save the full subagent envelope as the enrichment file:
 
 ```bash
-echo '<subagent_output>' | jq '.lead' > /tmp/lead.json
+echo '<subagent_output>' > /tmp/lead.json
 ENRICH_VIA=grok
 ```
 
+If the output is an `error` envelope (no `leads` key), Step 2e's `jq '.leads // []'` will degrade to `[]` and the article will push with no contacts attached. For session errors, prefer re-checking the Chrome login and retrying the article *before* writing to `/tmp/lead.json` — see `skill/grok_enricher.md` for the recovery flow.
+
 #### Cache the successful enrichment
 
+`cache_write` stores one Lead per org (the primary), so pull `.leads[0]` from the envelope before piping. Skip the cache step on cache hits (would be a no-op write of what's already there) and on empty enrichments.
+
 ```bash
-if [ "$(cat /tmp/lead.json | tr -d '[:space:]')" != "null" ]; then
-  cat /tmp/lead.json | uv run python -m pipeline.cli.cache_write "$COMPANY" "${ENRICH_VIA:-grok}"
+if [ "${ENRICH_VIA:-}" != "" ] && [ "$(jq '.leads | length' /tmp/lead.json)" -gt 0 ]; then
+  jq '.leads[0]' /tmp/lead.json \
+    | uv run python -m pipeline.cli.cache_write "$COMPANY" "$ENRICH_VIA"
 fi
 ```
 
@@ -220,8 +229,9 @@ approach broke Python syntax on names like `Some "Quoted" Co`.)
 The Grok enricher (skill/grok_enricher.md) now returns up to 3 leads as `{"company_name": "...", "leads": [<Lead>, <Lead>, <Lead>]}` — the first becomes the primary (linked Person record), the rest populate the Lead 2 / Lead 3 custom fields.
 
 ```bash
-# enrich step wrote /tmp/lead.json — either {leads: [...]} or null
-LEADS=$(jq '.leads // []' /tmp/lead.json)   # [] when no enrichment
+# /tmp/lead.json is always the {leads: [...]} envelope by this point
+# (cache hit, Apollo, and Grok all write that shape; empty enrichments = {leads: []})
+LEADS=$(jq '.leads // []' /tmp/lead.json)    # [] when no enrichment
 PRIMARY=$(echo "$LEADS" | jq '.[0] // null')
 EXTRAS=$(echo "$LEADS" | jq '.[1:]')         # [] when only one or zero
 
