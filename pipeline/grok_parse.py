@@ -22,10 +22,11 @@ from pipeline.enrich import Lead
 _ENTRY_HEAD = re.compile(r"^(\d+)\.\s+(.+?)$", re.MULTILINE)
 # Grok uses both "Current Title:" and the shorter "Title:" — accept either.
 _TITLE_LINE = re.compile(r"(?:Current\s+)?Title:\s*(.+?)\s*$", re.MULTILINE)
-_LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)")
+_LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)", re.IGNORECASE)
 # Same for emails: "Professional Email:" and bare "Email:". TLD min 2 chars
 # (no 1-char TLDs exist; Grok occasionally hallucinates `@example.c` truncations).
-_EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,})")
+# IGNORECASE: live Grok sometimes lowercases the label ("Professional email:").
+_EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,})", re.IGNORECASE)
 # Phone numbers — Grok formats vary: "Phone: (480) 555-1234", "Direct: +1-480-555-1234",
 # "Direct Phone: 480.555.1234", "Direct Dial: 480 555 1234 ext 102". We capture a
 # 10-digit US-phone-looking substring after a Phone:/Direct:/Direct Dial:/Direct Phone:
@@ -39,7 +40,8 @@ _PHONE = re.compile(
 # inferred from a `first.last@domain` format pattern, not a verified source).
 # We still capture the address, but mark the contact as low-confidence.
 _EMAIL_LIKELY = re.compile(
-    r"(?:Professional\s+)?Email:\s*(?:Likely|likely|Possibly|possibly|Estimated|estimated|Guess|guess|Inferred|inferred)",
+    r"(?:Professional\s+)?Email:\s*(?:Likely|Possibly|Estimated|Guess|Inferred)",
+    re.IGNORECASE,
 )
 # Strip "(AltName)" or "(Christopher Madison)" parentheticals from names.
 _PAREN_TAIL = re.compile(r"\s*\([^)]+\)\s*$")
@@ -128,9 +130,21 @@ def _parse_block(block: str) -> Lead | None:
     name = _PAREN_TAIL.sub("", raw_name).strip()
 
     title_m = _TITLE_LINE.search(block)
-    if not title_m:
+    if title_m:
+        title = title_m.group(1).strip().rstrip(".")
+    elif "," in name:
+        # Live Grok often omits the separate "Title:" line and writes the title
+        # inline on the name line: "Jessica Denison, Owner / Business Owner".
+        # Split on the first comma: name before, title after.
+        name_part, title = name.split(",", 1)
+        name = name_part.strip()
+        title = title.strip().rstrip(".")
+        if not title:
+            return None
+    else:
+        # No title anywhere (no "Title:" line, no inline comma) — not enough
+        # to form a usable lead.
         return None
-    title = title_m.group(1).strip().rstrip(".")
 
     linkedin_m = _LINKEDIN.search(block)
     email_m = _EMAIL.search(block)
