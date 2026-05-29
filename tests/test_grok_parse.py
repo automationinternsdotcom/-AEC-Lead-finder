@@ -304,6 +304,36 @@ Email: jane@acme.com
         # "Direct phone: Not found ..." must NOT capture the switchboard number.
         self.assertIsNone(lead.phone)
 
+    def test_accepts_dash_separated_title(self):
+        """Live Grok also separates the inline title with a dash instead of a
+        comma ("Allan Gutkin – Principal/Owner"). Verbatim 2026-05 JAG response."""
+        text = """1. Allan Gutkin – Principal/Owner
+LinkedIn: https://www.linkedin.com/in/allan-gutkin-a0484312
+Professional email: Likely agutkin@jagdevelopment.com
+Direct phone: Not found (main: 602-254-4433)
+"""
+        leads = grok_parse.parse_grok_response_all(text)
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].name, "Allan Gutkin")
+        self.assertIn("Principal", leads[0].title)
+        self.assertEqual(leads[0].email, "agutkin@jagdevelopment.com")
+        self.assertEqual(leads[0].seniority, "owner")
+
+    def test_accepts_title_on_next_line(self):
+        """Live Grok also puts the title on the line AFTER the name (no comma,
+        no dash, no 'Title:' label). Verbatim 2026-05 SSS Partners response."""
+        text = """1. Shubham Pandey
+Principal, SSS Partners / CEO, SSS Academy and Fire N Ice Hotels
+LinkedIn: https://www.linkedin.com/in/shubham-pandey-b82a75a6
+Professional email: Likely shubham@ssschools.com or shubham@ptaaschool.org
+"""
+        leads = grok_parse.parse_grok_response_all(text)
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].name, "Shubham Pandey")
+        self.assertIn("Principal", leads[0].title)
+        self.assertEqual(leads[0].email, "shubham@ssschools.com")
+        self.assertEqual(leads[0].seniority, "owner")
+
 
 if __name__ == "__main__":
     unittest.main()
