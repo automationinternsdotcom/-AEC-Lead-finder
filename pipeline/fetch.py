@@ -1,88 +1,67 @@
-"""Discover new article URLs from sources.yaml; dedup against seen_urls.
-
-Reuses: feedparser (RSS/Atom + dates + encodings), util.make_http_client +
-        canonicalize_url + sha256_hex + log_event, db.record_seen as the dedup gate.
-Extend: METHOD_HANDLERS dispatch — add one key to support a new fetch type.
-Failure: per-source try/except; broken feeds log `source_failed` and skip.
-"""
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
-from datetime import date
-from typing import Callable
+from datetime import datetime, timezone
 
 import feedparser
 import httpx
 
-from pipeline import config, db, util
+from schema import FetchedPage, SourceRecord
+from pipeline import util
 
 
-@dataclass(slots=True)
-class NewArticle:
-    url: str
-    url_hash: str
-    source: str
-    title: str
-    published_at: date | None
+MIN_CLEAN_TEXT_CHARS = 200
 
 
-# Dispatch table: source.method → (endpoint → fetch_url). Extend here.
-METHOD_HANDLERS: dict[str, Callable[[str], str]] = {
-    "rss": lambda endpoint: endpoint,
-    "google_news": util.build_google_news_url,
-}
-
-
-def discover_new_urls(conn: sqlite3.Connection) -> list[NewArticle]:
-    """Fetch every enabled source, dedup against seen_urls, return new articles."""
-    out: list[NewArticle] = []
-    with util.make_http_client() as client:
-        for src in config.load_sources():
-            db.sync_source(conn, src["name"], src["method"], src["endpoint"], src.get("enabled", False))
-            if not src.get("enabled"):
-                continue
-            handler = METHOD_HANDLERS.get(src["method"])
-            if handler is None:
-                util.log_event("source_skipped", source=src["name"], reason=f"unknown method {src['method']!r}")
-                continue
-            try:
-                out.extend(_fetch_one(client, src["name"], handler(src["endpoint"]), conn))
-            except Exception as e:  # per-source isolation
-                util.log_event("source_failed", source=src["name"], error=repr(e))
-    return out
-
-
-def _fetch_one(
-    client: httpx.Client, source: str, url: str, conn: sqlite3.Connection,
-) -> list[NewArticle]:
-    resp = client.get(url)
-    resp.raise_for_status()
-    parsed = feedparser.parse(resp.content)
-    if not parsed.entries:
-        if parsed.bozo:
-            raise ValueError(f"feed parse error: {parsed.bozo_exception!r}")
-        util.log_event("source_fetched", source=source, total=0, new=0)
+def discover_rss_pages(source: SourceRecord, http: httpx.Client) -> list[FetchedPage]:
+    if not source.rss_url:
         return []
 
-    fresh: list[NewArticle] = []
+    response = http.get(source.rss_url)
+    response.raise_for_status()
+    parsed = feedparser.parse(response.content)
+
+    pages: list[FetchedPage] = []
     for entry in parsed.entries:
         link = getattr(entry, "link", None)
         if not link:
             continue
         try:
-            canon = util.canonicalize_url(link)
+            url = util.canonicalize_url(link)
         except ValueError:
             continue
-        h = util.sha256_hex(canon)
-        title = getattr(entry, "title", None)
-        if db.record_seen(conn, h, canon, source, title):
-            fresh.append(NewArticle(canon, h, source, title or "", _entry_date(entry)))
-    util.log_event("source_fetched", source=source, total=len(parsed.entries), new=len(fresh))
-    return fresh
+        pages.append(
+            FetchedPage(
+                source_id=source.source_id,
+                source_site=source.site_name,
+                source_type=source.source_type,
+                url=url,
+                title=getattr(entry, "title", None),
+                published_at=_entry_datetime(entry),
+            )
+        )
+    return pages
 
 
-def _entry_date(entry) -> date | None:
-    """feedparser exposes time.struct_time on published_parsed/updated_parsed."""
-    t = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
-    return date(t.tm_year, t.tm_mon, t.tm_mday) if t else None
+def fetch_page_content(page: FetchedPage, http: httpx.Client) -> FetchedPage:
+    response = http.get(page.url)
+    response.raise_for_status()
+    cleaned_text = util.clean_html(response.text, page.url)
+    if len(cleaned_text) < MIN_CLEAN_TEXT_CHARS:
+        raise ValueError("page_clean_text_too_short")
+    return page.model_copy(update={"raw_html": response.text, "cleaned_text": cleaned_text})
+
+
+def _entry_datetime(entry: object) -> datetime | None:
+    parsed_time = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if not parsed_time:
+        return None
+    return datetime(
+        parsed_time.tm_year,
+        parsed_time.tm_mon,
+        parsed_time.tm_mday,
+        parsed_time.tm_hour,
+        parsed_time.tm_min,
+        parsed_time.tm_sec,
+        tzinfo=timezone.utc,
+    )
+

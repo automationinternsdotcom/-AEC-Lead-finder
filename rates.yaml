@@ -1,9 +1,0 @@
-# Janitorial rate table (§6). Used by deterministic deal-size calc.
-# Units: $/sqft/month except multifamily which is $/unit/month.
-office:       2.25
-industrial:   0.55
-multifamily:  100      # per unit, not sqft
-retail:       1.50
-medical:      3.00
-mixed:        1.75
-other:        1.00

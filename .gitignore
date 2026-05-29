@@ -14,14 +14,15 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Temp
+# Local runtime output
 /tmp/
 *.json.bak
+*.db
+*.sqlite
+*.sqlite3
 
-# Credentials (never commit)
+# Credentials
 .env
 *.env
 credentials.json
 client_secret_*.json
-
-# NOTE: db.sqlite is intentionally NOT ignored — committed back each run (§4)
