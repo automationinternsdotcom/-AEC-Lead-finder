@@ -19,18 +19,23 @@ SOURCES_YAML = ROOT / "sources.yaml"
 RATES_YAML = ROOT / "rates.yaml"
 
 # Static defaults — change in code, not via env.
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 HTTP_TIMEOUT_SEC = 15
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    anthropic_api_key: str
-    apollo_api_key: str
     pipedrive_api_token: str
     pipedrive_domain: str
-    pipedrive_pipeline_id: int
-    pipedrive_stage_id: int
+    # Pipedrive shares custom field hashes between Lead and Deal entities, so the
+    # same field key works for either. Required for push.py's custom field write.
+    pipedrive_field_article_url: str
+    # Optional extras populated by push.py when set. Leaving them None makes the
+    # push skip the field — useful for environments that haven't created them yet.
+    pipedrive_field_date_posted: str | None = None
+    pipedrive_field_lead_1: str | None = None
+    pipedrive_field_lead_2: str | None = None
+    pipedrive_field_lead_3: str | None = None
+    apollo_api_key: str | None = None
     dry_run: bool = False
     max_articles_per_run: int = 50
     log_level: str = "INFO"
@@ -49,12 +54,14 @@ def settings() -> Settings:
         return v
 
     return Settings(
-        anthropic_api_key=need("ANTHROPIC_API_KEY"),
-        apollo_api_key=need("APOLLO_API_KEY"),
         pipedrive_api_token=need("PIPEDRIVE_API_TOKEN"),
         pipedrive_domain=need("PIPEDRIVE_DOMAIN"),
-        pipedrive_pipeline_id=int(need("PIPEDRIVE_PIPELINE_ID")),
-        pipedrive_stage_id=int(need("PIPEDRIVE_STAGE_ID")),
+        pipedrive_field_article_url=need("PIPEDRIVE_FIELD_ARTICLE_URL"),
+        pipedrive_field_date_posted=env.get("PIPEDRIVE_FIELD_DATE_POSTED") or None,
+        pipedrive_field_lead_1=env.get("PIPEDRIVE_FIELD_LEAD_1") or None,
+        pipedrive_field_lead_2=env.get("PIPEDRIVE_FIELD_LEAD_2") or None,
+        pipedrive_field_lead_3=env.get("PIPEDRIVE_FIELD_LEAD_3") or None,
+        apollo_api_key=env.get("APOLLO_API_KEY") or None,
         dry_run=env.get("DRY_RUN", "0") == "1",
         max_articles_per_run=int(env.get("MAX_ARTICLES_PER_RUN") or 50),
         log_level=env.get("LOG_LEVEL", "INFO"),

@@ -42,8 +42,13 @@ class ApolloError(RuntimeError):
 
 
 def find_lead(domain: str | None, settings: Settings) -> Lead | None:
-    """Return the highest-ranked person at `domain`, or None if Apollo can't help."""
-    if not domain:
+    """Return the highest-ranked person at `domain`, or None if Apollo can't help.
+
+    Returns None unconditionally if APOLLO_API_KEY is not configured —
+    dev/sandbox runs without an Apollo subscription still create deals
+    (with lead_gap=True), they just don't get enriched.
+    """
+    if not domain or not settings.apollo_api_key:
         return None
     body = {
         "q_organization_domains": domain,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
@@ -62,5 +63,10 @@ def make_http_client() -> httpx.Client:
 
 
 def log_event(event: str, **fields) -> None:
-    """Single-line JSON log to stdout. The only logger the pipeline uses."""
-    print(json.dumps({"event": event, **fields}, default=str))
+    """Single-line JSON log to stderr. The only logger the pipeline uses.
+
+    MUST stay on stderr — CLI tools (pipeline.cli.fetch, pipeline.cli.push, ...)
+    pipe their stdout into json/jq downstream. Writing here to stdout would
+    corrupt that output with log lines.
+    """
+    print(json.dumps({"event": event, **fields}, default=str), file=sys.stderr)
