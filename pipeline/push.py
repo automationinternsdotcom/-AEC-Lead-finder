@@ -83,6 +83,18 @@ class PipedriveClient:
         """POST {resource} with no return value (notes, activities, etc.)."""
         self._req("POST", resource, json=payload)
 
+    def get(self, resource: str, id) -> dict:
+        """GET {resource}/{id} → the entity's data dict."""
+        return self._req("GET", f"{resource}/{id}")
+
+    def put(self, resource: str, id, payload: dict) -> dict:
+        """PUT {resource}/{id} (full update; Persons use PUT)."""
+        return self._req("PUT", f"{resource}/{id}", json=payload)
+
+    def patch(self, resource: str, id, payload: dict) -> dict:
+        """PATCH {resource}/{id} (partial update; Leads use PATCH)."""
+        return self._req("PATCH", f"{resource}/{id}", json=payload)
+
     def find_lead_by_url(self, article_url: str) -> str | None:
         """Search Leads by Article URL value across all custom fields. Returns UUID or None.
 
@@ -194,6 +206,68 @@ def sync_to_pipedrive(
     return org_id, person_id, lead_id
 
 
+def update_lead_contacts(
+    article_url: str, lead: Lead | None, extra_contacts: list[Lead] | None,
+    settings: Settings,
+) -> dict:
+    """Sync improved contacts into an ALREADY-CREATED Lead (idempotent re-run /
+    Heavy-pass upgrade). Finds the Lead by Article URL, then:
+      - PUTs the linked Person with the primary's VERIFIED email/phone only
+        (same verified-only policy as creation), and
+      - PATCHes the Lead 1/2/3 custom fields with the formatted contacts.
+
+    Returns {lead_id, person_id, updated: bool, reason?}. No-op (updated=False)
+    when the Lead can't be found by URL.
+    """
+    contacts = _all_contacts(lead, extra_contacts)
+    primary = contacts[0] if contacts else None
+
+    if settings.dry_run:
+        util.log_event(
+            "dry_run_update", url=article_url,
+            primary=(primary.name if primary else None),
+            contact_count=len(contacts),
+        )
+        return {"lead_id": DRY_LEAD_ID, "person_id": DRY_PERSON_ID,
+                "updated": True, "dry_run": True}
+
+    with PipedriveClient(settings) as pd:
+        lead_id = pd.find_lead_by_url(article_url)
+        if lead_id is None:
+            return {"lead_id": None, "person_id": None, "updated": False,
+                    "reason": "lead_not_found"}
+
+        lead_obj = pd.get("leads", lead_id)
+        person_id = lead_obj.get("person_id")
+        if isinstance(person_id, dict):  # Pipedrive may nest it as {"value": id}
+            person_id = person_id.get("value")
+
+        # Update the Person with verified-only email/phone.
+        if person_id and primary:
+            email = primary.email if (primary.email and primary.email_verified) else None
+            phone = primary.phone if (primary.phone and primary.phone_verified) else None
+            body = {}
+            if email:
+                body["email"] = [{"value": email}]
+            if phone:
+                body["phone"] = [{"value": phone}]
+            if body:
+                pd.put("persons", person_id, body)
+
+        # Update Lead 1/2/3 reference text (shows hedged guesses, marked "Likely").
+        lead_field_hashes = (
+            settings.pipedrive_field_lead_1,
+            settings.pipedrive_field_lead_2,
+            settings.pipedrive_field_lead_3,
+        )
+        patch = {field: _fmt_contact(c)
+                 for c, field in zip(contacts, lead_field_hashes) if field}
+        if patch:
+            pd.patch("leads", lead_id, patch)
+
+    return {"lead_id": lead_id, "person_id": person_id, "updated": True}
+
+
 def _all_contacts(primary: Lead | None, extras: list[Lead] | None) -> list[Lead]:
     """Merge primary + extras, drop None entries. Caps at 3 (Pipedrive has
     Lead 1/2/3 custom fields).
@@ -224,15 +298,23 @@ def _upsert_org(pd: PipedriveClient, a: ExtractedArticle) -> int:
 
 
 def _upsert_person(pd: PipedriveClient, lead: Lead, org_id: int) -> int:
-    if lead.email:
-        existing = pd.search_id("persons", term=lead.email, fields="email")
+    # Verified-only policy: only attach an email/phone to the structured Person
+    # record when it's verified. Hedged ("Likely") guesses stay out of the CRM's
+    # contact fields — they remain in the Lead 1/2/3 reference text via
+    # _fmt_contact — so a human verifies before any outreach.
+    email = lead.email if (lead.email and lead.email_verified) else None
+    phone = lead.phone if (lead.phone and lead.phone_verified) else None
+    # Dedup only on a verified email — searching by a guessed address risks
+    # merging into the wrong existing Person.
+    if email:
+        existing = pd.search_id("persons", term=email, fields="email")
         if existing is not None:
             return existing
     return pd.post_id("persons", {
         "name": lead.name,
         "org_id": org_id,
-        "email": [{"value": lead.email}] if lead.email else [],
-        "phone": [{"value": lead.phone}] if lead.phone else [],
+        "email": [{"value": email}] if email else [],
+        "phone": [{"value": phone}] if phone else [],
     })
 
 
@@ -250,7 +332,8 @@ def _fmt_contact(c: Lead) -> str:
     if c.title:
         parts.append(c.title)
     if c.email:
-        parts.append(c.email)
+        # Mark hedged guesses so a human knows to verify before using them.
+        parts.append(c.email if c.email_verified else f"Likely {c.email}")
     if c.phone:
         parts.append(c.phone)
     return " | ".join(parts)[:255]

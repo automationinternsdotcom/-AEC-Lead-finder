@@ -35,6 +35,12 @@ class Lead:
     linkedin_url: str | None
     seniority: str
     apollo_id: str
+    # Per-field verification. Default True so Apollo-sourced leads (verified by
+    # the provider) stay structured contacts. grok_parse lowers these for hedged
+    # ("Likely") / generic-mailbox emails and missing phones. The production push
+    # only attaches verified email/phone to Person records.
+    email_verified: bool = True
+    phone_verified: bool = True
 
 
 class ApolloError(RuntimeError):

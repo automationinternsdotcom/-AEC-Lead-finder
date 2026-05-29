@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Callable
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import httpx
 
 from pipeline import config, push
+from pipeline.enrich import Lead
 
 
 def _settings() -> config.Settings:
@@ -534,6 +536,145 @@ class TestSyncToPipedriveSkipsWhenLeadExists(unittest.TestCase):
         self.assertIsNone(org)
         self.assertIsNone(person)
         self.assertEqual(lead_id, "existing-uuid-xyz")
+
+
+class TestVerifiedOnlyContactPolicy(unittest.TestCase):
+    """Production policy: only VERIFIED email/phone attach to the Person record;
+    hedged 'Likely' guesses appear only in the Lead 1/2/3 reference text."""
+
+    def _lead(self, **kw):
+        base = dict(name="Jane Doe", title="COO", email="jane@acme.com",
+                    phone="480-555-1212", linkedin_url=None, seniority="c_suite",
+                    apollo_id="grok")
+        base.update(kw)
+        return Lead(**base)
+
+    def test_unverified_email_excluded_from_person_payload(self):
+        captured = {}
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/persons") and req.method == "POST":
+                captured["body"] = json.loads(req.content)
+                return httpx.Response(201, json={"data": {"id": 7}})
+            return httpx.Response(200, json={"data": {"items": []}})
+        client = _client_with(handler)
+        lead = self._lead(email_verified=False, phone_verified=True)
+        push._upsert_person(client, lead, org_id=1)
+        # hedged email dropped; verified phone kept
+        self.assertEqual(captured["body"]["email"], [])
+        self.assertEqual(captured["body"]["phone"], [{"value": "480-555-1212"}])
+
+    def test_verified_email_included_in_person_payload(self):
+        captured = {}
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/persons/search"):
+                return httpx.Response(200, json={"data": {"items": []}})
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(201, json={"data": {"id": 8}})
+        client = _client_with(handler)
+        push._upsert_person(client, self._lead(email_verified=True, phone_verified=True), org_id=1)
+        self.assertEqual(captured["body"]["email"], [{"value": "jane@acme.com"}])
+        self.assertEqual(captured["body"]["phone"], [{"value": "480-555-1212"}])
+
+    def test_fmt_contact_marks_hedged_email_as_likely(self):
+        lead = self._lead(email="jane@acme.com", email_verified=False, phone=None)
+        out = push._fmt_contact(lead)
+        self.assertIn("Likely jane@acme.com", out)
+
+    def test_fmt_contact_verified_email_unmarked(self):
+        lead = self._lead(email="jane@acme.com", email_verified=True, phone=None)
+        out = push._fmt_contact(lead)
+        self.assertIn("jane@acme.com", out)
+        self.assertNotIn("Likely", out)
+
+
+class TestUpdaterClientVerbs(unittest.TestCase):
+    """PipedriveClient gains get/put/patch for the updater (the generic _req
+    already supports any verb)."""
+
+    def test_get_put_patch_issue_correct_verbs(self):
+        seen = []
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen.append((req.method, req.url.path))
+            return httpx.Response(200, json={"success": True, "data": {"id": 1}})
+        c = _client_with(handler)
+        c.get("leads", "L1")
+        c.put("persons", 9, {"email": [{"value": "x@y.com"}]})
+        c.patch("leads", "L1", {"h": "v"})
+        self.assertEqual(seen, [
+            ("GET", "/api/v1/leads/L1"),
+            ("PUT", "/api/v1/persons/9"),
+            ("PATCH", "/api/v1/leads/L1"),
+        ])
+
+
+class TestUpdateLeadContacts(unittest.TestCase):
+    """update_lead_contacts() finds an existing Lead by Article URL, then
+    PUTs the Person (verified-only) and PATCHes the Lead 1/2/3 fields."""
+
+    def _settings(self) -> config.Settings:
+        return config.Settings(
+            pipedrive_api_token="t", pipedrive_domain="test-co",
+            pipedrive_field_article_url="art-url-hash",
+            pipedrive_field_lead_1="l1-hash", pipedrive_field_lead_2="l2-hash",
+            pipedrive_field_lead_3="l3-hash",
+        )
+
+    def _run(self, primary, extras, handler):
+        RealClient = push.PipedriveClient
+        def make(s):
+            c = RealClient.__new__(RealClient)
+            c._settings = s
+            c._http = httpx.Client(
+                base_url=f"https://{s.pipedrive_domain}.pipedrive.com/api/v1/",
+                params={"api_token": s.pipedrive_api_token},
+                transport=httpx.MockTransport(handler),
+            )
+            return c
+        with patch.object(push, "PipedriveClient", make):
+            return push.update_lead_contacts("https://ex.com/a", primary, extras, self._settings())
+
+    def _hit_handler(self, bodies):
+        def handler(req: httpx.Request) -> httpx.Response:
+            p = req.url.path
+            if p.endswith("/leads/search"):
+                return httpx.Response(200, json={"success": True, "data": {"items": [
+                    {"item": {"id": "L1", "custom_fields": {"art-url-hash": "https://ex.com/a"}}}]}})
+            if p == "/api/v1/leads/L1" and req.method == "GET":
+                return httpx.Response(200, json={"success": True, "data": {"id": "L1", "person_id": 9}})
+            if p == "/api/v1/persons/9" and req.method == "PUT":
+                bodies["person"] = json.loads(req.content)
+                return httpx.Response(200, json={"success": True, "data": {"id": 9}})
+            if p == "/api/v1/leads/L1" and req.method == "PATCH":
+                bodies["lead"] = json.loads(req.content)
+                return httpx.Response(200, json={"success": True, "data": {"id": "L1"}})
+            return httpx.Response(200, json={"success": True, "data": {}})
+        return handler
+
+    def test_verified_contact_updates_person_and_lead_fields(self):
+        bodies = {}
+        primary = Lead(name="Jane Doe", title="COO", email="jane@acme.com", phone="480-555-1212",
+                       linkedin_url=None, seniority="c_suite", apollo_id="grok",
+                       email_verified=True, phone_verified=True)
+        result = self._run(primary, [], self._hit_handler(bodies))
+        self.assertEqual(bodies["person"]["email"], [{"value": "jane@acme.com"}])
+        self.assertEqual(bodies["person"]["phone"], [{"value": "480-555-1212"}])
+        self.assertEqual(bodies["lead"]["l1-hash"], "Jane Doe | COO | jane@acme.com | 480-555-1212")
+        self.assertTrue(result["updated"])
+
+    def test_hedged_email_kept_out_of_person_but_marked_in_lead_text(self):
+        bodies = {}
+        primary = Lead(name="Jane Doe", title="COO", email="jane@acme.com", phone=None,
+                       linkedin_url=None, seniority="c_suite", apollo_id="grok",
+                       email_verified=False, phone_verified=False)
+        self._run(primary, [], self._hit_handler(bodies))
+        self.assertNotIn("person", bodies)  # nothing verified → no Person PUT
+        self.assertIn("Likely jane@acme.com", bodies["lead"]["l1-hash"])
+
+    def test_returns_not_found_when_lead_absent(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"success": True, "data": {"items": []}})
+        result = self._run(None, None, handler)
+        self.assertFalse(result["updated"])
 
 
 if __name__ == "__main__":

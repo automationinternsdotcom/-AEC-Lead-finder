@@ -177,14 +177,27 @@ def _parse_block(block: str) -> Lead | None:
     email_m = _EMAIL.search(block)
     phone_m = _PHONE.search(block)
 
+    email = email_m.group(1).strip() if email_m else None
+    phone = _normalize_phone(phone_m.group(1)) if phone_m else None
+
+    # An email counts as verified only if present, NOT hedged ("Likely ..."),
+    # and NOT a generic role mailbox (info@, sales@, ...). Phones from Grok are
+    # direct-dial (switchboard lines are reported as "Not found" and don't
+    # match _PHONE), so a present phone is treated as verified.
+    local = email.split("@", 1)[0].lower().replace(".", "").replace("-", "") if email else ""
+    email_verified = bool(email) and not _EMAIL_LIKELY.search(block) and local not in _GENERIC_EMAIL_LOCALS
+    phone_verified = bool(phone)
+
     return Lead(
         name=name,
         title=title,
-        email=email_m.group(1).strip() if email_m else None,
-        phone=_normalize_phone(phone_m.group(1)) if phone_m else None,
+        email=email,
+        phone=phone,
         linkedin_url=linkedin_m.group(1).strip() if linkedin_m else None,
         seniority=_derive_seniority(title),
         apollo_id="grok",
+        email_verified=email_verified,
+        phone_verified=phone_verified,
     )
 
 
