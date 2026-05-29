@@ -1,0 +1,218 @@
+"""Parse SuperGrok Fast-mode responses into pipeline.enrich.Lead objects.
+
+The Grok response shape is predictable:
+
+  1. <Name> [or "<Name> (<AltName>)"]
+  Current Title: <Title>, <Company>. [verification clauses]
+  LinkedIn: <URL>
+  Professional Email: [Likely] <email> [or <email2>] [format notes] [source tag]
+
+  2. ...
+
+Trailing meta (sources counts, suggested follow-ups) is ignored. We return
+the first valid entry as the primary Lead — Grok orders by relevance.
+"""
+from __future__ import annotations
+
+import re
+
+from pipeline.enrich import Lead
+
+# One entry runs from "N. " through the next "N+1. " or end-of-text.
+_ENTRY_HEAD = re.compile(r"^(\d+)\.\s+(.+?)$", re.MULTILINE)
+# Grok uses both "Current Title:" and the shorter "Title:" — accept either.
+_TITLE_LINE = re.compile(r"(?:Current\s+)?Title:\s*(.+?)\s*$", re.MULTILINE)
+_LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)")
+# Same for emails: "Professional Email:" and bare "Email:". TLD min 2 chars
+# (no 1-char TLDs exist; Grok occasionally hallucinates `@example.c` truncations).
+_EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,})")
+# Phone numbers — Grok formats vary: "Phone: (480) 555-1234", "Direct: +1-480-555-1234",
+# "Direct Phone: 480.555.1234", "Direct Dial: 480 555 1234 ext 102". We capture a
+# 10-digit US-phone-looking substring after a Phone:/Direct:/Direct Dial:/Direct Phone:
+# label. Extension suffixes (ext, x) are kept in the value.
+_PHONE = re.compile(
+    r"(?:Direct\s+(?:Phone|Dial)|Direct|Phone|Tel|Telephone):\s*"
+    r"([+]?[\d().\-\s]{10,30}(?:\s*(?:ext|x|extension)\.?\s*\d+)?)",
+    re.IGNORECASE,
+)
+# "Likely X" prefix on the email line signals Grok hedged on the address (it
+# inferred from a `first.last@domain` format pattern, not a verified source).
+# We still capture the address, but mark the contact as low-confidence.
+_EMAIL_LIKELY = re.compile(
+    r"(?:Professional\s+)?Email:\s*(?:Likely|likely|Possibly|possibly|Estimated|estimated|Guess|guess|Inferred|inferred)",
+)
+# Strip "(AltName)" or "(Christopher Madison)" parentheticals from names.
+_PAREN_TAIL = re.compile(r"\s*\([^)]+\)\s*$")
+
+# Email local-parts that are role/team mailboxes, not a specific person's inbox.
+# Used by is_high_confidence_contact: a generic mailbox isn't a verified contact.
+_GENERIC_EMAIL_LOCALS = frozenset({
+    "info", "contact", "office", "hello", "admin", "support",
+    "sales", "marketing", "general", "inquiries", "team",
+    "service", "customerservice", "help", "noreply", "no-reply",
+})
+
+
+def parse_grok_response(text: str) -> Lead | None:
+    """Return the first qualifying decision-maker, or None if none found."""
+    leads = parse_grok_response_all(text)
+    return leads[0] if leads else None
+
+
+def parse_grok_response_all(text: str, max_leads: int = 3) -> list[Lead]:
+    """Return up to `max_leads` decision-makers in source order. Empty list
+    if none parse cleanly. Used by the Lead 1/2/3 retrofit (pipeline.cli.
+    grok_parse --all)."""
+    if not text or not text.strip():
+        return []
+    matches = list(_ENTRY_HEAD.finditer(text))
+    if not matches:
+        return []
+    out: list[Lead] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        lead = _parse_block(text[start:end])
+        if lead is not None:
+            out.append(lead)
+            if len(out) >= max_leads:
+                break
+    return out
+
+
+# Words that mean Grok returned only a job-title placeholder (no specific
+# named person). Used by the enricher to decide whether to escalate to Heavy.
+_GENERIC_TITLE_TOKENS = (
+    "property manager", "leasing agent", "leasing manager",
+    "general manager", "facilities manager", "the property manager",
+    "the leasing agent", "site manager", "operations team",
+    "asset manager", "property management",
+)
+
+# Suffix words that mean "team/org/role, not a person" — these catch responses
+# like "Acme Property Management" or "Operations Team" that pass the two-token
+# heuristic but aren't real names.
+_GENERIC_SUFFIXES = (
+    "management", "team", "group", "services", "department",
+    "office", "company", "corporation", "llc", "inc",
+)
+
+
+def is_lead_generic(lead: Lead) -> bool:
+    """True if the Lead.name looks like a job title placeholder or a team/org
+    name rather than a specific named person. Trigger for Heavy-mode retry.
+
+    Layered checks (cheapest first):
+      1. Empty / whitespace-only.
+      2. Multi-token role phrases ("Property Manager", "Asset Manager").
+      3. Fewer than 2 tokens (single names like "Owner", "Manager").
+      4. Last token is an org/role suffix ("Acme Property Management",
+         "Operations Team") — catches multi-token placeholders that pass (3).
+    """
+    name = (lead.name or "").lower().strip()
+    if not name or any(t in name for t in _GENERIC_TITLE_TOKENS):
+        return True
+    tokens = name.split()
+    if len(tokens) < 2:
+        return True
+    if tokens[-1].rstrip(".,") in _GENERIC_SUFFIXES:
+        return True
+    return False
+
+
+def _parse_block(block: str) -> Lead | None:
+    head = _ENTRY_HEAD.match(block)
+    if not head:
+        return None
+    raw_name = head.group(2).strip()
+    name = _PAREN_TAIL.sub("", raw_name).strip()
+
+    title_m = _TITLE_LINE.search(block)
+    if not title_m:
+        return None
+    title = title_m.group(1).strip().rstrip(".")
+
+    linkedin_m = _LINKEDIN.search(block)
+    email_m = _EMAIL.search(block)
+    phone_m = _PHONE.search(block)
+
+    return Lead(
+        name=name,
+        title=title,
+        email=email_m.group(1).strip() if email_m else None,
+        phone=_normalize_phone(phone_m.group(1)) if phone_m else None,
+        linkedin_url=linkedin_m.group(1).strip() if linkedin_m else None,
+        seniority=_derive_seniority(title),
+        apollo_id="grok",
+    )
+
+
+def _normalize_phone(raw: str) -> str:
+    """Collapse whitespace and trim trailing punctuation. Preserves digits,
+    parens, dashes, dots, ext suffixes — Grok's varied formats stay readable
+    in Pipedrive's Lead 1/2/3 fields without re-parsing."""
+    return " ".join(raw.split()).strip().rstrip(".,;")
+
+
+def is_high_confidence_contact(lead: Lead, raw_block: str = "") -> bool:
+    """True when both email AND phone are present AND the email isn't a hedged
+    guess or a generic role mailbox. Used by the enricher to decide whether
+    to escalate a Fast result to Heavy.
+
+    The `raw_block` parameter is the original Grok response chunk for this
+    contact (between this entry and the next "N. " head). We need it to
+    detect the "Likely jdoe@..." pattern — once parsed, the email value is
+    identical whether or not Grok hedged.
+    """
+    if not lead.email or not lead.phone:
+        return False
+    local = lead.email.split("@", 1)[0].lower().replace(".", "").replace("-", "")
+    if local in _GENERIC_EMAIL_LOCALS:
+        return False
+    if raw_block and _EMAIL_LIKELY.search(raw_block):
+        return False
+    return True
+
+
+def parse_grok_response_blocks(text: str, max_leads: int = 3) -> list[tuple[Lead, str]]:
+    """Same as parse_grok_response_all but returns (Lead, raw_block) tuples so
+    the caller can run is_high_confidence_contact (which needs the raw text to
+    detect 'Likely' hedging). Order preserved."""
+    if not text or not text.strip():
+        return []
+    matches = list(_ENTRY_HEAD.finditer(text))
+    if not matches:
+        return []
+    out: list[tuple[Lead, str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:end]
+        lead = _parse_block(block)
+        if lead is not None:
+            out.append((lead, block))
+            if len(out) >= max_leads:
+                break
+    return out
+
+
+# Check order matters: 'owner' (which catches "Founder") before 'c_suite' loses CEOs;
+# 'c_suite' before 'vp' (CEO is not VP); 'director' before 'manager'.
+_SENIORITY_RULES = (
+    (("owner", "founder", "principal"), "owner"),
+    (("chief ", " coo", " ceo", " cfo", " cmo", " cto",
+      "coo,", "ceo,", "cfo,", "cmo,", "cto,",
+      " coo)", " ceo)", " cfo)", " cmo)", " cto)"), "c_suite"),
+    (("vp ", "vice president", "vp,"), "vp"),
+    (("director",), "director"),
+    (("manager",), "manager"),
+)
+
+
+def _derive_seniority(title: str) -> str:
+    # Pad with spaces so word-boundary needles like " coo" can match leading/trailing positions.
+    t = f" {title.lower()} "
+    for needles, label in _SENIORITY_RULES:
+        if any(n in t for n in needles):
+            return label
+    return ""
