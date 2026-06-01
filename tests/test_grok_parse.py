@@ -335,5 +335,36 @@ Professional email: Likely shubham@ssschools.com or shubham@ptaaschool.org
         self.assertEqual(leads[0].seniority, "owner")
 
 
+class TestVerifiedFlags(unittest.TestCase):
+    """Per-field verification flags drive the verified-only Pipedrive policy:
+    a hedged ('Likely') or generic-mailbox email must NOT be treated as a
+    verified contact, even though the address is still captured."""
+
+    def test_hedged_email_is_not_verified(self):
+        text = "1. Jane Doe\nCurrent Title: COO, Acme\nProfessional Email: Likely jane@acme.com"
+        lead = grok_parse.parse_grok_response(text)
+        self.assertEqual(lead.email, "jane@acme.com")
+        self.assertFalse(lead.email_verified)
+
+    def test_plain_email_with_phone_is_verified(self):
+        text = ("1. Jane Doe\nCurrent Title: COO, Acme\n"
+                "Professional Email: jane@acme.com\nDirect Phone: (480) 555-1212")
+        lead = grok_parse.parse_grok_response(text)
+        self.assertEqual(lead.email, "jane@acme.com")
+        self.assertTrue(lead.email_verified)
+        self.assertTrue(lead.phone_verified)
+
+    def test_generic_mailbox_email_is_not_verified(self):
+        text = "1. Jane Doe\nCurrent Title: COO, Acme\nProfessional Email: info@acme.com"
+        lead = grok_parse.parse_grok_response(text)
+        self.assertEqual(lead.email, "info@acme.com")
+        self.assertFalse(lead.email_verified)
+
+    def test_missing_phone_is_not_phone_verified(self):
+        text = "1. Jane Doe\nCurrent Title: COO, Acme\nProfessional Email: jane@acme.com"
+        lead = grok_parse.parse_grok_response(text)
+        self.assertFalse(lead.phone_verified)
+
+
 if __name__ == "__main__":
     unittest.main()
