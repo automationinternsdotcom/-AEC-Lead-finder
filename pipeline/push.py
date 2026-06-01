@@ -266,7 +266,10 @@ def _lead_payload(
     payload = {
         "title": _lead_title(a),
         "organization_id": org_id,
-        settings.pipedrive_field_article_url: url,
+        # Pipedrive Text custom fields hard-cap at 255 chars; unresolved Google
+        # News RSS URLs blow past that and the API 400s the whole Lead. Cap
+        # defensively — callers should pass the resolved publisher URL.
+        settings.pipedrive_field_article_url: url[:255],
     }
     if est_value:
         payload["value"] = {"amount": est_value, "currency": "USD"}

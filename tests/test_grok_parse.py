@@ -23,6 +23,20 @@ These individuals align with high-priority roles (COO and Facilities leadership)
 95 sources"""
 
 
+# Verbatim from a 2026-05-28 live Fast-mode query for Top Fuel Espresso.
+# Note the drift from SPIKE_RESPONSE: the title is INLINE on the numbered name
+# line (no separate "Title:" line) and the labels are lowercase ("Professional
+# email:", "Direct phone:"). This is the shape the parser was silently dropping.
+INLINE_TITLE_RESPONSE = """1. Jessica Denison, Owner / Business Owner (Top Fuel Espresso)
+LinkedIn: https://www.linkedin.com/in/jessica-denison-517817124
+Professional email: Likely jessican@tfespresso.us or similar (hedged; personal often je****n@gmail.com via data providers)
+Direct phone: Not found (main store line (480) 599-2749)
+
+No other strong matches for priority roles like GM/Operations Manager with public contact details for the Mesa location(s).
+
+105 sources"""
+
+
 class TestParseGrokResponse(unittest.TestCase):
     def test_returns_first_entry_as_lead(self):
         lead = grok_parse.parse_grok_response(SPIKE_RESPONSE)
@@ -271,6 +285,54 @@ Email: jane@acme.com
     def test_empty_input_returns_empty_list(self):
         self.assertEqual(grok_parse.parse_grok_response_all(""), [])
         self.assertEqual(grok_parse.parse_grok_response_all("just prose, no list"), [])
+
+    def test_accepts_inline_title_and_lowercase_labels(self):
+        """Live Grok Fast mode puts the title inline on the name line (no
+        separate 'Title:' line) and uses lowercase 'email:' labels. The parser
+        must extract the contact instead of silently dropping it."""
+        leads = grok_parse.parse_grok_response_all(INLINE_TITLE_RESPONSE)
+        self.assertEqual(len(leads), 1)
+        lead = leads[0]
+        self.assertEqual(lead.name, "Jessica Denison")
+        self.assertIn("Owner", lead.title)
+        self.assertEqual(lead.email, "jessican@tfespresso.us")
+        self.assertEqual(
+            lead.linkedin_url,
+            "https://www.linkedin.com/in/jessica-denison-517817124",
+        )
+        self.assertEqual(lead.seniority, "owner")
+        # "Direct phone: Not found ..." must NOT capture the switchboard number.
+        self.assertIsNone(lead.phone)
+
+    def test_accepts_dash_separated_title(self):
+        """Live Grok also separates the inline title with a dash instead of a
+        comma ("Allan Gutkin – Principal/Owner"). Verbatim 2026-05 JAG response."""
+        text = """1. Allan Gutkin – Principal/Owner
+LinkedIn: https://www.linkedin.com/in/allan-gutkin-a0484312
+Professional email: Likely agutkin@jagdevelopment.com
+Direct phone: Not found (main: 602-254-4433)
+"""
+        leads = grok_parse.parse_grok_response_all(text)
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].name, "Allan Gutkin")
+        self.assertIn("Principal", leads[0].title)
+        self.assertEqual(leads[0].email, "agutkin@jagdevelopment.com")
+        self.assertEqual(leads[0].seniority, "owner")
+
+    def test_accepts_title_on_next_line(self):
+        """Live Grok also puts the title on the line AFTER the name (no comma,
+        no dash, no 'Title:' label). Verbatim 2026-05 SSS Partners response."""
+        text = """1. Shubham Pandey
+Principal, SSS Partners / CEO, SSS Academy and Fire N Ice Hotels
+LinkedIn: https://www.linkedin.com/in/shubham-pandey-b82a75a6
+Professional email: Likely shubham@ssschools.com or shubham@ptaaschool.org
+"""
+        leads = grok_parse.parse_grok_response_all(text)
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].name, "Shubham Pandey")
+        self.assertIn("Principal", leads[0].title)
+        self.assertEqual(leads[0].email, "shubham@ssschools.com")
+        self.assertEqual(leads[0].seniority, "owner")
 
 
 if __name__ == "__main__":

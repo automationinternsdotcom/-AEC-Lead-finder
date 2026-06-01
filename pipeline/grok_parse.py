@@ -22,10 +22,11 @@ from pipeline.enrich import Lead
 _ENTRY_HEAD = re.compile(r"^(\d+)\.\s+(.+?)$", re.MULTILINE)
 # Grok uses both "Current Title:" and the shorter "Title:" — accept either.
 _TITLE_LINE = re.compile(r"(?:Current\s+)?Title:\s*(.+?)\s*$", re.MULTILINE)
-_LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)")
+_LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)", re.IGNORECASE)
 # Same for emails: "Professional Email:" and bare "Email:". TLD min 2 chars
 # (no 1-char TLDs exist; Grok occasionally hallucinates `@example.c` truncations).
-_EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,})")
+# IGNORECASE: live Grok sometimes lowercases the label ("Professional email:").
+_EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,})", re.IGNORECASE)
 # Phone numbers — Grok formats vary: "Phone: (480) 555-1234", "Direct: +1-480-555-1234",
 # "Direct Phone: 480.555.1234", "Direct Dial: 480 555 1234 ext 102". We capture a
 # 10-digit US-phone-looking substring after a Phone:/Direct:/Direct Dial:/Direct Phone:
@@ -39,10 +40,38 @@ _PHONE = re.compile(
 # inferred from a `first.last@domain` format pattern, not a verified source).
 # We still capture the address, but mark the contact as low-confidence.
 _EMAIL_LIKELY = re.compile(
-    r"(?:Professional\s+)?Email:\s*(?:Likely|likely|Possibly|possibly|Estimated|estimated|Guess|guess|Inferred|inferred)",
+    r"(?:Professional\s+)?Email:\s*(?:Likely|Possibly|Estimated|Guess|Inferred)",
+    re.IGNORECASE,
 )
 # Strip "(AltName)" or "(Christopher Madison)" parentheticals from names.
 _PAREN_TAIL = re.compile(r"\s*\([^)]+\)\s*$")
+# Separators Grok uses between an inline name and its title on the name line:
+# comma ("Jane Doe, COO"), en/em dash ("Allan Gutkin – Principal"), or a
+# space-padded hyphen ("Allan Gutkin - Principal"). A bare hyphen inside a name
+# ("Mark-Taylor") has no surrounding spaces, so it is never split.
+_NAME_TITLE_SEP = re.compile(r"\s*[,–—]\s*|\s+-\s+")
+# A line that is a labelled contact field, not a title. Used to know when the
+# line after the name is a title vs. already a LinkedIn/Email/Phone line.
+_LABEL_LINE = re.compile(
+    r"^\s*(?:Current\s+Title|Title|LinkedIn|Professional\s+Email|Email"
+    r"|Direct\s+(?:Phone|Dial)|Direct|Phone|Tel|Telephone)\s*:",
+    re.IGNORECASE,
+)
+
+
+def _title_from_following_line(block: str) -> str | None:
+    """Grok sometimes puts the title on the line AFTER the name, with no label
+    ("1. Shubham Pandey\nPrincipal, SSS Partners ..."). Return that line as the
+    title, or None if the first non-empty line after the name is already a
+    labelled contact field (i.e. there is no title)."""
+    for ln in block.splitlines()[1:]:
+        s = ln.strip()
+        if not s:
+            continue
+        if _LABEL_LINE.match(s):
+            return None
+        return s.rstrip(".")
+    return None
 
 # Email local-parts that are role/team mailboxes, not a specific person's inbox.
 # Used by is_high_confidence_contact: a generic mailbox isn't a verified contact.
@@ -128,9 +157,21 @@ def _parse_block(block: str) -> Lead | None:
     name = _PAREN_TAIL.sub("", raw_name).strip()
 
     title_m = _TITLE_LINE.search(block)
-    if not title_m:
-        return None
-    title = title_m.group(1).strip().rstrip(".")
+    if title_m:
+        title = title_m.group(1).strip().rstrip(".")
+    else:
+        # Live Grok usually omits the "Title:" line. It writes the title either
+        # inline on the name line — separated by a comma OR a dash
+        # ("Jessica Denison, Owner" / "Allan Gutkin – Principal/Owner") — or on
+        # the line immediately after the name ("Shubham Pandey\nPrincipal, ...").
+        parts = _NAME_TITLE_SEP.split(name, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            name = parts[0].strip()
+            title = parts[1].strip().rstrip(".")
+        else:
+            title = _title_from_following_line(block)
+            if not title:
+                return None
 
     linkedin_m = _LINKEDIN.search(block)
     email_m = _EMAIL.search(block)
