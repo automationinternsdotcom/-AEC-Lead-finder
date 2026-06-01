@@ -136,6 +136,10 @@ class PipedriveClient:
                 return None
             raise
         field_key = self._settings.pipedrive_field_article_url
+        # _lead_payload stores the Article URL capped at 255 chars (Pipedrive's
+        # varchar limit). Match against the same cap, or a lead created from an
+        # unresolvable >255-char URL would never be found and gets re-created.
+        needle = article_url[:255]
         for hit in items:
             item = hit.get("item") or {}
             cf = item.get("custom_fields")
@@ -144,16 +148,16 @@ class PipedriveClient:
             # Preferred path: custom_fields is a dict keyed by field hash.
             if isinstance(cf, dict):
                 v = cf.get(field_key)
-                if v == article_url or (isinstance(v, dict) and v.get("value") == article_url):
+                if v == needle or (isinstance(v, dict) and v.get("value") == needle):
                     return item["id"]
                 continue
             # Fallback: list shape — scan for the URL value, accept either string
             # or {value: ...} entry. Doesn't distinguish field origin, but the
             # list shape doesn't expose field keys to us.
             for v in cf:
-                if isinstance(v, str) and v == article_url:
+                if isinstance(v, str) and v == needle:
                     return item["id"]
-                if isinstance(v, dict) and v.get("value") == article_url:
+                if isinstance(v, dict) and v.get("value") == needle:
                     return item["id"]
         return None
 

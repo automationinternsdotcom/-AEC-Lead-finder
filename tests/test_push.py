@@ -456,6 +456,24 @@ class TestFindLeadByUrl(unittest.TestCase):
         finally:
             client.__exit__()
 
+    def test_matches_when_stored_url_truncated_to_255(self):
+        """push.py caps the Article URL field at 255 chars. A lead created from
+        an unresolvable >255-char Google News URL stores the truncation, so the
+        dedup match must compare against article_url[:255] — otherwise the lead
+        is never found and gets re-created (the prod-duplicate bug)."""
+        long_url = "https://news.google.com/rss/articles/" + "A" * 300
+        stored = long_url[:255]
+
+        def handler(request):
+            return httpx.Response(200, json={"success": True, "data": {"items": [
+                {"item": {"id": "trunc-uuid", "custom_fields": {"test-field-key": stored}}}]}})
+
+        client = _client_with(handler)
+        try:
+            self.assertEqual(client.find_lead_by_url(long_url), "trunc-uuid")
+        finally:
+            client.__exit__()
+
     def test_returns_none_when_no_match(self):
         def handler(request):
             return httpx.Response(200, json={
