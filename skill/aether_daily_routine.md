@@ -21,11 +21,18 @@ Verify env vars are loaded:
 # Required: PIPEDRIVE_API_TOKEN, _DOMAIN, _FIELD_ARTICLE_URL — pipeline aborts without all 3.
 env | grep -E '^PIPEDRIVE_(API_TOKEN|DOMAIN|FIELD_ARTICLE_URL)=' | wc -l  # Expect 3
 # Optional but expected for the per-lead contact schema:
-env | grep -E '^PIPEDRIVE_FIELD_(DATE_POSTED|LEAD_[123])=' | wc -l       # Expect 4 — warn if 0
+env | grep -E '^PIPEDRIVE_FIELD_(DATE_POSTED|LEAD_[123]|LEAD_[123]_LINKEDIN)=' | wc -l  # Expect 7 — warn if 0
 ```
 
 If the required count is fewer than 3, stop and report the missing variables.
-If the optional count is 0, warn that Date Posted + Lead 1/2/3 fields won't be populated and the routine will create degraded leads.
+If the optional count is 0, warn that Date Posted + Lead 1/2/3 + LinkedIn fields won't be populated and the routine will create degraded leads.
+
+Preview v2 Pipedrive setup before writing anything:
+
+```bash
+uv run python -m pipeline.cli.pipedrive_v2 schema | jq .
+uv run python -m pipeline.cli.pipedrive_v2 pipeline | jq .
+```
 
 ## Step 1: Discover URLs
 
@@ -35,6 +42,17 @@ jq length /tmp/urls.json
 ```
 
 If 0 URLs, stop. Log "no new articles" and exit.
+
+## Step 1b: Optional 60-day backfill for Friday demo
+
+Run this when Jon/Jordan want proof that the system can cover the prior ~2 months instead of only today's feed. This uses broader Google News queries and the same SQLite dedupe path:
+
+```bash
+uv run python -m pipeline.cli.backfill --days 60 > /tmp/backfill_urls.json
+jq length /tmp/backfill_urls.json
+```
+
+For a demo, show the count and representative titles. For production runs, process `/tmp/backfill_urls.json` through the same Step 2 loop in small batches.
 
 ## Step 2: Per-article loop
 
@@ -246,9 +264,21 @@ jq -n --argjson article '<extracted_json>' \
 The push CLI populates:
 - Lead title = `article.title`
 - Date Posted = `article.published_date` (when set, and `PIPEDRIVE_FIELD_DATE_POSTED` configured)
-- Lead 1 / Lead 2 / Lead 3 = `Name | Title | Email | Phone` (when contacts exist + field hashes configured)
+- Lead 1 / Lead 2 / Lead 3 = `Name | Title | LinkedIn | Email | Phone` (when contacts exist + field hashes configured)
+- Lead 1 LinkedIn / Lead 2 LinkedIn / Lead 3 LinkedIn = raw LinkedIn URL (when contacts exist + field hashes configured)
+- Follow-up call/email activities only when `PIPEDRIVE_ENABLE_AUTOMATIONS=1`; leave this off until dry-run review.
 
 Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive Leads (treat as success).
+
+To preview the call/email reminders without writing:
+
+```bash
+jq -n --argjson article '<extracted_json>' \
+      --argjson lead "$PRIMARY" \
+      --arg url "$URL" \
+      '{article: $article, lead: $lead, url: $url, lead_id: "preview-lead-id", today: "2026-06-04"}' \
+  | uv run python -m pipeline.cli.pipedrive_v2 automation-preview | jq .
+```
 
 ### 2f. Mark seen
 

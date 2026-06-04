@@ -35,10 +35,15 @@ class Settings:
     pipedrive_field_lead_1: str | None = None
     pipedrive_field_lead_2: str | None = None
     pipedrive_field_lead_3: str | None = None
+    pipedrive_field_lead_1_linkedin: str | None = None
+    pipedrive_field_lead_2_linkedin: str | None = None
+    pipedrive_field_lead_3_linkedin: str | None = None
     apollo_api_key: str | None = None
     dry_run: bool = False
     max_articles_per_run: int = 50
     log_level: str = "INFO"
+    pipedrive_enable_automations: bool = False
+    pipedrive_automation_owner_id: int | None = None
 
 
 @lru_cache(maxsize=1)
@@ -61,10 +66,18 @@ def settings() -> Settings:
         pipedrive_field_lead_1=env.get("PIPEDRIVE_FIELD_LEAD_1") or None,
         pipedrive_field_lead_2=env.get("PIPEDRIVE_FIELD_LEAD_2") or None,
         pipedrive_field_lead_3=env.get("PIPEDRIVE_FIELD_LEAD_3") or None,
+        pipedrive_field_lead_1_linkedin=env.get("PIPEDRIVE_FIELD_LEAD_1_LINKEDIN") or None,
+        pipedrive_field_lead_2_linkedin=env.get("PIPEDRIVE_FIELD_LEAD_2_LINKEDIN") or None,
+        pipedrive_field_lead_3_linkedin=env.get("PIPEDRIVE_FIELD_LEAD_3_LINKEDIN") or None,
         apollo_api_key=env.get("APOLLO_API_KEY") or None,
         dry_run=env.get("DRY_RUN", "0") == "1",
         max_articles_per_run=int(env.get("MAX_ARTICLES_PER_RUN") or 50),
         log_level=env.get("LOG_LEVEL", "INFO"),
+        pipedrive_enable_automations=env.get("PIPEDRIVE_ENABLE_AUTOMATIONS", "0") == "1",
+        pipedrive_automation_owner_id=(
+            int(env["PIPEDRIVE_AUTOMATION_OWNER_ID"])
+            if env.get("PIPEDRIVE_AUTOMATION_OWNER_ID") else None
+        ),
     )
 
 

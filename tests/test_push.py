@@ -302,12 +302,15 @@ class TestArticleTitleAndExtraFields(unittest.TestCase):
             pipedrive_field_lead_1="l1-hash",
             pipedrive_field_lead_2="l2-hash",
             pipedrive_field_lead_3="l3-hash",
+            pipedrive_field_lead_1_linkedin="l1-li-hash",
+            pipedrive_field_lead_2_linkedin="l2-li-hash",
+            pipedrive_field_lead_3_linkedin="l3-li-hash",
         )
 
-    def _lead(self, name="Jane Doe", title="VP Ops", email="jane@x.com", phone=None):
+    def _lead(self, name="Jane Doe", title="VP Ops", email="jane@x.com", phone=None, linkedin_url=None):
         from pipeline.enrich import Lead
         return Lead(name=name, title=title, email=email, phone=phone,
-                    linkedin_url=None, seniority="vp", apollo_id="grok")
+                    linkedin_url=linkedin_url, seniority="vp", apollo_id="grok")
 
     def test_lead_title_is_article_headline(self):
         art = _article(title="Foundation 8 plans $120M redevelopment of Sheraton Crescent")
@@ -364,6 +367,20 @@ class TestArticleTitleAndExtraFields(unittest.TestCase):
         self.assertEqual(payload["l2-hash"], "Bob B | VP Facilities | bob@x.com")
         self.assertEqual(payload["l3-hash"], "Carol C | Asset Manager | carol@x.com")
 
+    def test_lead_payload_populates_individual_linkedin_fields(self):
+        contacts = [
+            self._lead("Alice A", "COO", "alice@x.com", linkedin_url="https://linkedin.com/in/alice"),
+            self._lead("Bob B", "VP Facilities", "bob@x.com", linkedin_url="https://linkedin.com/in/bob"),
+        ]
+        payload = push._lead_payload(
+            _article(), est_value=None, org_id=1, person_id=None,
+            settings=self._settings_with_extras(),
+            url="https://x.com/a", contacts=contacts,
+        )
+        self.assertEqual(payload["l1-li-hash"], "https://linkedin.com/in/alice")
+        self.assertEqual(payload["l2-li-hash"], "https://linkedin.com/in/bob")
+        self.assertNotIn("l3-li-hash", payload)
+
     def test_lead_payload_caps_extra_contacts_at_3(self):
         # Realistic two-token names so is_lead_generic doesn't filter them.
         contacts = [self._lead(f"Person {i}A") for i in range(5)]
@@ -397,6 +414,22 @@ class TestArticleTitleAndExtraFields(unittest.TestCase):
     def test_fmt_contact_includes_phone(self):
         lead = self._lead(name="Pat", title="Mgr", email=None, phone="480-555-0000")
         self.assertEqual(push._fmt_contact(lead), "Pat | Mgr | 480-555-0000")
+
+    def test_fmt_contact_includes_linkedin_url(self):
+        """Jon specifically asked whether LinkedIn URLs survive Grok -> app ->
+        Pipedrive. Lead 1/2/3 text is the visible Pipedrive surface, so the
+        LinkedIn URL must be included there."""
+        lead = self._lead(
+            name="Pat Smith",
+            title="Director of Facilities",
+            email="pat@example.com",
+            phone="480-555-0000",
+        )
+        lead.linkedin_url = "https://www.linkedin.com/in/pat-smith"
+        self.assertEqual(
+            push._fmt_contact(lead),
+            "Pat Smith | Director of Facilities | LinkedIn: https://www.linkedin.com/in/pat-smith | pat@example.com | 480-555-0000",
+        )
 
     def test_all_contacts_primary_then_extras(self):
         """Primary (the email-matching Person) goes first, extras fill the rest."""
@@ -635,6 +668,7 @@ class TestUpdateLeadContacts(unittest.TestCase):
             pipedrive_field_article_url="art-url-hash",
             pipedrive_field_lead_1="l1-hash", pipedrive_field_lead_2="l2-hash",
             pipedrive_field_lead_3="l3-hash",
+            pipedrive_field_lead_1_linkedin="l1-li-hash",
         )
 
     def _run(self, primary, extras, handler):
@@ -671,12 +705,16 @@ class TestUpdateLeadContacts(unittest.TestCase):
     def test_verified_contact_updates_person_and_lead_fields(self):
         bodies = {}
         primary = Lead(name="Jane Doe", title="COO", email="jane@acme.com", phone="480-555-1212",
-                       linkedin_url=None, seniority="c_suite", apollo_id="grok",
+                       linkedin_url="https://linkedin.com/in/jane", seniority="c_suite", apollo_id="grok",
                        email_verified=True, phone_verified=True)
         result = self._run(primary, [], self._hit_handler(bodies))
         self.assertEqual(bodies["person"]["email"], [{"value": "jane@acme.com"}])
         self.assertEqual(bodies["person"]["phone"], [{"value": "480-555-1212"}])
-        self.assertEqual(bodies["lead"]["l1-hash"], "Jane Doe | COO | jane@acme.com | 480-555-1212")
+        self.assertEqual(
+            bodies["lead"]["l1-hash"],
+            "Jane Doe | COO | LinkedIn: https://linkedin.com/in/jane | jane@acme.com | 480-555-1212",
+        )
+        self.assertEqual(bodies["lead"]["l1-li-hash"], "https://linkedin.com/in/jane")
         self.assertTrue(result["updated"])
 
     def test_hedged_email_kept_out_of_person_but_marked_in_lead_text(self):
@@ -693,6 +731,71 @@ class TestUpdateLeadContacts(unittest.TestCase):
             return httpx.Response(200, json={"success": True, "data": {"items": []}})
         result = self._run(None, None, handler)
         self.assertFalse(result["updated"])
+
+
+class TestSyncAutomations(unittest.TestCase):
+    """When enabled, lead creation should create follow-up tasks, not only a
+    note. Default stays disabled so production behavior doesn't surprise us."""
+
+    def test_sync_creates_followup_activities_when_enabled(self):
+        settings = config.Settings(
+            pipedrive_api_token="t",
+            pipedrive_domain="test-co",
+            pipedrive_field_article_url="art-url-hash",
+            pipedrive_enable_automations=True,
+            pipedrive_automation_owner_id=123,
+        )
+        seen = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            p = req.url.path
+            if req.method == "GET" and p.endswith("/search"):
+                return httpx.Response(200, json={"success": True, "data": {"items": []}})
+            if req.method == "POST" and p == "/api/v1/organizations":
+                return httpx.Response(201, json={"success": True, "data": {"id": 10}})
+            if req.method == "POST" and p == "/api/v1/persons":
+                return httpx.Response(201, json={"success": True, "data": {"id": 20}})
+            if req.method == "POST" and p == "/api/v1/leads":
+                return httpx.Response(201, json={"success": True, "data": {"id": "L1"}})
+            if req.method == "POST" and p == "/api/v1/notes":
+                return httpx.Response(201, json={"success": True, "data": {"id": 30}})
+            if req.method == "POST" and p == "/api/v2/activities":
+                seen.append(json.loads(req.content))
+                return httpx.Response(201, json={"success": True, "data": {"id": len(seen)}})
+            return httpx.Response(404, json={"success": False, "error": p})
+
+        RealClient = push.PipedriveClient
+
+        def make(s):
+            c = RealClient.__new__(RealClient)
+            c._settings = s
+            c._http = httpx.Client(
+                base_url=f"https://{s.pipedrive_domain}.pipedrive.com/api/v1/",
+                params={"api_token": s.pipedrive_api_token},
+                transport=httpx.MockTransport(handler),
+            )
+            return c
+
+        lead = Lead(name="Jane Doe", title="COO", email="jane@acme.com",
+                    phone="480-555-1212", linkedin_url="https://linkedin.com/in/jane",
+                    seniority="c_suite", apollo_id="grok",
+                    email_verified=True, phone_verified=True)
+        with patch.object(push, "PipedriveClient", make):
+            push.sync_to_pipedrive(
+                _article(service_angle="Book turnover-readiness review."),
+                lead=lead,
+                extra_contacts=[],
+                est_value=100_000,
+                basis="sqft",
+                url="https://example.com/a",
+                settings=settings,
+            )
+
+        self.assertEqual([a["type"] for a in seen], ["call", "email"])
+        self.assertEqual(seen[0]["lead_id"], "L1")
+        self.assertEqual(seen[0]["owner_id"], 123)
+        self.assertIn("Book turnover-readiness review.", seen[0]["note"])
+        self.assertIn("https://linkedin.com/in/jane", seen[1]["note"])
 
 
 if __name__ == "__main__":
