@@ -254,7 +254,7 @@ def parse_grok_response_blocks(text: str, max_leads: int = 3) -> list[tuple[Lead
 # 'c_suite' before 'vp' (CEO is not VP); 'director' before 'manager'.
 _SENIORITY_RULES = (
     (("owner", "founder", "principal"), "owner"),
-    (("chief ", " coo", " ceo", " cfo", " cmo", " cto",
+    (("chief ", "chairman", " coo", " ceo", " cfo", " cmo", " cto",
       "coo,", "ceo,", "cfo,", "cmo,", "cto,",
       " coo)", " ceo)", " cfo)", " cmo)", " cto)"), "c_suite"),
     (("vp ", "vice president", "vp,"), "vp"),

@@ -192,6 +192,8 @@ fi
 - `city` — from `<extracted_json>.city` (or null)
 - `description` — short paraphrase using `<extracted_json>.property_type` (e.g. `"multifamily property management"`)
 - `owner_entity` — `$OWNER_HINT` from the Assessor step (or null if unset)
+- `article_summary` — from `<extracted_json>.summary_2sent`
+- `article_url` — `$URL` (the resolved publisher URL)
 - `tab_id` — the Chrome tab ID from `tabs_context_mcp`
 
 The subagent returns one of (matches `skill/grok_enricher.md` Step 8):
