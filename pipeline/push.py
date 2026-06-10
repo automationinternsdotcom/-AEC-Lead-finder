@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import httpx
 
-from pipeline import config, util
+from pipeline import automations, config, util
 from pipeline.config import Settings
 from pipeline.enrich import Lead
 from schema import ExtractedArticle
@@ -82,6 +82,14 @@ class PipedriveClient:
     def post(self, resource: str, payload: dict) -> None:
         """POST {resource} with no return value (notes, activities, etc.)."""
         self._req("POST", resource, json=payload)
+
+    def post_v2(self, resource: str, payload: dict) -> None:
+        """POST to Pipedrive v2 endpoints while preserving query-token auth."""
+        self._req(
+            "POST",
+            f"https://{self._settings.pipedrive_domain}.pipedrive.com/api/v2/{resource}",
+            json=payload,
+        )
 
     def get(self, resource: str, id) -> dict:
         """GET {resource}/{id} → the entity's data dict."""
@@ -207,6 +215,17 @@ def sync_to_pipedrive(
             article, est_value, org_id, person_id, settings, url, contacts,
         ))
         pd.post("notes", {"lead_id": lead_id, "content": _note_body(article, primary, basis, url)})
+        if settings.pipedrive_enable_automations:
+            for activity in automations.build_followup_activities(
+                lead_id=lead_id,
+                org_id=org_id,
+                person_id=person_id,
+                article=article,
+                primary=primary,
+                url=url,
+                owner_id=settings.pipedrive_automation_owner_id,
+            ):
+                pd.post_v2("activities", activity)
     return org_id, person_id, lead_id
 
 
@@ -266,6 +285,15 @@ def update_lead_contacts(
         )
         patch = {field: _fmt_contact(c)
                  for c, field in zip(contacts, lead_field_hashes) if field}
+        linkedin_field_hashes = (
+            settings.pipedrive_field_lead_1_linkedin,
+            settings.pipedrive_field_lead_2_linkedin,
+            settings.pipedrive_field_lead_3_linkedin,
+        )
+        patch.update(
+            {field: c.linkedin_url for c, field in zip(contacts, linkedin_field_hashes)
+             if field and c.linkedin_url}
+        )
         if patch:
             pd.patch("leads", lead_id, patch)
 
@@ -330,11 +358,13 @@ def _lead_title(a: ExtractedArticle) -> str:
 
 
 def _fmt_contact(c: Lead) -> str:
-    """`Name | Title | Email | Phone` — joined with ` | `, null parts omitted.
-    Capped at 255 chars (Pipedrive varchar limit)."""
+    """`Name | Title | LinkedIn | Email | Phone` — joined with ` | `, null
+    parts omitted. Capped at 255 chars (Pipedrive varchar limit)."""
     parts = [c.name]
     if c.title:
         parts.append(c.title)
+    if c.linkedin_url:
+        parts.append(f"LinkedIn: {c.linkedin_url}")
     if c.email:
         # Mark hedged guesses so a human knows to verify before using them.
         parts.append(c.email if c.email_verified else f"Likely {c.email}")
@@ -377,6 +407,14 @@ def _lead_payload(
     for c, field in zip(contacts or [], lead_field_hashes):
         if field:
             payload[field] = _fmt_contact(c)
+    linkedin_field_hashes = (
+        settings.pipedrive_field_lead_1_linkedin,
+        settings.pipedrive_field_lead_2_linkedin,
+        settings.pipedrive_field_lead_3_linkedin,
+    )
+    for c, field in zip(contacts or [], linkedin_field_hashes):
+        if field and c.linkedin_url:
+            payload[field] = c.linkedin_url
     return payload
 
 

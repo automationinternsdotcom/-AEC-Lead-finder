@@ -36,9 +36,17 @@ METHOD_HANDLERS: dict[str, Callable[[str], str]] = {
 
 def discover_new_urls(conn: sqlite3.Connection) -> list[NewArticle]:
     """Fetch every enabled source, dedup against seen_urls, return new articles."""
+    return discover_urls_from_sources(conn, config.load_sources())
+
+
+def discover_urls_from_sources(conn: sqlite3.Connection, sources: list[dict]) -> list[NewArticle]:
+    """Fetch the provided source definitions, dedup against seen_urls, return
+    new articles. `discover_new_urls` uses sources.yaml; backfill tooling passes
+    a generated 60-day source list through this same path so dedupe/status logic
+    stays identical."""
     out: list[NewArticle] = []
     with util.make_http_client() as client:
-        for src in config.load_sources():
+        for src in sources:
             db.sync_source(conn, src["name"], src["method"], src["endpoint"], src.get("enabled", False))
             if not src.get("enabled"):
                 continue

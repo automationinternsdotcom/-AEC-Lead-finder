@@ -6,15 +6,17 @@ A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizo
 
 ## Architecture
 
-Six stdlib CLI sub-tools, each reading from stdin or arguments and writing JSON to stdout:
+Stdlib CLI sub-tools, each reading from stdin or arguments and writing JSON to stdout:
 
 ```
 pipeline.cli.fetch    — discover new article URLs via Google News + RSS; filters against seen_urls (SQLite)
+pipeline.cli.backfill — one-off expanded 60-day Google News sweep for demo/backfill work
 pipeline.cli.extract  — fetch + clean article text for a single URL
 pipeline.cli.qualify  — gate: pass only Arizona CRE signals above confidence threshold
 pipeline.cli.enrich   — Apollo people lookup by company domain (optional)
 pipeline.cli.push     — create Pipedrive Org + Person + Lead; dedup on Article URL custom field
 pipeline.cli.mark     — record URL state in seen_urls (pushed / filtered / failed)
+pipeline.cli.pipedrive_v2 — dry-run cleanup, schema v2, pipeline v2, and automation previews
 ```
 
 Claude orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
@@ -63,7 +65,26 @@ The pipeline enriches qualifying leads with decision-maker contact info. Two pat
 - When `APOLLO_API_KEY` is set in your env, the routine uses Apollo and skips Grok entirely.
 - Useful for headless CI or environments without an active Chrome session.
 
-### 2.6 Create the `NOT RELEVANT` Lead label
+### 2.6 Optional schema v2 / automation fields
+
+The minimal required field is `Article URL`. For the Friday v2 demo, also create/configure:
+
+- `Date Posted`
+- `Lead 1`, `Lead 2`, `Lead 3`
+- `Lead 1 LinkedIn`, `Lead 2 LinkedIn`, `Lead 3 LinkedIn`
+- `Next Follow-up Due`
+- `Follow-up Status`
+- `Automation Log`
+
+Preview the desired field plan without writing to Pipedrive:
+
+```bash
+uv run python -m pipeline.cli.pipedrive_v2 schema
+```
+
+`push.py` now writes LinkedIn URLs both into the visible Lead 1/2/3 contact text and into the optional individual `Lead N LinkedIn` fields when their hashes are configured.
+
+### 2.7 Create the `NOT RELEVANT` Lead label
 
 Jordan flags article-sourced Leads that aren't relevant by applying a Pipedrive Lead label named **`NOT RELEVANT`** (Settings → Lead labels → + Add label). The daily routine polls these flags at the end of each run and surfaces them in the run report so the operator can spot patterns and manually tune the routine's filter protocol (`skill/aether_daily_routine.md` Step 2b).
 
@@ -112,13 +133,31 @@ Add a crontab entry to run the pipeline autonomously:
 
 This runs at 7am daily. The machine must be on at that time. The exact `claude code --headless` invocation is approximate — verify against current Claude Code CLI docs.
 
+### Friday demo dry-runs
+
+```bash
+# Expanded 60-day source sweep
+uv run python -m pipeline.cli.backfill --days 60 > /tmp/aether_backfill.json
+
+# Schema v2 plan
+uv run python -m pipeline.cli.pipedrive_v2 schema | jq .
+
+# Pipeline v2 plan
+uv run python -m pipeline.cli.pipedrive_v2 pipeline | jq .
+
+# Cleanup report from an exported/sampled Leads JSON array
+uv run python -m pipeline.cli.pipedrive_v2 cleanup < /tmp/leads.json | jq .
+```
+
+Follow-up call/email activities are production-gated. Leave `PIPEDRIVE_ENABLE_AUTOMATIONS=0` for previews; set it to `1` only after dry-run review and owner ID confirmation.
+
 ## Testing
 
 ```bash
 uv run python -m unittest discover tests -v
 ```
 
-Currently 44 tests covering the CLI tools and helper modules.
+The suite covers CLI tools, Grok parsing, Pipedrive push/update behavior, v2 planning, backfill generation, and automation payloads.
 
 ## Status
 
