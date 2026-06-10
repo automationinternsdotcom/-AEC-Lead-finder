@@ -4,9 +4,9 @@ Default: prints the first qualifying Lead as a JSON object (or `null`).
 `--all`: prints a JSON array of up to 3 Leads (`[]` if none). Each entry has:
   - all Lead fields (name, title, email, phone, linkedin_url, seniority, apollo_id)
   - `is_generic`: true when the parsed name is a job-title placeholder rather
-    than a specific person (e.g. "Property Manager"). Triggers Heavy retry.
+    than a specific person (e.g. "Property Manager"). Triggers Expert retry.
   - `is_high_confidence`: true when both verified email AND phone are present.
-    Triggers Heavy retry when any entry lacks this — the upgrade target is
+    Triggers Expert retry when any entry lacks this — the upgrade target is
     direct-dial phones + non-hedged emails.
 """
 from __future__ import annotations

@@ -103,25 +103,25 @@ echo '<grok response text>' | uv run python -m pipeline.cli.grok_parse --all
 
 The CLI returns a JSON array of up to 3 Lead objects (`[]` if none). Each entry has an `is_generic` boolean — `true` when the parsed name is a job-title placeholder (e.g., "Property Manager", "Leasing Agent") rather than a specific named person.
 
-### 6b. Heavy-mode fallback (when Fast contact data is low-confidence)
+### 6b. Expert-mode fallback (when Fast contact data is low-confidence)
 
-Fast tends to return emails as `Likely first.last@domain` guesses and almost never returns phone numbers — both are common on the contact databases (RocketReach, ZoomInfo, Apollo) that Heavy mode searches more aggressively. Escalate to Heavy when:
+Fast tends to return emails as `Likely first.last@domain` guesses and almost never returns phone numbers — both are common on the contact databases (RocketReach, ZoomInfo, Apollo) that Expert mode searches more aggressively. Escalate to Expert when:
 
 - The array is empty `[]`, OR
 - **Every entry** has `is_generic: true` (only job-title placeholders), OR
 - **Any entry** has `is_high_confidence: false` (missing verified email or direct phone)
 
-Skip the Heavy retry only when every parsed entry is both `is_generic: false` AND `is_high_confidence: true` — i.e. real named people with both verified email AND direct phone.
+Skip the Expert retry only when every parsed entry is both `is_generic: false` AND `is_high_confidence: true` — i.e. real named people with both verified email AND direct phone.
 
-Heavy retry steps:
-1. Click the mode selector dropdown (next to the chat input) → select **Heavy**.
+Expert retry steps:
+1. Click the mode selector dropdown (next to the chat input) → select **Expert**.
 2. Start a new chat (New Chat in sidebar).
-3. Inject the Heavy-specific prompt below — it's more aggressive about verification + direct-dial phones than the Fast prompt.
-4. Submit. Heavy responses take 3-5+ minutes — poll the page every 30s until you see "Thought for X min Ys" or "Thought for Xs" with a duration (not "Agents thinking"). Cap at 8 min.
+3. Inject the Expert-specific prompt below — it's more aggressive about verification + direct-dial phones than the Fast prompt.
+4. Submit. Expert responses take 3-5+ minutes — poll the page every 30s until you see "Thought for X min Ys" or "Thought for Xs" with a duration (not "Agents thinking"). Cap at 8 min.
 5. Capture, parse via `--all` again.
 6. **Critical:** switch the mode selector back to **Fast** before returning, so the next dispatched subagent finds the session in the expected state.
 
-Heavy prompt (more aggressive than Fast — fill the same slots, plus the article context and `{fast_findings_block}`).
+Expert prompt (more aggressive than Fast — fill the same slots, plus the article context and `{fast_findings_block}`).
 
 Build `{fast_findings_block}` from the Fast leads you just parsed — one line per contact:
 `N. <name> — <title> — LinkedIn: <url|null> — Email: <email|"Likely <email>"|null> — Phone: <phone|null>`. If Fast returned no usable candidates, set the block to the single line `The first-pass search returned no usable candidates — search fresh.`
@@ -153,25 +153,25 @@ Return a numbered list only, no preamble.
 
 ### 7. Pick the best result
 
-If Heavy ran, compare the two results:
+If Expert ran, compare the two results:
 
-- **Take Heavy** if it has *more* contacts with `is_high_confidence: true` than Fast did.
-- **Otherwise take Fast** — Heavy sometimes returns fewer entries or strips contacts entirely when it can't verify them, and Fast's pattern-guess emails are better than nothing.
+- **Take Expert** if it has *more* contacts with `is_high_confidence: true` than Fast did.
+- **Otherwise take Fast** — Expert sometimes returns fewer entries or strips contacts entirely when it can't verify them, and Fast's pattern-guess emails are better than nothing.
 
 Track this decision in the response (`mode` field below) so the parent can log the breakdown.
 
 ### 8. Return
 
-Return up to 3 leads as a JSON array. Drop any `is_generic: true` entries from the final output (they're noise once Heavy has run — or were the only thing Fast could find). Strip the `is_generic` / `is_high_confidence` flags from each saved entry — they're internal control signals, not contact data.
+Return up to 3 leads as a JSON array. Drop any `is_generic: true` entries from the final output (they're noise once Expert has run — or were the only thing Fast could find). Strip the `is_generic` / `is_high_confidence` flags from each saved entry — they're internal control signals, not contact data.
 
 ```json
-{"company_name": "<input company_name>", "mode": "fast" | "heavy", "leads": [<Lead>, <Lead>, <Lead>]}
+{"company_name": "<input company_name>", "mode": "fast" | "expert", "leads": [<Lead>, <Lead>, <Lead>]}
 ```
 
 Examples:
 
 ```json
-{"company_name": "Mark-Taylor Residential", "mode": "heavy", "leads": [{"name": "Michael Wilson", "title": "COO", "email": "michael.wilson@mark-taylor.com", "phone": "(480) 991-9111", "linkedin_url": "https://www.linkedin.com/in/michael-wilson-2a982625a", "seniority": "c_suite", "apollo_id": "grok"}]}
+{"company_name": "Mark-Taylor Residential", "mode": "expert", "leads": [{"name": "Michael Wilson", "title": "COO", "email": "michael.wilson@mark-taylor.com", "phone": "(480) 991-9111", "linkedin_url": "https://www.linkedin.com/in/michael-wilson-2a982625a", "seniority": "c_suite", "apollo_id": "grok"}]}
 ```
 
 ```json
@@ -192,5 +192,5 @@ Examples:
 
 - **Never fabricate contact info.** If Grok says "no email findable," the email field stays null.
 - **The parser is deterministic.** Don't second-guess its output — if it strips `(Christopher)` from `Chris Madison (Christopher Madison)`, that's correct.
-- **One Grok query per company per mode.** No follow-up clarifications, no "tell me more." (The Heavy-mode retry in step 6b counts as a separate query for a different mode, not a follow-up.)
-- **Fast mode is the default.** Escalate to Heavy only via the step 6b fallback (when Fast returns only `is_generic` placeholders) — Heavy takes 3-5+ minutes per query and shouldn't be used as a starting mode.
+- **One Grok query per company per mode.** No follow-up clarifications, no "tell me more." (The Expert-mode retry in step 6b counts as a separate query for a different mode, not a follow-up.)
+- **Fast mode is the default.** Escalate to Expert only via the step 6b fallback (when Fast returns only `is_generic` placeholders) — Expert takes 3-5+ minutes per query and shouldn't be used as a starting mode.

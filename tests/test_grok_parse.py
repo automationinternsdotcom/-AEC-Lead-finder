@@ -112,7 +112,7 @@ class TestDeriveSeniority(unittest.TestCase):
 
 class TestIsLeadGeneric(unittest.TestCase):
     """Heuristic: detect job-title placeholders so the enricher escalates to
-    Heavy mode instead of pushing them into Lead 1/2/3 fields."""
+    Expert mode instead of pushing them into Lead 1/2/3 fields."""
 
     def _lead(self, name):
         from pipeline.enrich import Lead
@@ -184,7 +184,7 @@ class TestPhoneExtraction(unittest.TestCase):
 
 
 class TestIsHighConfidenceContact(unittest.TestCase):
-    """Trigger for Heavy-mode fallback: a 'high confidence' contact has both
+    """Trigger for Expert-mode fallback: a 'high confidence' contact has both
     a verified (non-hedged, non-generic) email AND a phone number."""
 
     def _lead(self, **overrides):

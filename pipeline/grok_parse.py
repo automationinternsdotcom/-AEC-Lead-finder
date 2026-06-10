@@ -110,7 +110,7 @@ def parse_grok_response_all(text: str, max_leads: int = 3) -> list[Lead]:
 
 
 # Words that mean Grok returned only a job-title placeholder (no specific
-# named person). Used by the enricher to decide whether to escalate to Heavy.
+# named person). Used by the enricher to decide whether to escalate to Expert.
 _GENERIC_TITLE_TOKENS = (
     "property manager", "leasing agent", "leasing manager",
     "general manager", "facilities manager", "the property manager",
@@ -129,7 +129,7 @@ _GENERIC_SUFFIXES = (
 
 def is_lead_generic(lead: Lead) -> bool:
     """True if the Lead.name looks like a job title placeholder or a team/org
-    name rather than a specific named person. Trigger for Heavy-mode retry.
+    name rather than a specific named person. Trigger for Expert-mode retry.
 
     Layered checks (cheapest first):
       1. Empty / whitespace-only.
@@ -211,7 +211,7 @@ def _normalize_phone(raw: str) -> str:
 def is_high_confidence_contact(lead: Lead, raw_block: str = "") -> bool:
     """True when both email AND phone are present AND the email isn't a hedged
     guess or a generic role mailbox. Used by the enricher to decide whether
-    to escalate a Fast result to Heavy.
+    to escalate a Fast result to Expert.
 
     The `raw_block` parameter is the original Grok response chunk for this
     contact (between this entry and the next "N. " head). We need it to

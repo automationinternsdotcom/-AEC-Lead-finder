@@ -215,7 +215,7 @@ def update_lead_contacts(
     settings: Settings,
 ) -> dict:
     """Sync improved contacts into an ALREADY-CREATED Lead (idempotent re-run /
-    Heavy-pass upgrade). Finds the Lead by Article URL, then:
+    Expert-pass upgrade). Finds the Lead by Article URL, then:
       - PUTs the linked Person with the primary's VERIFIED email/phone only
         (same verified-only policy as creation), and
       - PATCHes the Lead 1/2/3 custom fields with the formatted contacts.

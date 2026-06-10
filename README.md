@@ -54,7 +54,7 @@ The pipeline enriches qualifying leads with decision-maker contact info. Two pat
 
 - Open SuperGrok ([grok.com](https://grok.com)) in Chrome with the [Claude in Chrome](https://www.anthropic.com/news/claude-in-chrome) extension active.
 - Log in to your SuperGrok account.
-- Verify **Fast** mode is selected in the chat input (not Heavy / Expert / Auto). Heavy mode takes 5+ minutes per query and blows the daily time budget.
+- Verify **Fast** mode is selected in the chat input (not Expert / Heavy / Auto). Expert mode takes 5+ minutes per query, so it's used only for the step-6b escalation, not as the starting mode.
 - The daily routine's enricher subagent (`skill/grok_enricher.md`) drives the session per-article via Chrome MCP. ~6-10s per query.
 
 **Path B: Apollo.io API (set `APOLLO_API_KEY` in `.env`)**

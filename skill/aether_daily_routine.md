@@ -198,7 +198,7 @@ fi
 
 The subagent returns one of (matches `skill/grok_enricher.md` Step 8):
 
-- `{"company_name": "...", "mode": "fast"|"heavy", "leads": [<Lead>, <Lead>, <Lead>]}` — success (1–3 leads)
+- `{"company_name": "...", "mode": "fast"|"expert", "leads": [<Lead>, <Lead>, <Lead>]}` — success (1–3 leads)
 - `{"company_name": "...", "mode": "fast", "leads": []}` — no decision-maker found → `lead_gap=True` downstream
 - `{"error": "session_invalid", ...}` — re-check the Chrome login, then retry the article
 
