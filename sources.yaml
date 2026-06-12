@@ -43,8 +43,8 @@
 
 - name: azbex
   method: rss
-  endpoint: TODO
-  enabled: false
+  endpoint: https://azbex.com/feed/
+  enabled: true
 
 - name: arizona_commerce_authority
   method: rss
@@ -63,8 +63,8 @@
 
 - name: arizona_digital_free_press
   method: rss
-  endpoint: TODO
-  enabled: false
+  endpoint: https://arizonadigitalfreepress.com/feed/
+  enabled: true
 
 - name: arizona_progress_gazette
   method: rss
