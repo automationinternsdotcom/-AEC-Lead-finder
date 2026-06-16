@@ -1,0 +1,108 @@
+# Cleaning vertical spec — captures what the pipeline hardcodes TODAY.
+#
+# Phase 1 will prove parity: run the engine from this spec and confirm it
+# reproduces current results. Every value here is sourced from existing code,
+# not invented:
+#   - discovery.search_queries  <- sources.yaml (google_news endpoints)
+#   - discovery.source_tags     <- sources.yaml feed names
+#   - qualification.relevance_rubric <- skill/aether_daily_routine.md Step 2b
+#   - targeting.trigger_signals <- the HIGH/MEDIUM protocol in that skill
+#   - enrichment.outreach_angle <- schema.py service_angle / push.py note voice
+
+campaign_id: aether-cleaning-az
+
+client:
+  name: Aether Facility Services
+  company_description: >-
+    Commercial cleaning and facility services in Arizona. ICP is locally-owned
+    20-600 unit multifamily properties plus commercial properties with active
+    operations. Long sales cycle (1-2 years), so early-stage construction and
+    acquisition signals are still valuable.
+  service_area:
+    - Arizona
+    - Goodyear to Apache Junction corridor
+    - Tucson
+
+targeting:
+  industry: commercial cleaning / janitorial / facility services
+  trigger_signals:
+    - new tenant occupancy or lease signing at a commercial property
+    - renovation, redevelopment, adaptive reuse, or construction completion
+    - new business openings (restaurant, bar, coffee shop, dispensary, retail)
+    - property management company changes or transitions
+    - major expansion or buildout
+    - new apartment / condo towers reaching lease-up phase
+    - HOA stand-ups for new communities
+    - developer land acquisitions
+    - industrial / warehouse deals
+  buyer_personas:
+    - facilities manager
+    - property manager
+    - developer
+    - GC project manager
+    - HOA board
+  negative_keywords:
+    - residential
+    - single-family
+    - homebuyer
+    - mortgage rate
+    - market commentary
+    - rankings
+    - awards
+
+discovery:
+  # Verbatim from sources.yaml google_news endpoints.
+  search_queries:
+    - Arizona commercial real estate when:30d
+    - Phoenix office industrial retail development when:30d
+    - Tucson commercial real estate development when:30d
+  # Feed names from sources.yaml (enabled set).
+  source_tags:
+    - google_news_az_cre
+    - google_news_phoenix_dev
+    - google_news_tucson_cre
+    - azbex
+    - arizona_digital_free_press
+  geography:
+    - AZ
+
+qualification:
+  # Jordan's HIGH/MEDIUM/LOW protocol distilled to one rubric. HIGH/MEDIUM keep,
+  # LOW drops. Property must be in Arizona (az_relevant).
+  relevance_rubric: >-
+    A lead is an Arizona commercial property or project with a physical-activity
+    signal that implies a near-term facility-services need: new occupancy, lease
+    signing, renovation/construction completion, a new business opening, a
+    property-management change, a major buildout, or a multifamily tower reaching
+    lease-up (the ICP sweet spot). Developer land acquisitions and industrial
+    deals qualify as lower-priority leads (real, but longer timeline). DROP macro
+    market commentary, mortgage/rate news, residential/consumer coverage,
+    national stories that only mention Arizona in passing, and rankings/awards
+    with no property activity. The property itself must be in Arizona; rate down
+    anything outside the Goodyear-to-Apache-Junction corridor or Tucson.
+  min_confidence: 0.6
+
+enrichment:
+  buyer_persona: facilities / property manager, developer, or GC decision-maker
+  # Aether "Straight Shooter" voice: asset preservation / strategic partner,
+  # NOT "cleaning" or "janitor" (schema.py + push.py enforce this framing).
+  outreach_angle: >-
+    Asset-preservation and strategic-partner framing for post-construction and
+    ongoing facility services — never "cleaning" or "janitor" language.
+  required_fields:
+    - contact_name
+    - contact_title
+    - email_or_phone
+    - company
+
+destination:
+  type: pipedrive
+  pipedrive:
+    api_key_ref: secret://campaigns/aether-cleaning-az/pipedrive
+    field_mapping: standard
+  fallback: excel
+
+schedule:
+  cadence: nightly
+  preview_before_push: true
+  max_first_push: 2
