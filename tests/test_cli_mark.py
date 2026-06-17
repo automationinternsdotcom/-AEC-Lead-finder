@@ -55,6 +55,10 @@ class TestMarkCli(unittest.TestCase):
             rc = mark_cli.main()
         self.assertEqual(rc, 2)
 
+    def test_merged_is_a_valid_status(self):
+        from pipeline.cli import mark
+        self.assertIn("merged", mark.VALID_STATUSES)
+
 
 if __name__ == "__main__":
     unittest.main()

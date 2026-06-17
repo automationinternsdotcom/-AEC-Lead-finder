@@ -4,7 +4,7 @@ Reuses: sqlite3 (stdlib, Row factory + INSERT OR IGNORE / REPLACE / ON CONFLICT
         for upsert/dedup at the SQL layer), util.utc_now_iso for all timestamps.
 Extend: the SCHEMA constant for DDL changes; add a thin helper per new write op.
 Schema invariants: all timestamps are utc_now_iso strings; seen_urls.status ∈
-  {new, extracted, filtered, pushed, failed}; runs.status ∈ {in_progress, ok, failed}.
+  {new, extracted, filtered, pushed, failed, merged}; runs.status ∈ {in_progress, ok, failed}.
 """
 from __future__ import annotations
 
