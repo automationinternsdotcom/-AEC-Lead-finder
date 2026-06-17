@@ -29,6 +29,25 @@ def _seed_seen(conn, url_hash: str, status: str = "new",
     )
 
 
+class TestDigestWatermark(unittest.TestCase):
+    def test_none_when_never_run(self):
+        self.assertIsNone(db.get_last_digest_run(_mem_conn()))
+
+    def test_returns_latest_run(self):
+        conn = _mem_conn()
+        db.record_digest_run(conn, "2026-06-15T07:00:00Z", 3)
+        db.record_digest_run(conn, "2026-06-16T07:00:00Z", 0)
+        self.assertEqual(db.get_last_digest_run(conn), "2026-06-16T07:00:00Z")
+
+    def test_record_is_idempotent_on_same_timestamp(self):
+        conn = _mem_conn()
+        db.record_digest_run(conn, "2026-06-16T07:00:00Z", 1)
+        db.record_digest_run(conn, "2026-06-16T07:00:00Z", 5)  # REPLACE, not dup
+        rows = conn.execute("SELECT ran_at, lead_count FROM digest_runs").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lead_count"], 5)
+
+
 class TestGetUnprocessedUrls(unittest.TestCase):
     def test_empty_db_returns_no_rows(self):
         conn = _mem_conn()

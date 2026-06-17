@@ -287,3 +287,35 @@ After the loop, report:
 - **Jordan's feedback:** count of `NOT RELEVANT`-flagged Leads + the list from Step 3
 
 Log a final `run_finished` event with the counts.
+
+## Step 5: Email Jordan the day's new leads
+
+After the loop, email Jordan a summary of the Leads created during this run.
+This reads the Leads back out of Pipedrive and sends a one-row-per-Lead table
+(every contact listed) over SMTP.
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily
+DIGEST_RC=$?
+```
+
+Behavior:
+- Sends to `LEAD_DIGEST_TO` (set in the env file). Requires `SMTP_HOST`,
+  `LEAD_DIGEST_TO` and `LEAD_DIGEST_FROM`; for Google Workspace use
+  `smtp.gmail.com:587` with an App Password as `SMTP_PASSWORD`.
+- `--daily` covers Leads created **since the last successful digest run** — a
+  watermark persisted in `db.sqlite` (`digest_runs` table). A successful send
+  advances the watermark, so a Lead is never emailed twice even if the routine
+  runs more than once a day; a failed send leaves it so the next run retries.
+  The very first run (no watermark yet) falls back to Leads created today (UTC).
+- If **no** new Leads since the watermark, it logs `digest_skipped` and sends
+  nothing (rc 0), but still advances the watermark.
+
+Exit codes: `0` ok (sent or nothing to send) · `4` SMTP not configured (set the
+`SMTP_*` / `LEAD_DIGEST_*` vars) · `2` usage error. If `DIGEST_RC == 4`, note in
+the report that the digest couldn't send because SMTP env vars are missing.
+
+**One-time backfill** (not part of the daily run): to email every Lead created
+since May 29, 2026, run `uv run python -m pipeline.cli.email_digest --since 2026-05-29`.
+`--since` does **not** touch the daily watermark. Preview without sending by
+appending `--print` (renders the HTML to stdout; also leaves the watermark alone).

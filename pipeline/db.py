@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS enriched_orgs (
   enriched_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_enriched_orgs_enriched_at ON enriched_orgs(enriched_at);
+
+CREATE TABLE IF NOT EXISTS digest_runs (
+  ran_at     TEXT PRIMARY KEY,
+  lead_count INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -252,4 +257,26 @@ def cache_enrichment(conn: sqlite3.Connection, org_name: str,
             _normalize_org_name(org_name), org_name,
             json.dumps(dataclasses.asdict(lead)), source, utc_now_iso(),
         ),
+    )
+
+
+# ── digest watermark: when the email digest last sent successfully ─────────────
+#
+# pipeline.cli.email_digest --daily sends Leads created since the last successful
+# digest. We persist that watermark here so a successful send advances it and the
+# same Lead is never emailed twice; a failed send leaves it untouched so the next
+# run retries. One row per successful run (audit trail); the watermark is MAX(ran_at).
+
+
+def get_last_digest_run(conn: sqlite3.Connection) -> str | None:
+    """utc_now_iso of the most recent successful digest run, or None if never run."""
+    row = conn.execute("SELECT MAX(ran_at) AS last FROM digest_runs").fetchone()
+    return row["last"] if row and row["last"] else None
+
+
+def record_digest_run(conn: sqlite3.Connection, ran_at: str, lead_count: int) -> None:
+    """Stamp a successful digest run, advancing the watermark to `ran_at`."""
+    conn.execute(
+        "INSERT OR REPLACE INTO digest_runs (ran_at, lead_count) VALUES (?, ?)",
+        (ran_at, lead_count),
     )
