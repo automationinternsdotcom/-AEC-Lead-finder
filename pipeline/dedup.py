@@ -16,12 +16,12 @@ _NOISE_WORDS = frozenset({
     "that", "this", "they", "their", "will", "have", "more", "than", "tops",
     "for", "the", "and", "new",
 })
-# Company suffixes stripped by normalize_company (longest-first matching).
-_COMPANY_SUFFIXES = (
+# Company suffixes stripped by normalize_company (one trailing word at a time).
+_COMPANY_SUFFIXES = frozenset({
     "companies", "company", "construction", "development", "developments",
     "partners", "group", "ventures", "capital", "holdings", "properties",
     "residential", "investments", "associates", "llc", "inc", "lp", "co",
-)
+})
 
 
 def title_tokens(title: str) -> frozenset[str]:
@@ -39,6 +39,6 @@ def normalize_company(name: str) -> str:
     n = re.sub(r"\(.*?\)", " ", (name or "").lower())   # drop "(SkySong)"
     n = re.sub(r"[.,]", " ", n)
     parts = [p for p in n.split() if p]
-    while parts and parts[-1] in _COMPANY_SUFFIXES:
+    while len(parts) > 1 and parts[-1] in _COMPANY_SUFFIXES:
         parts.pop()
     return " ".join(parts).strip()

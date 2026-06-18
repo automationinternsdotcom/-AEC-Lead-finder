@@ -45,3 +45,13 @@ class TestNormalization(unittest.TestCase):
             dedup.normalize_company("Stevens-Leinweber Construction"),
             "stevens-leinweber",
         )
+
+    def test_normalize_company_keeps_one_token_for_all_suffix_names(self):
+        from pipeline import dedup
+        # An all-suffix name must NOT collapse to "" (would false-match).
+        self.assertEqual(dedup.normalize_company("Capital Group"), "capital")
+        self.assertEqual(dedup.normalize_company("Development LLC"), "development")
+
+    def test_normalize_company_handles_none(self):
+        from pipeline import dedup
+        self.assertEqual(dedup.normalize_company(None), "")
