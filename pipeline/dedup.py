@@ -88,3 +88,43 @@ def cluster_leads(leads: list[LeadRecord], threshold: float) -> list[list[LeadRe
     for i, lead in enumerate(leads):
         groups.setdefault(find(i), []).append(lead)
     return list(groups.values())
+
+
+_MAX_CONTACTS = 3  # Pipedrive Lead 1/2/3 fields
+
+
+@dataclass(slots=True)
+class MergeResult:
+    kept: list[str]       # final contact strings to write to Lead 1/2/3
+    overflow: list[str]   # unique contacts that didn't fit (logged, not written)
+
+
+def completeness_key(lead: LeadRecord):
+    """Sort key for keeper selection. max() picks: most contacts, then most
+    filled fields, then EARLIEST add_time (negated epoch makes earliest largest)."""
+    epoch = lead.add_dt.timestamp() if lead.add_dt else 0.0
+    return (len(lead.contacts), lead.num_filled, -epoch)
+
+
+def _contact_name_key(contact: str) -> str:
+    """Identity for contact dedup: normalized name segment (before first ' | ')."""
+    name = contact.split(" | ", 1)[0]
+    return re.sub(r"\s+", " ", name).strip().lower()
+
+
+def merge_contact_strings(existing: list[str], incoming: list[str]) -> MergeResult:
+    """Union existing + incoming contact strings, dedup by name, keeper's first,
+    cap at 3. Anything beyond the cap is returned as overflow (never silently
+    dropped — callers log it)."""
+    kept: list[str] = []
+    overflow: list[str] = []
+    seen: set[str] = set()
+    for contact in [*existing, *incoming]:
+        if not contact or not contact.strip():
+            continue
+        key = _contact_name_key(contact)
+        if key in seen:
+            continue
+        seen.add(key)
+        (kept if len(kept) < _MAX_CONTACTS else overflow).append(contact)
+    return MergeResult(kept=kept, overflow=overflow)

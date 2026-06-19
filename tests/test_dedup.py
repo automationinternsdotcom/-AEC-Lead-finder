@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timezone
 
 
 class TestDedupConfig(unittest.TestCase):
@@ -81,3 +82,37 @@ class TestScoringAndClustering(unittest.TestCase):
         clusters = dedup.cluster_leads(recs, threshold=0.5)
         sizes = sorted(len(c) for c in clusters)
         self.assertEqual(sizes, [1, 2])
+
+
+class TestKeeperAndMerge(unittest.TestCase):
+    def _rec(self, lid, contacts, num_filled, day):
+        from pipeline import dedup
+        return dedup.LeadRecord(
+            lid, "t", "u", contacts,
+            datetime(2026, 5, day, tzinfo=timezone.utc), num_filled,
+        )
+
+    def test_keeper_prefers_most_contacts_then_fields_then_earliest(self):
+        from pipeline import dedup
+        a = self._rec("a", ["X | CEO"], num_filled=3, day=30)
+        b = self._rec("b", ["X | CEO", "Y | COO"], num_filled=2, day=31)  # more contacts
+        c = self._rec("c", ["X | CEO", "Y | COO"], num_filled=2, day=29)  # tie -> earliest
+        keeper = max([a, b, c], key=dedup.completeness_key)
+        self.assertEqual(keeper.lead_id, "c")
+
+    def test_merge_dedups_by_name_keeps_keeper_first_caps_at_3(self):
+        from pipeline import dedup
+        res = dedup.merge_contact_strings(
+            existing=["Jane Doe | CEO | jane@x.com"],
+            incoming=[
+                "Jane Doe | Chief Executive",          # same person, diff text -> dropped
+                "Bob Smith | COO | bob@x.com",
+                "Cara Lee | VP",
+                "Dan Poe | Director",                  # 4th unique -> overflow
+            ],
+        )
+        self.assertEqual(res.kept[0], "Jane Doe | CEO | jane@x.com")  # keeper first
+        self.assertEqual(len(res.kept), 3)
+        self.assertEqual([c.split(" | ")[0] for c in res.kept],
+                         ["Jane Doe", "Bob Smith", "Cara Lee"])
+        self.assertEqual([c.split(" | ")[0] for c in res.overflow], ["Dan Poe"])
