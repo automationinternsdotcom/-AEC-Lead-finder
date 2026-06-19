@@ -56,3 +56,28 @@ class TestMergeContacts(unittest.TestCase):
             rc = cli.main()
         self.assertEqual(rc, 0)
         pd.patch.assert_not_called()
+
+    def test_merged_url_posts_note_and_marks_seen(self):
+        _settings(dry=False)
+        from pipeline.cli import merge_contacts as cli
+        pd = mock.MagicMock()
+        pd.get.return_value = {"id": "k", "L1": "Jane | CEO", "L2": None, "L3": None}
+        with mock.patch.object(cli.push, "PipedriveClient") as PC, \
+             mock.patch.object(cli.db, "connect") as connect, \
+             mock.patch.object(cli.util, "canonicalize_url", return_value="https://canon/x"), \
+             mock.patch.object(cli.util, "sha256_hex", return_value="HASH"), \
+             mock.patch.object(cli.db, "mark_seen_status") as mark, \
+             mock.patch("sys.stdin", io.StringIO(json.dumps({
+                 "keeper_lead_id": "k", "contacts": ["Bob | COO"],
+                 "merged_url": "https://example.com/dup"}))):
+            PC.return_value.__enter__.return_value = pd
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        # audit note posted to the keeper
+        note_call = next(c for c in pd.post.call_args_list if c.args[0] == "notes")
+        self.assertEqual(note_call.args[1]["lead_id"], "k")
+        self.assertIn("https://example.com/dup", note_call.args[1]["content"])
+        # url marked 'merged' in seen_urls with the hashed canonical url
+        mark.assert_called_once()
+        self.assertEqual(mark.call_args.args[1], "HASH")
+        self.assertEqual(mark.call_args.args[2], "merged")

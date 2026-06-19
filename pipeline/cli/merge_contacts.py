@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import sys
 
-from pipeline import config, dedup, push, util
+from pipeline import config, db, dedup, push, util
 
 
 def main() -> int:
@@ -35,7 +35,7 @@ def main() -> int:
 
     with push.PipedriveClient(settings) as pd:
         keeper = pd.get("leads", keeper_id)
-        existing = [str(c) for f in lead_fields if f and (c := dedup._cf(keeper, f))]
+        existing = [str(c) for f in lead_fields if f and (c := dedup.cf(keeper, f))]
         result = dedup.merge_contact_strings(existing, incoming)
         if result.overflow:
             util.log_event("merge_contacts_overflow", keeper=keeper_id,
@@ -58,9 +58,14 @@ def main() -> int:
             pd.post("notes", {"lead_id": keeper_id,
                               "content": f"merged via event-dedup: {merged_url}"})
 
+    # Order matters: we PATCH the keeper's contacts FIRST, then mark the URL
+    # 'merged'. If the mark fails after a successful PATCH, the worst case is a
+    # re-fetch re-encountering the URL — which the find_event_candidates gate
+    # catches again next run. Marking 'merged' FIRST would risk the opposite:
+    # the URL suppressed but contacts never written = a silently lost lead.
+    # Any post-PATCH failure propagates (non-zero exit) so the caller can retry.
     if merged_url:
         # Mark the merged-away URL so a future fetch never re-creates it.
-        from pipeline import db
         conn = db.connect()
         try:
             db.mark_seen_status(conn, util.sha256_hex(util.canonicalize_url(merged_url)), "merged")

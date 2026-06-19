@@ -113,7 +113,7 @@ def _contact_name_key(contact: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
-def _cf(lead: dict, key: str):
+def cf(lead: dict, key: str):
     """Read a custom field that may be a bare value or a nested {value:...}."""
     v = lead.get(key)
     if isinstance(v, dict):
@@ -127,8 +127,8 @@ def lead_record_from_dict(
     """Project a raw Pipedrive Lead dict into a LeadRecord."""
     from pipeline.email_digest import _lead_add_dt  # reuse the tolerant parser
 
-    contacts = [str(c) for f in lead_fields if f and (c := _cf(lead, f))]
-    url = _cf(lead, article_url_field)
+    contacts = [str(c) for f in lead_fields if f and (c := cf(lead, f))]
+    url = cf(lead, article_url_field)
     value_raw = lead.get("value") or {}
     has_value = bool(value_raw.get("amount") if isinstance(value_raw, dict) else value_raw)
     has_person = lead.get("person_id") is not None
