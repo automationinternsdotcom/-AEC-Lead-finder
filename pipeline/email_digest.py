@@ -45,6 +45,86 @@ _LEADS_PAGE_SIZE = 500
 # Strips any residual HTML tag from extracted note values (defensive fallback).
 _TAG_RE = re.compile(r"<[^>]+>")
 
+_PHONE_RE = re.compile(r"\+?\d[\d().\-\s]{8,}\d")
+
+
+def _tel_href(raw: str) -> str:
+    """Normalize a display phone to a tel: target. US-default for bare 10-digit."""
+    s = raw.strip()
+    digits = re.sub(r"[^\d]", "", s)
+    if s.startswith("+"):
+        return "+" + digits
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return digits
+
+
+def _phone_anchor(raw: str) -> str:
+    return f'<a href="tel:{_tel_href(raw)}">{escape(raw.strip())}</a>'
+
+
+def _phone_key(raw: str) -> str:
+    """Last 10 digits — dedup key so the same number from string vs Person collapses."""
+    return re.sub(r"[^\d]", "", raw)[-10:]
+
+
+def _linkify_phones_html(s: str) -> str:
+    """Escape a contact string, wrapping phone-like substrings (>=10 digits) in tel: links."""
+    out, last = [], 0
+    for m in _PHONE_RE.finditer(s):
+        seg = m.group()
+        if len(re.sub(r"\D", "", seg)) < 10:
+            continue
+        out.append(escape(s[last:m.start()]))
+        out.append(_phone_anchor(seg))
+        last = m.end()
+    out.append(escape(s[last:]))
+    return "".join(out)
+
+
+def _render_contacts_html(ld) -> str:
+    """Contacts cell: each contact linkified; the primary (first) also gets its
+    Person's labeled phones (work/mobile) appended, deduped by last-10-digits."""
+    if not ld.contacts:
+        return "<em>none found</em>"
+    rendered = []
+    for i, c in enumerate(ld.contacts):
+        html = _linkify_phones_html(c)
+        if i == 0 and ld.primary_phones:
+            present = {_phone_key(m.group()) for m in _PHONE_RE.finditer(c)
+                       if len(re.sub(r"\D", "", m.group())) >= 10}
+            extra = []
+            for label, val in ld.primary_phones:
+                if not val or _phone_key(val) in present:
+                    continue
+                present.add(_phone_key(val))
+                lab = f"{escape(label.capitalize())}: " if label else ""
+                extra.append(f"{lab}{_phone_anchor(val)}")
+            if extra:
+                html += ' <span style="color:#666">— ' + ", ".join(extra) + "</span>"
+        rendered.append(html)
+    return "<br>".join(rendered)
+
+
+def _fetch_person_phones(http: httpx.Client, person_id) -> list[tuple[str, str]]:
+    """Linked Person's non-empty phones as (label, value). Best-effort → [] on error."""
+    if not person_id:
+        return []
+    try:
+        resp = http.get(f"persons/{person_id}")
+        resp.raise_for_status()
+        phones = (resp.json().get("data") or {}).get("phone") or []
+    except httpx.HTTPError:
+        return []
+    out = []
+    for p in phones:
+        val = (p.get("value") or "").strip()
+        if val:
+            out.append(((p.get("label") or "").strip(), val))
+    return out
+
 
 @dataclasses.dataclass(slots=True)
 class DigestLead:
@@ -62,6 +142,7 @@ class DigestLead:
     article_url: str | None
     contacts: list[str]           # raw "Name | Title | Email | Phone" strings
     lead_url: str                 # deep link to the Lead in Pipedrive
+    primary_phones: list = dataclasses.field(default_factory=list)  # (label, value) from linked Person
 
 
 class SmtpNotConfigured(RuntimeError):
@@ -178,6 +259,10 @@ def _to_digest_lead(
 
     value = lead.get("value") or {}
     contacts = _contacts(lead, settings)
+    pid = lead.get("person_id")
+    if isinstance(pid, dict):
+        pid = pid.get("value")
+    primary_phones = _fetch_person_phones(http, pid)
     lead_id = str(lead.get("id") or "")
     return DigestLead(
         lead_id=lead_id,
@@ -193,6 +278,7 @@ def _to_digest_lead(
         article_url=lead.get(settings.pipedrive_field_article_url),
         contacts=contacts,
         lead_url=f"https://{settings.pipedrive_domain}.pipedrive.com/leads/inbox/{lead_id}",
+        primary_phones=primary_phones,
     )
 
 
@@ -306,8 +392,20 @@ def render_text(leads: list[DigestLead], window_label: str) -> str:
         lines.append(f"   Pipedrive: {ld.lead_url}")
         if ld.contacts:
             lines.append("   Contacts:")
-            for c in ld.contacts:
-                lines.append(f"     - {c}")
+            for i, c in enumerate(ld.contacts):
+                extra = ""
+                if i == 0 and ld.primary_phones:
+                    present = {_phone_key(m.group()) for m in _PHONE_RE.finditer(c)
+                               if len(re.sub(r"\D", "", m.group())) >= 10}
+                    parts = []
+                    for label, val in ld.primary_phones:
+                        if not val or _phone_key(val) in present:
+                            continue
+                        present.add(_phone_key(val))
+                        parts.append(f"{label.capitalize()+': ' if label else ''}{val}")
+                    if parts:
+                        extra = "  (" + ", ".join(parts) + ")"
+                lines.append(f"     - {c}{extra}")
         else:
             lines.append("   Contacts: (none found)")
         lines.append("")
@@ -318,10 +416,7 @@ def render_html(leads: list[DigestLead], window_label: str) -> str:
     """HTML summary table — one row per Lead, every contact listed."""
     rows = []
     for ld in leads:
-        contacts_html = (
-            "<br>".join(escape(c) for c in ld.contacts)
-            if ld.contacts else "<em>none found</em>"
-        )
+        contacts_html = _render_contacts_html(ld)
         title_html = escape(ld.title)
         if ld.article_url:
             title_html = f'<a href="{escape(ld.article_url)}">{title_html}</a>'

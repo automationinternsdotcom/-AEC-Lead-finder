@@ -309,5 +309,61 @@ class TestParseNoteStripsHtml(unittest.TestCase):
         self.assertNotIn("<", "".join(str(v) for v in meta.values()))
 
 
+class TestPhoneRendering(unittest.TestCase):
+    def test_tel_href_normalizes(self):
+        from pipeline import email_digest as e
+        self.assertEqual(e._tel_href("(602) 354-3105"), "+16023543105")
+        self.assertEqual(e._tel_href("+1 602 282 6269"), "+16022826269")
+
+    def test_linkify_phones_html_links_phone_not_email(self):
+        from pipeline import email_digest as e
+        html = e._linkify_phones_html("Sally | Pres | sally@x.com | 602.295.1128")
+        self.assertIn('href="tel:+16022951128"', html)
+        self.assertIn("sally@x.com", html)          # email preserved
+        self.assertNotIn('tel:sally', html)         # email not linked
+
+    def test_primary_person_phones_appended_and_labeled(self):
+        from pipeline import email_digest as e
+        ld = e.DigestLead(
+            lead_id="1", title="t", add_time="", org_name=None, city=None,
+            signal=None, priority=None, summary=None, value=None, currency=None,
+            article_url=None,
+            contacts=["Ernie Jackson | Dir | ernie@x.com"],  # no phone in string
+            lead_url="u",
+            primary_phones=[("work", "623-344-4544"), ("mobile", "602-488-9312")],
+        )
+        html = e._render_contacts_html(ld)
+        self.assertIn('href="tel:+16233444544"', html)   # work
+        self.assertIn('href="tel:+16024889312"', html)   # mobile
+        self.assertIn("Work:", html)
+        self.assertIn("Mobile:", html)
+
+    def test_primary_phone_dedup_against_string(self):
+        from pipeline import email_digest as e
+        ld = e.DigestLead(
+            lead_id="1", title="t", add_time="", org_name=None, city=None,
+            signal=None, priority=None, summary=None, value=None, currency=None,
+            article_url=None,
+            contacts=["Sally | Pres | sally@x.com | (602) 354-3105"],
+            lead_url="u",
+            primary_phones=[("work", "602-354-3105")],   # same number, diff format
+        )
+        html = e._render_contacts_html(ld)
+        self.assertEqual(html.count('href="tel:+16023543105"'), 1)  # not duplicated
+
+    def test_fetch_person_phones_parses_labels(self):
+        from unittest import mock
+        from pipeline import email_digest as e
+        http = mock.Mock()
+        http.get.return_value.json.return_value = {"data": {"phone": [
+            {"label": "work", "value": "623-344-4544"},
+            {"label": "mobile", "value": "602-488-9312"},
+            {"label": "", "value": ""},   # empty skipped
+        ]}}
+        http.get.return_value.raise_for_status.return_value = None
+        self.assertEqual(e._fetch_person_phones(http, 15413),
+                         [("work", "623-344-4544"), ("mobile", "602-488-9312")])
+
+
 if __name__ == "__main__":
     unittest.main()
