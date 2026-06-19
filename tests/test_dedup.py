@@ -22,7 +22,7 @@ class TestDedupConfig(unittest.TestCase):
         config.settings.cache_clear()
 
 
-class TestNormalization(unittest.TestCase):
+class TestTitleTokens(unittest.TestCase):
     def test_title_tokens_drops_digits_units_stopwords(self):
         from pipeline import dedup
         toks = dedup.title_tokens(
@@ -35,27 +35,6 @@ class TestNormalization(unittest.TestCase):
         self.assertNotIn("square", toks)      # unit word dropped
         self.assertNotIn("feet", toks)
         self.assertNotIn("as", toks)          # stopword + too short
-
-    def test_normalize_company_strips_suffix_and_parens(self):
-        from pipeline import dedup
-        self.assertEqual(
-            dedup.normalize_company("Plaza Companies (SkySong)"), "plaza"
-        )
-        self.assertEqual(dedup.normalize_company("Foundation 8 LLC"), "foundation 8")
-        self.assertEqual(
-            dedup.normalize_company("Stevens-Leinweber Construction"),
-            "stevens-leinweber",
-        )
-
-    def test_normalize_company_keeps_one_token_for_all_suffix_names(self):
-        from pipeline import dedup
-        # An all-suffix name must NOT collapse to "" (would false-match).
-        self.assertEqual(dedup.normalize_company("Capital Group"), "capital")
-        self.assertEqual(dedup.normalize_company("Development LLC"), "development")
-
-    def test_normalize_company_handles_none(self):
-        from pipeline import dedup
-        self.assertEqual(dedup.normalize_company(None), "")
 
 
 class TestScoringAndClustering(unittest.TestCase):

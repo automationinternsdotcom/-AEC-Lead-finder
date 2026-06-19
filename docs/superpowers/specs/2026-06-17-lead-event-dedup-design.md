@@ -68,14 +68,13 @@ skill/aether_daily_routine.md         — one new step between qualify and push
 
 ### `pipeline/dedup.py` (core, pure functions)
 
-- `normalize_company(name) -> str` — lowercase; strip legal/suffix noise
-  (`LLC, Inc, Companies, Group, Partners, Development`, etc.) and parenthetical
-  aliases (`"Plaza Companies (SkySong)" -> "plaza"`). **Conservative** —
-  under-stripping is safer than over-merging.
 - `title_tokens(title) -> frozenset[str]` — lowercase; drop digits, units, and
   stopwords; keep significant tokens.
-- `candidate_score(article, lead) -> float` (0..1) — blend of title-token
-  Jaccard + company match + city match + signal_type match.
+- `same_event_score(title_a, title_b) -> float` (0..1) — **plain title-token
+  Jaccard** (intersection / union of significant tokens). Deliberately
+  conservative: company/city/signal_type blending was considered but not
+  implemented — the simpler metric is harder to game and errs on the side of
+  keeping Leads separate.
 - `find_candidates(article, recent_leads, window_days, threshold) -> list[lead]`
   — the cheap narrower: recent Leads scoring `>= threshold`. Claude confirms.
 - `completeness_key(lead) -> tuple` — sort key
@@ -140,8 +139,8 @@ One new step between qualify and push:
   (update `mark.py`'s accepted states and any validation).
 - Two optional settings with defaults (in `config.Settings`):
   - `DEDUP_WINDOW_DAYS` (default `14`) — how far back to look for candidates.
-  - `DEDUP_SCORE_THRESHOLD` (default `0.5`) — heuristic narrowing cutoff. Tuned
-    against the real 11 clusters so the backfill dry-run reproduces 83 → ~70.
+  - `DEDUP_SCORE_THRESHOLD` (default `0.6`) — heuristic narrowing cutoff. Tuned
+    against the real 11 clusters so the backfill dry-run reproduces 83 → 71.
 
 ---
 
@@ -159,8 +158,8 @@ One new step between qualify and push:
 ## Testing
 
 - **Unit** (stdlib `unittest`, mirroring existing test style):
-  - `normalize_company`, `title_tokens` normalization.
-  - `candidate_score` against positive/negative pairs drawn from the **real 11
+  - `title_tokens` normalization.
+  - `same_event_score` against positive/negative pairs drawn from the **real 11
     clusters** as fixtures (e.g. the four SkySong variants score high; two
     unrelated Phoenix industrial deals score low).
   - `completeness_key` ordering.
