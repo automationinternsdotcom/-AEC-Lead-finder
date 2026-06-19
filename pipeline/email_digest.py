@@ -26,6 +26,7 @@ digest. The 1st Note line is the 2-sentence summary.
 from __future__ import annotations
 
 import dataclasses
+import re
 import smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -40,6 +41,9 @@ from pipeline.config import Settings
 # Pipedrive v1 paginates Leads via start/limit + a next_start cursor; 500 is the
 # v1 max page size (mirrors feedback.list_flagged_leads).
 _LEADS_PAGE_SIZE = 500
+
+# Strips any residual HTML tag from extracted note values (defensive fallback).
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
 @dataclasses.dataclass(slots=True)
@@ -228,14 +232,14 @@ def _parse_note(content: str) -> dict:
     The Note is plain text (push.py joins fields with '\\n'); Pipedrive may
     return it as HTML, so strip a couple of common tags defensively.
     """
-    text = content.replace("<br>", "\n").replace("<br/>", "\n").replace("</p>", "\n")
+    text = re.sub(r"<br\s*/?>", "\n", content, flags=re.IGNORECASE).replace("</p>", "\n")
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     meta: dict = {}
     if lines:
         # First non-empty line is the 2-sentence summary (unless it's the
         # 'Source:' line, which only happens when summary was empty).
         if not lines[0].lower().startswith("source:"):
-            meta["summary"] = lines[0]
+            meta["summary"] = _TAG_RE.sub("", lines[0]).strip()
     for ln in lines:
         if ln.startswith("Signal:") and "|" in ln:
             for part in ln.split("|"):
@@ -243,6 +247,7 @@ def _parse_note(content: str) -> dict:
                     continue
                 key, _, val = part.partition(":")
                 key, val = key.strip().lower(), val.strip()
+                val = _TAG_RE.sub("", val).strip()
                 if key in ("signal", "city", "priority"):
                     meta[key] = val
             break

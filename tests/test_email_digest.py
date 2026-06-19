@@ -292,5 +292,22 @@ class TestListRawLeadsSince(unittest.TestCase):
         config.settings.cache_clear()
 
 
+class TestParseNoteStripsHtml(unittest.TestCase):
+    def test_br_space_variant_and_tags_stripped(self):
+        from pipeline import email_digest
+        note = (
+            "Plaza did things. SkySong 2.<br />\n"
+            'Source: <a href="http://x">x</a><br />\n'
+            "Signal: lease | City: Scottsdale | Priority: high<br />"
+        )
+        meta = email_digest._parse_note(note)
+        self.assertEqual(meta["summary"], "Plaza did things. SkySong 2.")
+        self.assertEqual(meta["priority"], "high")
+        self.assertEqual(meta["city"], "Scottsdale")
+        self.assertEqual(meta["signal"], "lease")
+        # no angle-bracket tags survive in any extracted value
+        self.assertNotIn("<", "".join(str(v) for v in meta.values()))
+
+
 if __name__ == "__main__":
     unittest.main()
