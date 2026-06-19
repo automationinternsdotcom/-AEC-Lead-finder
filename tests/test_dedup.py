@@ -149,3 +149,12 @@ class TestAdapter(unittest.TestCase):
         self.assertIsNotNone(rec.add_dt)
         # num_filled counts: url + value + person present = 3
         self.assertEqual(rec.num_filled, 3)
+
+    def test_lead_record_from_dict_zero_amount_value_not_counted(self):
+        from pipeline import dedup
+        lead = {"id": "z", "title": "t", "URLHASH": None,
+                "value": {"amount": 0, "currency": "USD"}, "L1": None}
+        rec = dedup.lead_record_from_dict(
+            lead, article_url_field="URLHASH", lead_fields=("L1",))
+        # url absent, value amount 0, no person -> nothing filled
+        self.assertEqual(rec.num_filled, 0)
