@@ -52,6 +52,21 @@ class TestFindEventCandidates(unittest.TestCase):
         ids = [c["lead_id"] for c in payload]
         self.assertIn("1", ids)         # same event surfaced
         self.assertNotIn("2", ids)      # unrelated filtered out
+        cand = next(c for c in payload if c["lead_id"] == "1")
+        self.assertEqual(set(cand), {"lead_id", "title", "url", "contacts", "score"})
+        self.assertGreaterEqual(cand["score"], 0.5)
+
+    def test_fetch_error_fails_open_to_empty(self):
+        from pipeline.cli import find_event_candidates as cli
+        article = {"title": "x", "company_name": "y", "city": None, "signal_type": "other"}
+        with mock.patch.object(cli.email_digest, "make_pipedrive_client"), \
+             mock.patch.object(cli.email_digest, "list_raw_leads_since",
+                               side_effect=RuntimeError("network boom")), \
+             mock.patch("sys.stdin", io.StringIO(json.dumps(article))), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), [])
 
     def test_pipedrive_error_fails_open_to_empty(self):
         from pipeline.cli import find_event_candidates as cli
