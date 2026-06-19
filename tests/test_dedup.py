@@ -55,3 +55,29 @@ class TestNormalization(unittest.TestCase):
     def test_normalize_company_handles_none(self):
         from pipeline import dedup
         self.assertEqual(dedup.normalize_company(None), "")
+
+
+class TestScoringAndClustering(unittest.TestCase):
+    # Real near-duplicate headlines (same event, syndicated across feeds).
+    CRG_A = "CRG Sells Industrial Building at 1.2 MSF Cubes at Mesa Gateway"
+    CRG_B = "CRG Sells 1.2M SF Industrial Building at The Cubes at Mesa Gateway"
+    UNRELATED = "Creation buys 38-acre site to build Avondale Tech Center"
+
+    def test_same_event_scores_high(self):
+        from pipeline import dedup
+        self.assertGreaterEqual(dedup.same_event_score(self.CRG_A, self.CRG_B), 0.5)
+
+    def test_unrelated_scores_low(self):
+        from pipeline import dedup
+        self.assertLess(dedup.same_event_score(self.CRG_A, self.UNRELATED), 0.5)
+
+    def test_cluster_groups_same_event(self):
+        from pipeline import dedup
+        recs = [
+            dedup.LeadRecord("1", self.CRG_A, None, [], None, 0),
+            dedup.LeadRecord("2", self.CRG_B, None, [], None, 0),
+            dedup.LeadRecord("3", self.UNRELATED, None, [], None, 0),
+        ]
+        clusters = dedup.cluster_leads(recs, threshold=0.5)
+        sizes = sorted(len(c) for c in clusters)
+        self.assertEqual(sizes, [1, 2])
