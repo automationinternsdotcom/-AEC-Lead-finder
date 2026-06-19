@@ -226,7 +226,32 @@ fi
 quotes or other punctuation pass through unchanged. The earlier heredoc
 approach broke Python syntax on names like `Some "Quoted" Co`.)
 
-### 2e. Push to Pipedrive Leads
+### 2e. Same-event dedup check (before push)
+
+Before pushing, check whether this article describes the **same news event** as a recent Lead already in Pipedrive (a different article covering the same story):
+
+```bash
+uv run python -m pipeline.cli.find_event_candidates < /tmp/extracted.json > /tmp/candidates.json
+jq length /tmp/candidates.json
+```
+
+If 0 candidates, proceed directly to 2f (push as normal).
+
+If there are candidates, read `/tmp/candidates.json` and compare each candidate's title against this article. **Bias strongly to keeping them separate** — only treat it as the same event when you are confident it is the same property/project/transaction, not merely the same company or city. Two different deals by the same developer are NOT the same event.
+
+- **If a candidate IS the same event:** merge this article's enriched contact(s) into that existing Lead instead of creating a new one. Build the contacts as `Name | Title | Email | Phone` strings (the same ones you would have pushed as Lead 1/2/3), then:
+
+  ```bash
+  echo '{"keeper_lead_id":"<candidate lead_id>","contacts":[<contact strings>],"merged_url":"'"$URL"'"}' \
+    | uv run python -m pipeline.cli.merge_contacts
+  uv run python -m pipeline.cli.mark "$URL_HASH" merged
+  ```
+
+  Then **skip step 2f (push)** for this article and continue to the next article (go directly to 2g).
+
+- **If NO candidate is the same event:** proceed to 2f (push as normal).
+
+### 2f. Push to Pipedrive Leads
 
 The Grok enricher (skill/grok_enricher.md) now returns up to 3 leads as `{"company_name": "...", "leads": [<Lead>, <Lead>, <Lead>]}` — the first becomes the primary (linked Person record), the rest populate the Lead 2 / Lead 3 custom fields.
 
@@ -252,7 +277,7 @@ The push CLI populates:
 
 Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive Leads (treat as success).
 
-### 2f. Mark seen
+### 2g. Mark seen
 
 ```bash
 uv run python -m pipeline.cli.mark "$URL_HASH" pushed
