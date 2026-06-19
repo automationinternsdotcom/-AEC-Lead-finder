@@ -18,7 +18,7 @@ class TestDedupConfig(unittest.TestCase):
         os.environ.setdefault("PIPEDRIVE_FIELD_ARTICLE_URL", "f")
         s = config.settings()
         self.assertEqual(s.dedup_window_days, 14)
-        self.assertAlmostEqual(s.dedup_score_threshold, 0.5)
+        self.assertAlmostEqual(s.dedup_score_threshold, 0.6)
         config.settings.cache_clear()
 
 

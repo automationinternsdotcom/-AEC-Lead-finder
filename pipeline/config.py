@@ -48,7 +48,7 @@ class Settings:
     max_articles_per_run: int = 50
     log_level: str = "INFO"
     dedup_window_days: int = 14
-    dedup_score_threshold: float = 0.5
+    dedup_score_threshold: float = 0.6
 
 
 @lru_cache(maxsize=1)
@@ -82,7 +82,7 @@ def settings() -> Settings:
         max_articles_per_run=int(env.get("MAX_ARTICLES_PER_RUN") or 50),
         log_level=env.get("LOG_LEVEL", "INFO"),
         dedup_window_days=int(env.get("DEDUP_WINDOW_DAYS") or 14),
-        dedup_score_threshold=float(env.get("DEDUP_SCORE_THRESHOLD") or 0.5),
+        dedup_score_threshold=float(env.get("DEDUP_SCORE_THRESHOLD") or 0.6),
     )
 
 
