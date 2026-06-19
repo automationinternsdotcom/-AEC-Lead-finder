@@ -33,12 +33,11 @@ def _build_plan(raw_leads: list[dict], settings) -> dict:
     )
     recs = [
         dedup.lead_record_from_dict(
-            l, article_url_field=settings.pipedrive_field_article_url,
+            lead, article_url_field=settings.pipedrive_field_article_url,
             lead_fields=lead_fields,
         )
-        for l in raw_leads
+        for lead in raw_leads
     ]
-    by_id = {r.lead_id: r for r in recs}
     clusters_out = []
     for cluster in dedup.cluster_leads(recs, settings.dedup_score_threshold):
         if len(cluster) < 2:
@@ -51,7 +50,7 @@ def _build_plan(raw_leads: list[dict], settings) -> dict:
             "keeper_lead_id": keeper.lead_id,
             "keeper_title": keeper.title,
             "delete_lead_ids": [r.lead_id for r in losers],
-            "delete_urls": [by_id[r.lead_id].url for r in losers],
+            "delete_urls": [r.url for r in losers],
             "merged_contacts": merged.kept,
             "overflow": merged.overflow,
         })
