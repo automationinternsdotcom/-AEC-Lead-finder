@@ -101,8 +101,9 @@ class MergeResult:
 
 def completeness_key(lead: LeadRecord):
     """Sort key for keeper selection. max() picks: most contacts, then most
-    filled fields, then EARLIEST add_time (negated epoch makes earliest largest)."""
-    epoch = lead.add_dt.timestamp() if lead.add_dt else 0.0
+    filled fields, then EARLIEST add_time. A missing add_dt loses the date
+    tie-break (treated as infinitely late)."""
+    epoch = lead.add_dt.timestamp() if lead.add_dt else float("inf")
     return (len(lead.contacts), lead.num_filled, -epoch)
 
 

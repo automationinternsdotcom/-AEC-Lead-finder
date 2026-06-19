@@ -116,3 +116,10 @@ class TestKeeperAndMerge(unittest.TestCase):
         self.assertEqual([c.split(" | ")[0] for c in res.kept],
                          ["Jane Doe", "Bob Smith", "Cara Lee"])
         self.assertEqual([c.split(" | ")[0] for c in res.overflow], ["Dan Poe"])
+
+    def test_keeper_none_date_loses_tiebreak(self):
+        from pipeline import dedup
+        dated = self._rec("dated", ["X | CEO"], num_filled=1, day=30)
+        undated = dedup.LeadRecord("undated", "t", "u", ["X | CEO"], None, 1)
+        keeper = max([undated, dated], key=dedup.completeness_key)
+        self.assertEqual(keeper.lead_id, "dated")  # real date beats missing date
