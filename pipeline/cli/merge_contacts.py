@@ -57,6 +57,9 @@ def main() -> int:
         if merged_url:
             pd.post("notes", {"lead_id": keeper_id,
                               "content": f"merged via event-dedup: {merged_url}"})
+        if result.overflow:
+            pd.post("notes", {"lead_id": keeper_id,
+                              "content": dedup.overflow_note_body(result.overflow)})
 
     # Order matters: we PATCH the keeper's contacts FIRST, then mark the URL
     # 'merged'. If the mark fails after a successful PATCH, the worst case is a

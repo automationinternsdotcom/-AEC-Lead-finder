@@ -107,9 +107,13 @@ def _apply(plan: dict, settings) -> int:
                 written = {f: val for f, val in zip(lead_fields, cl["merged_contacts"]) if f}
                 if written and not settings.dry_run:
                     pd.patch("leads", keeper_id, written)
+                overflow = cl.get("overflow") or []
+                if overflow and not settings.dry_run:
+                    pd.post("notes", {"lead_id": keeper_id,
+                                      "content": dedup.overflow_note_body(overflow)})
             except Exception as e:
                 util.log_event("backfill_merge_failed", keeper=keeper_id, error=repr(e))
-                continue  # never delete when the merge failed
+                continue  # never delete when the merge/preserve step failed
             for lid in cl["delete_lead_ids"]:
                 if not settings.dry_run:
                     pd.delete("leads", lid)

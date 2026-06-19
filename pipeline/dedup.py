@@ -143,6 +143,16 @@ def lead_record_from_dict(
     )
 
 
+def overflow_note_body(overflow: list[str]) -> str:
+    """Note body preserving contacts that didn't fit the 3 Lead 1/2/3 slots.
+    Keeps every merged-away contact discoverable on the keeper even though the
+    structured fields cap at 3."""
+    lines = ["Additional contacts preserved from merged duplicate lead(s) "
+             "(event-dedup); the 3 Lead fields are capped:"]
+    lines += [f"• {c}" for c in overflow]
+    return "\n".join(lines)
+
+
 def merge_contact_strings(existing: list[str], incoming: list[str]) -> MergeResult:
     """Union existing + incoming contact strings, dedup by name, keeper's first,
     cap at 3. Anything beyond the cap is returned as overflow (never silently

@@ -106,6 +106,28 @@ class TestBackfillApply(unittest.TestCase):
         self.assertEqual(result["leads_deleted"], 1)
         self.assertTrue(result["applied"])   # DRY_RUN unset in _settings()
 
+    def test_apply_posts_overflow_note_before_delete(self):
+        _settings()
+        from pipeline.cli import dedup_backfill as cli
+        plan = {"clusters": [
+            {"keeper_lead_id": "a", "merged_contacts": ["A | CEO", "B | COO", "C | VP"],
+             "delete_lead_ids": ["b"], "delete_urls": ["ub"],
+             "overflow": ["D | Director of Maintenance"]},
+        ], "summary": {"clusters": 1, "leads_deleted": 1}}
+        pd = mock.MagicMock()
+        order = []
+        pd.post.side_effect = lambda res, payload: order.append(("post", res))
+        pd.delete.side_effect = lambda res, lid: order.append(("delete", lid))
+        with mock.patch.object(cli.push, "PipedriveClient") as PC, \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            PC.return_value.__enter__.return_value = pd
+            rc = cli._apply(plan, cli.config.settings())
+        self.assertEqual(rc, 0)
+        note_calls = [c for c in pd.post.call_args_list if c.args[0] == "notes"]
+        self.assertTrue(any("D | Director of Maintenance" in c.args[1]["content"]
+                            for c in note_calls))
+        self.assertLess(order.index(("post", "notes")), order.index(("delete", "b")))
+
     def test_apply_dry_run_writes_nothing_but_reports_would_delete(self):
         from pipeline import config
         config.settings.cache_clear()

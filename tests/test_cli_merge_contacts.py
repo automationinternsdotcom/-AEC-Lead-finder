@@ -57,6 +57,21 @@ class TestMergeContacts(unittest.TestCase):
         self.assertEqual(rc, 0)
         pd.patch.assert_not_called()
 
+    def test_overflow_contacts_preserved_in_note(self):
+        _settings(dry=False)
+        from pipeline.cli import merge_contacts as cli
+        pd = mock.MagicMock()
+        pd.get.return_value = {"id": "k", "L1": "A | CEO", "L2": "B | COO", "L3": "C | VP"}
+        with mock.patch.object(cli.push, "PipedriveClient") as PC, \
+             mock.patch("sys.stdin", io.StringIO(json.dumps({
+                 "keeper_lead_id": "k", "contacts": ["D | Director of Maintenance"]}))):
+            PC.return_value.__enter__.return_value = pd
+            rc = cli.main()
+        self.assertEqual(rc, 0)
+        note_calls = [c for c in pd.post.call_args_list if c.args[0] == "notes"]
+        self.assertTrue(any("D | Director of Maintenance" in c.args[1]["content"]
+                            for c in note_calls))
+
     def test_merged_url_posts_note_and_marks_seen(self):
         _settings(dry=False)
         from pipeline.cli import merge_contacts as cli

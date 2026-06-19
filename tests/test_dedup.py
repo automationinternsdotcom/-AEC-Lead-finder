@@ -158,3 +158,13 @@ class TestAdapter(unittest.TestCase):
             lead, article_url_field="URLHASH", lead_fields=("L1",))
         # url absent, value amount 0, no person -> nothing filled
         self.assertEqual(rec.num_filled, 0)
+
+
+class TestOverflowNote(unittest.TestCase):
+    def test_overflow_note_body_lists_contacts(self):
+        from pipeline import dedup
+        body = dedup.overflow_note_body(["Sharon Harper | Chairman & CEO",
+                                         "Larry Reinhart | Director of Maintenance"])
+        self.assertIn("event-dedup", body)
+        self.assertIn("Sharon Harper | Chairman & CEO", body)
+        self.assertIn("Larry Reinhart | Director of Maintenance", body)
