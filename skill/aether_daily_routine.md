@@ -147,13 +147,13 @@ uv run python -m pipeline.cli.cache_lookup "$COMPANY" \
   | jq 'if . == null then {leads: []} else {leads: [.]} end' > /tmp/lead.json
 if [ "$(jq '.leads | length' /tmp/lead.json)" -gt 0 ]; then
   echo "Cache hit for $COMPANY — skipping external enrichment"
-  # Skip to 2e (push) — /tmp/lead.json holds {leads:[<cached Lead>]}
+  # Skip enrichment; go to 2e (dedup check) then 2f (push) — /tmp/lead.json holds {leads:[<cached Lead>]}
 fi
 ```
 
-`/tmp/lead.json` is the **canonical enrichment envelope** for the rest of the per-article loop: always `{"leads": [<Lead>, ...]}` (zero-or-more entries). Cache hit / Apollo / Grok all converge on this shape, and Step 2e reads `.leads` from it.
+`/tmp/lead.json` is the **canonical enrichment envelope** for the rest of the per-article loop: always `{"leads": [<Lead>, ...]}` (zero-or-more entries). Cache hit / Apollo / Grok all converge on this shape, and Step 2f reads `.leads` from it.
 
-If `.leads | length` is > 0, skip ahead to 2e.
+If `.leads | length` is > 0, skip ahead to 2e (the dedup check, which precedes push).
 
 #### Maricopa Assessor hint (when address is present)
 
@@ -209,7 +209,7 @@ echo '<subagent_output>' > /tmp/lead.json
 ENRICH_VIA=grok
 ```
 
-If the output is an `error` envelope (no `leads` key), Step 2e's `jq '.leads // []'` will degrade to `[]` and the article will push with no contacts attached. For session errors, prefer re-checking the Chrome login and retrying the article *before* writing to `/tmp/lead.json` — see `skill/grok_enricher.md` for the recovery flow.
+If the output is an `error` envelope (no `leads` key), Step 2f's `jq '.leads // []'` will degrade to `[]` and the article will push with no contacts attached. For session errors, prefer re-checking the Chrome login and retrying the article *before* writing to `/tmp/lead.json` — see `skill/grok_enricher.md` for the recovery flow.
 
 #### Cache the successful enrichment
 
