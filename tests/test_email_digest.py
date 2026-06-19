@@ -265,5 +265,32 @@ class TestSend(unittest.TestCase):
         fake.starttls.assert_not_called()
 
 
+class TestListRawLeadsSince(unittest.TestCase):
+    def test_paginates_and_filters_by_add_time(self):
+        from datetime import datetime, timezone
+        from unittest import mock
+        from pipeline import email_digest, config
+        import os
+
+        config.settings.cache_clear()
+        os.environ.setdefault("PIPEDRIVE_API_TOKEN", "t")
+        os.environ.setdefault("PIPEDRIVE_DOMAIN", "d")
+        os.environ.setdefault("PIPEDRIVE_FIELD_ARTICLE_URL", "f")
+        settings = config.settings()
+
+        page = {"data": [
+            {"id": "old", "add_time": "2026-05-01 00:00:00"},
+            {"id": "new", "add_time": "2026-06-01 00:00:00"},
+        ], "additional_data": {"pagination": {"more_items_in_collection": False}}}
+        http = mock.Mock()
+        http.get.return_value.json.return_value = page
+        http.get.return_value.raise_for_status.return_value = None
+
+        since = datetime(2026, 5, 29, tzinfo=timezone.utc)
+        out = email_digest.list_raw_leads_since(http, settings, since)
+        self.assertEqual([l["id"] for l in out], ["new"])
+        config.settings.cache_clear()
+
+
 if __name__ == "__main__":
     unittest.main()

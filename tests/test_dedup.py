@@ -123,3 +123,29 @@ class TestKeeperAndMerge(unittest.TestCase):
         undated = dedup.LeadRecord("undated", "t", "u", ["X | CEO"], None, 1)
         keeper = max([undated, dated], key=dedup.completeness_key)
         self.assertEqual(keeper.lead_id, "dated")  # real date beats missing date
+
+
+class TestAdapter(unittest.TestCase):
+    def test_lead_record_from_dict_reads_url_contacts_and_fields(self):
+        from pipeline import dedup
+        lead = {
+            "id": "uuid-1",
+            "title": "SkySong adds 28,000 square feet",
+            "add_time": "2026-05-29 23:31:39",
+            "value": {"amount": 588000, "currency": "USD"},
+            "person_id": 42,
+            "URLHASH": "https://example.com/skysong",
+            "L1": "Jane Doe | CEO | jane@x.com",
+            "L2": {"value": "Bob Smith | COO"},   # nested shape
+            "L3": None,
+        }
+        rec = dedup.lead_record_from_dict(
+            lead, article_url_field="URLHASH",
+            lead_fields=("L1", "L2", "L3"),
+        )
+        self.assertEqual(rec.lead_id, "uuid-1")
+        self.assertEqual(rec.url, "https://example.com/skysong")
+        self.assertEqual(rec.contacts, ["Jane Doe | CEO | jane@x.com", "Bob Smith | COO"])
+        self.assertIsNotNone(rec.add_dt)
+        # num_filled counts: url + value + person present = 3
+        self.assertEqual(rec.num_filled, 3)

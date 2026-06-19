@@ -135,6 +135,32 @@ def list_leads_since(
     return out
 
 
+def list_raw_leads_since(
+    http: httpx.Client, settings: Settings, since: datetime,
+) -> list[dict]:
+    """Raw Lead dicts with add_time (UTC) >= `since`, newest first. Same
+    pagination + post-filter as list_leads_since, but returns the unenriched
+    dicts (custom fields intact) for the dedup CLIs."""
+    matches: list[dict] = []
+    start = 0
+    while True:
+        resp = http.get("leads", params={"limit": _LEADS_PAGE_SIZE, "start": start})
+        resp.raise_for_status()
+        body = resp.json()
+        for lead in body.get("data") or []:
+            dt = _lead_add_dt(lead)
+            if dt is not None and dt >= since:
+                matches.append(lead)
+        pagination = (body.get("additional_data") or {}).get("pagination") or {}
+        if not pagination.get("more_items_in_collection"):
+            break
+        start = pagination.get("next_start")
+        if start is None:
+            break
+    matches.sort(key=lambda l: l.get("add_time") or "", reverse=True)
+    return matches
+
+
 def _to_digest_lead(
     http: httpx.Client, settings: Settings, lead: dict,
     org_names: dict[int, str | None],

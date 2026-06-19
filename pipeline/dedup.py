@@ -113,6 +113,35 @@ def _contact_name_key(contact: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
+def _cf(lead: dict, key: str):
+    """Read a custom field that may be a bare value or a nested {value:...}."""
+    v = lead.get(key)
+    if isinstance(v, dict):
+        return v.get("value")
+    return v
+
+
+def lead_record_from_dict(
+    lead: dict, *, article_url_field: str, lead_fields: tuple[str | None, ...],
+) -> LeadRecord:
+    """Project a raw Pipedrive Lead dict into a LeadRecord."""
+    from pipeline.email_digest import _lead_add_dt  # reuse the tolerant parser
+
+    contacts = [str(c) for f in lead_fields if f and (c := _cf(lead, f))]
+    url = _cf(lead, article_url_field)
+    has_value = bool(lead.get("value"))
+    has_person = lead.get("person_id") is not None
+    num_filled = sum((bool(url), has_value, has_person))
+    return LeadRecord(
+        lead_id=str(lead.get("id")),
+        title=lead.get("title") or "",
+        url=str(url) if url else None,
+        contacts=contacts,
+        add_dt=_lead_add_dt(lead),
+        num_filled=num_filled,
+    )
+
+
 def merge_contact_strings(existing: list[str], incoming: list[str]) -> MergeResult:
     """Union existing + incoming contact strings, dedup by name, keeper's first,
     cap at 3. Anything beyond the cap is returned as overflow (never silently
