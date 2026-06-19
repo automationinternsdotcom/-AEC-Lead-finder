@@ -624,6 +624,24 @@ class TestUpdaterClientVerbs(unittest.TestCase):
             ("PATCH", "/api/v1/leads/L1"),
         ])
 
+    def test_delete_issues_correct_verb_and_path(self):
+        """delete(resource, id) issues DELETE {resource}/{id}."""
+        seen = []
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen.append((req.method, req.url.path))
+            return httpx.Response(200, json={"success": True, "data": {"id": "abc"}})
+        c = _client_with(handler)
+        c.delete("leads", "abc-uuid")
+        self.assertEqual(seen, [("DELETE", "/api/v1/leads/abc-uuid")])
+
+    def test_client_has_delete_verb(self):
+        """PipedriveClient exposes a callable delete attribute."""
+        c = _client_with(lambda req: httpx.Response(200, json={"success": True, "data": {}}))
+        try:
+            self.assertTrue(callable(getattr(c, "delete", None)))
+        finally:
+            c.__exit__()
+
 
 class TestUpdateLeadContacts(unittest.TestCase):
     """update_lead_contacts() finds an existing Lead by Article URL, then

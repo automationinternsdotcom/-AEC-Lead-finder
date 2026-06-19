@@ -92,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
 def _apply(plan: dict, settings) -> int:
     """Merge contacts into each keeper, then delete that cluster's losers.
     A cluster whose merge raises is skipped and its losers are NOT deleted."""
+    if settings.dry_run:
+        sys.stderr.write("dedup_backfill: --apply with DRY_RUN=1 — simulating, no writes/deletes.\n")
     lead_fields = (
         settings.pipedrive_field_lead_1,
         settings.pipedrive_field_lead_2,
@@ -114,7 +116,7 @@ def _apply(plan: dict, settings) -> int:
                 deleted += 1
             util.log_event("backfill_cluster_done", keeper=keeper_id,
                            deleted=len(cl["delete_lead_ids"]), dry_run=settings.dry_run)
-    json.dump({"applied": True, "leads_deleted": deleted,
+    json.dump({"applied": not settings.dry_run, "leads_deleted": deleted,
                "dry_run": settings.dry_run}, sys.stdout)
     sys.stdout.write("\n")
     return 0

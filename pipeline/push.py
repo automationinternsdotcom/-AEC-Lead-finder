@@ -95,6 +95,10 @@ class PipedriveClient:
         """PATCH {resource}/{id} (partial update; Leads use PATCH)."""
         return self._req("PATCH", f"{resource}/{id}", json=payload)
 
+    def delete(self, resource: str, id) -> dict:
+        """DELETE {resource}/{id}. Used ONLY by the one-time dedup backfill."""
+        return self._req("DELETE", f"{resource}/{id}")
+
     def find_lead_by_url(self, article_url: str) -> str | None:
         """Search Leads by Article URL value across all custom fields. Returns UUID or None.
 

@@ -60,3 +60,76 @@ class TestBackfillDryRun(unittest.TestCase):
         with mock.patch("sys.stderr", new_callable=io.StringIO):
             rc = cli.main(["--since", "not-a-date"])
         self.assertEqual(rc, 2)
+
+
+class TestBackfillApply(unittest.TestCase):
+    def tearDown(self):
+        from pipeline import config
+        config.settings.cache_clear()
+        os.environ.pop("DRY_RUN", None)
+
+    def test_apply_merges_then_deletes_and_skips_on_merge_failure(self):
+        _settings()
+        from pipeline.cli import dedup_backfill as cli
+        plan = {"clusters": [
+            {"keeper_lead_id": "a", "merged_contacts": ["Jane | CEO"],
+             "delete_lead_ids": ["b"], "delete_urls": ["ub"], "overflow": []},
+            {"keeper_lead_id": "x", "merged_contacts": ["Z | CTO"],
+             "delete_lead_ids": ["y"], "delete_urls": ["uy"], "overflow": []},
+        ], "summary": {"clusters": 2, "leads_deleted": 2}}
+
+        pd = mock.MagicMock()
+        order = []
+
+        def fake_patch(resource, lead_id, payload):
+            order.append(("patch", lead_id))
+            if lead_id != "a":               # second cluster's merge fails
+                raise RuntimeError("patch boom")
+
+        def fake_delete(resource, lead_id):
+            order.append(("delete", lead_id))
+
+        pd.patch.side_effect = fake_patch
+        pd.delete.side_effect = fake_delete
+
+        with mock.patch.object(cli.push, "PipedriveClient") as PC, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            PC.return_value.__enter__.return_value = pd
+            rc = cli._apply(plan, cli.config.settings())
+        self.assertEqual(rc, 0)
+        # 'a' merged then 'b' deleted; 'x' merge failed so 'y' NOT deleted.
+        self.assertIn(("patch", "a"), order)
+        self.assertIn(("delete", "b"), order)
+        self.assertNotIn(("delete", "y"), order)
+        self.assertLess(order.index(("patch", "a")), order.index(("delete", "b")))
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["leads_deleted"], 1)
+        self.assertTrue(result["applied"])   # DRY_RUN unset in _settings()
+
+    def test_apply_dry_run_writes_nothing_but_reports_would_delete(self):
+        from pipeline import config
+        config.settings.cache_clear()
+        os.environ.update({
+            "PIPEDRIVE_API_TOKEN": "t", "PIPEDRIVE_DOMAIN": "d",
+            "PIPEDRIVE_FIELD_ARTICLE_URL": "URLHASH",
+            "PIPEDRIVE_FIELD_LEAD_1": "L1", "PIPEDRIVE_FIELD_LEAD_2": "L2",
+            "PIPEDRIVE_FIELD_LEAD_3": "L3", "DRY_RUN": "1",
+        })
+        from pipeline.cli import dedup_backfill as cli
+        plan = {"clusters": [
+            {"keeper_lead_id": "a", "merged_contacts": ["Jane | CEO"],
+             "delete_lead_ids": ["b"], "delete_urls": ["ub"], "overflow": []},
+        ], "summary": {"clusters": 1, "leads_deleted": 1}}
+        pd = mock.MagicMock()
+        with mock.patch.object(cli.push, "PipedriveClient") as PC, \
+             mock.patch("sys.stderr", new_callable=io.StringIO), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            PC.return_value.__enter__.return_value = pd
+            rc = cli._apply(plan, config.settings())
+        self.assertEqual(rc, 0)
+        pd.patch.assert_not_called()      # dry-run: no writes
+        pd.delete.assert_not_called()     # dry-run: no deletes
+        result = json.loads(out.getvalue())
+        self.assertFalse(result["applied"])         # nothing actually applied
+        self.assertEqual(result["leads_deleted"], 1)  # but reports would-delete count
+        config.settings.cache_clear()
