@@ -17,6 +17,7 @@ Thumbs.db
 # Temp
 /tmp/
 *.json.bak
+runs/
 
 # Credentials (never commit)
 .env
