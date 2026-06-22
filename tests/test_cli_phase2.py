@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from pipeline.cli import init_run as init_run_cli
 from pipeline.cli import next_action as next_action_cli
+from pipeline.cli import parse_transcript as parse_transcript_cli
+from pipeline.cli import preview_delivery as preview_delivery_cli
 from pipeline.cli import run_pattern as run_pattern_cli
 from pipeline.cli import validate_artifact as validate_artifact_cli
 from pipeline.cli import validate_spec as validate_spec_cli
@@ -87,6 +89,55 @@ class TestPhase2Cli(unittest.TestCase):
         self.assertEqual(data["stage"], "pattern")
         self.assertEqual(data["metadata"]["pattern_type"], "entity_aggregation")
         self.assertEqual(data["metadata"]["record_count"], 1)
+
+    def test_parse_transcript_cli_outputs_enrichment_artifact(self):
+        transcript = """
+1. Jane Doe
+Current Title: COO, Acme
+Professional Email: jane@acme.com
+Direct Phone: 480-555-0100
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "transcript.txt"
+            path.write_text(transcript, encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = parse_transcript_cli.main([
+                    str(path),
+                    "--company-name",
+                    "Acme",
+                    "--run-id",
+                    "cli-run",
+                ])
+        self.assertEqual(rc, 0)
+        data = json.loads(stdout.getvalue())
+        self.assertEqual(data["stage"], "enrich")
+        self.assertEqual(data["records"][0]["lead"]["name"], "Jane Doe")
+
+    def test_preview_delivery_cli_writes_excel_preview(self):
+        artifact = ArtifactEnvelope(
+            campaign_id="aether-cleaning-az",
+            run_id="cli-run",
+            stage="pattern",
+            records=[{"entity_name": "Acme", "score": 91, "raw": {"title": "Lead"}}],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_path = Path(tmp) / "artifact.json"
+            artifact_path.write_text(json.dumps(artifact.model_dump(mode="json")), encoding="utf-8")
+            out_dir = Path(tmp) / "preview"
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = preview_delivery_cli.main([
+                    str(artifact_path),
+                    "--run-id",
+                    "cli-run",
+                    "--output-dir",
+                    str(out_dir),
+                ])
+            data = json.loads(stdout.getvalue())
+            preview_exists = Path(data["output_path"]).exists()
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["destination_type"], "excel")
+        self.assertEqual(data["record_count"], 1)
+        self.assertTrue(preview_exists)
 
 
 if __name__ == "__main__":

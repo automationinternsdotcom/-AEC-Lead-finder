@@ -7,7 +7,9 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from pipeline import prompts
 from pipeline.spec import load_campaign_spec
@@ -17,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "kind",
-        choices=("assess", "grok-fast", "grok-expert"),
+        choices=("assess", "grok-fast", "grok-expert", "entity-adjudication"),
         help="Prompt to render.",
     )
     parser.add_argument(
@@ -36,12 +38,16 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Fast-mode findings block for grok-expert.",
     )
+    parser.add_argument(
+        "--candidate-json",
+        help="Path to an ambiguous pattern candidate JSON record for entity-adjudication.",
+    )
     args = parser.parse_args([] if argv is None else argv)
 
     spec = load_campaign_spec(args.campaign)
     if args.kind == "assess":
         rendered = prompts.render_assess_prompt(spec)
-    else:
+    elif args.kind in {"grok-fast", "grok-expert"}:
         if not args.company_name:
             parser.error(f"{args.kind} requires --company-name")
         common = {
@@ -60,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
                 fast_findings_block=args.fast_findings,
                 **common,
             )
+    else:
+        if not args.candidate_json:
+            parser.error("entity-adjudication requires --candidate-json")
+        candidate = json.loads(Path(args.candidate_json).read_text(encoding="utf-8"))
+        rendered = prompts.render_entity_adjudication_prompt(spec, candidate=candidate)
 
     sys.stdout.write(rendered)
     if not rendered.endswith("\n"):
