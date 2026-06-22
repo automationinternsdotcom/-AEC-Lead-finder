@@ -10,6 +10,12 @@ them with decision-maker contact info, and push qualified items into **Pipedrive
 Leads** — the inbox surface where Jordan triages incoming opportunities and converts
 the promising ones to Deals.
 
+The canonical article identity is the **resolved publisher article URL**. Source/feed
+URLs, including Google News RSS wrappers such as `news.google.com/rss/articles/...`,
+are discovery inputs only. The pipeline must resolve wrapper URLs before deduplication,
+article extraction, enrichment, same-event matching, Pipedrive push, merge notes, and
+email links. Never push a Google News wrapper URL to Pipedrive's Article URL field.
+
 The Python CLIs (`pipeline.cli.*`) are model-agnostic and unchanged from the Claude
 Code version. The only parts that differ are (a) this orchestration file and (b) the
 Grok enrichment step, which now drives the **Codex Chrome Extension** instead of
@@ -48,9 +54,9 @@ check from the original skill.
   per-site permission granted).
 - Confirm a tab is open at `grok.com`, logged in as the user, with **Fast mode**
   selected (not Heavy/Expert/Auto).
-- If the session is not valid, stop and report — the operator must re-auth the
-  SuperGrok tab before the run can enrich. (Articles can still be fetched/qualified,
-  but enrichment will degrade to empty contacts.)
+- If the session is not valid, report it and continue. Articles can still be
+  fetched and qualified, but do **not** push any article unless enrichment,
+  cache, or Apollo returns at least one contact with an email address.
 
 ---
 
@@ -61,6 +67,13 @@ uv run python -m pipeline.cli.fetch > /tmp/urls.json
 jq length /tmp/urls.json
 ```
 
+`fetch` MUST resolve Google News/RSS wrapper URLs before writing `/tmp/urls.json`.
+`/tmp/urls.json` MUST contain the resolved publisher article URL as `url`, and
+`url_hash` MUST be computed from that resolved URL. A `news.google.com` wrapper may
+be used internally while discovering articles, but it must not be stored as the
+canonical URL, returned in `/tmp/urls.json`, used for exact dedup, sent to
+`extract`, passed to same-event dedup, written to Pipedrive, or included in email.
+
 If 0 URLs, stop. Log "no new articles" and exit.
 
 ---
@@ -70,9 +83,15 @@ If 0 URLs, stop. Log "no new articles" and exit.
 For each entry in `/tmp/urls.json`:
 
 ```bash
-URL_HASH=...   # from JSON entry
-URL=...        # from JSON entry
+URL_HASH=...   # from JSON entry; hash of the resolved publisher article URL
+URL=...        # from JSON entry; resolved publisher article URL, never a wrapper
 ```
+
+`URL` is the source of truth for the rest of the per-article flow. If `URL` is still a
+Google News wrapper (`news.google.com`), do not extract, enrich, dedup, merge, push, or
+email it. Resolve it first; if it cannot be resolved to the publisher article URL,
+mark the article `failed` and continue. The resolved publisher URL is what exact
+Pipedrive dedup uses and what users click from Pipedrive/email.
 
 ### 2a. Extract article text
 
@@ -197,15 +216,16 @@ uv run python -m pipeline.cli.cache_lookup "$COMPANY" \
   | jq 'if . == null then {leads: []} else {leads: [.]} end' > /tmp/lead.json
 if [ "$(jq '.leads | length' /tmp/lead.json)" -gt 0 ]; then
   echo "Cache hit for $COMPANY — skipping external enrichment"
-  # Skip to 2e (push) — /tmp/lead.json holds {leads:[<cached Lead>]}
+  # Skip external enrichment; continue with 2e (same-event dedup) and 2f (push).
+  # /tmp/lead.json holds {leads:[<cached Lead>]}
 fi
 ```
 
 `/tmp/lead.json` is the **canonical enrichment envelope** for the rest of the
 per-article loop: always `{"leads": [<Lead>, ...]}` (zero-or-more entries). Cache hit /
-Apollo / Grok all converge on this shape, and Step 2e reads `.leads` from it.
+Apollo / Grok all converge on this shape, and Steps 2e/2f read `.leads` from it.
 
-If `.leads | length` is > 0, skip ahead to 2e.
+If `.leads | length` is > 0, skip external enrichment and continue at 2e.
 
 #### Maricopa Assessor hint (when address is present)
 
@@ -277,7 +297,9 @@ The flow returns one of (matches `skill/grok_enricher.md` Step 8):
 
 - `{"company_name": "...", "mode": "fast"|"expert", "leads": [<Lead>, <Lead>, <Lead>]}` — success (1–3 leads)
 - `{"company_name": "...", "mode": "fast", "leads": []}` — no decision-maker found → `lead_gap=True` downstream
-- `{"error": "session_invalid", ...}` — re-check the Chrome login, then retry the article
+- `{"error": "session_invalid", ...}` — re-check the Chrome login once; if it still
+  fails, continue with `{"leads": []}` and do not push unless another enrichment
+  source produced an email-bearing contact
 
 Save the full envelope as the enrichment file:
 
@@ -286,20 +308,20 @@ echo '<grok_flow_output>' > /tmp/lead.json
 ENRICH_VIA=grok
 ```
 
-If the output is an `error` envelope (no `leads` key), Step 2e's `jq '.leads // []'`
-degrades to `[]` and the article pushes with no contacts attached. For session errors,
-prefer re-checking the Chrome login and retrying the article *before* writing to
-`/tmp/lead.json` — see `skill/grok_enricher.md` for the recovery flow.
+If the output is an `error` envelope (no `leads` key), Step 2f's email gate treats it
+as `[]`. For session errors, re-check the Chrome login once, then continue with
+`{"leads": []}` if recovery fails; the article should not push unless enrichment
+produced at least one contact with an email address.
 
 #### Cache the successful enrichment
 
 `cache_write` stores one Lead per org (the primary), so pull `.leads[0]` from the
-envelope before piping. Skip the cache step on cache hits (would be a no-op write) and
-on empty enrichments.
+envelope before piping. Skip the cache step on cache hits (would be a no-op write),
+empty enrichments, and enrichments that do not include an email address.
 
 ```bash
-if [ "${ENRICH_VIA:-}" != "" ] && [ "$(jq '.leads | length' /tmp/lead.json)" -gt 0 ]; then
-  jq '.leads[0]' /tmp/lead.json \
+if [ "${ENRICH_VIA:-}" != "" ] && [ "$(jq '[.leads[]? | select((.email // "") != "")] | length' /tmp/lead.json)" -gt 0 ]; then
+  jq '[.leads[]? | select((.email // "") != "")][0]' /tmp/lead.json \
     | uv run python -m pipeline.cli.cache_write "$COMPANY" "$ENRICH_VIA"
 fi
 ```
@@ -307,16 +329,64 @@ fi
 (CLI args handle shell quoting correctly — company names with embedded quotes or other
 punctuation pass through unchanged.)
 
-### 2e. Push to Pipedrive Leads
+### 2e. Same-event dedup check (before push)
 
-The Grok flow returns up to 3 leads as `{"company_name": "...", "leads": [<Lead>,
-<Lead>, <Lead>]}` — the first becomes the primary (linked Person record), the rest
-populate the Lead 2 / Lead 3 custom fields.
+Before pushing, check whether this article describes the **same news event** as a
+recent Lead already in Pipedrive (a different article covering the same story):
+
+```bash
+uv run python -m pipeline.cli.find_event_candidates < /tmp/extracted.json > /tmp/candidates.json
+jq length /tmp/candidates.json
+```
+
+If 0 candidates, proceed directly to 2f (push as normal).
+
+If there are candidates, read `/tmp/candidates.json` and compare each candidate's title
+against this article. **Bias strongly to keeping them separate** — only treat it as the
+same event when you are confident it is the same property/project/transaction, not
+merely the same company or city. Two different deals by the same developer are NOT the
+same event.
+
+- **If a candidate IS the same event:** merge this article's enriched contact(s) into
+  that existing Lead instead of creating a new one. Build the contacts as
+  `Name | Title | Email | Phone` strings (the same ones you would have pushed as Lead
+  1/2/3), then:
+
+  ```bash
+  echo '{"keeper_lead_id":"<candidate lead_id>","contacts":[<contact strings>],"merged_url":"'"$URL"'"}' \
+    | uv run python -m pipeline.cli.merge_contacts
+  uv run python -m pipeline.cli.mark "$URL_HASH" merged
+  ```
+
+  Then **skip step 2f (push)** for this article and continue to the next article. Do
+  not run 2g's `pushed` mark for this article because the URL was already marked
+  `merged`.
+
+- **If NO candidate is the same event:** proceed to 2f (push as normal).
+
+### 2f. Push to Pipedrive Leads
+
+The enrichment flow returns up to 3 contacts as `{"company_name": "...", "leads":
+[<Lead>, <Lead>, <Lead>]}`. Push only when at least one contact has an email address.
+Email-only contacts are acceptable; email + contact details are ideal. Empty
+enrichment, or contacts with no email address, must not be pushed to Pipedrive.
+
+The first email-bearing contact becomes the primary (linked Person record), and the
+rest populate the Lead 2 / Lead 3 custom fields.
+
+`$URL` MUST be the resolved publisher article URL. Never push a Google News wrapper
+URL to Pipedrive. If `$URL` contains `news.google.com`, stop this article, resolve it,
+or mark it `failed`; do not call `pipeline.cli.push` with the wrapper.
 
 ```bash
 # /tmp/lead.json is always the {leads: [...]} envelope by this point
 # (cache hit, Apollo, and Grok all write that shape; empty enrichments = {leads: []})
-LEADS=$(jq '.leads // []' /tmp/lead.json)    # [] when no enrichment
+LEADS=$(jq '[.leads[]? | select((.email // "") != "")]' /tmp/lead.json)
+if [ "$(echo "$LEADS" | jq 'length')" -eq 0 ]; then
+  uv run python -m pipeline.cli.mark "$URL_HASH" filtered
+  continue
+fi
+
 PRIMARY=$(echo "$LEADS" | jq '.[0] // null')
 EXTRAS=$(echo "$LEADS" | jq '.[1:]')         # [] when only one or zero
 
@@ -336,7 +406,12 @@ The push CLI populates:
 Read `/tmp/push_result.json`. If `skipped: true`, the URL was already in Pipedrive Leads
 (treat as success).
 
-### 2f. Mark seen
+### 2g. Mark seen
+
+Mark `pushed` only after the resolved publisher article URL was pushed or skipped as an
+existing exact URL match in Pipedrive. If Step 2e found a same-event match and merged
+contacts into an existing Lead, mark the resolved URL as `merged` instead and do not
+create a new Lead.
 
 ```bash
 uv run python -m pipeline.cli.mark "$URL_HASH" pushed
@@ -381,3 +456,37 @@ After the loop, report:
 - **Jordan's feedback:** count of `NOT RELEVANT`-flagged Leads + the list from Step 3
 
 Log a final `run_finished` event with the counts.
+
+---
+
+## Step 5: Email Jordan the day's new leads
+
+After the loop, email Jordan a summary of the Leads created during this run.
+This reads the Leads back out of Pipedrive and sends a one-row-per-Lead table
+(every contact listed) over SMTP.
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily
+DIGEST_RC=$?
+```
+
+Behavior:
+- Sends to `LEAD_DIGEST_TO` (set in the env file). Requires `SMTP_HOST`,
+  `LEAD_DIGEST_TO` and `LEAD_DIGEST_FROM`; for Google Workspace use
+  `smtp.gmail.com:587` with an App Password as `SMTP_PASSWORD`.
+- `--daily` covers Leads created **since the last successful digest run** — a
+  watermark persisted in `db.sqlite` (`digest_runs` table). A successful send
+  advances the watermark, so a Lead is never emailed twice even if the routine
+  runs more than once a day; a failed send leaves it so the next run retries.
+  The very first run (no watermark yet) falls back to Leads created today (UTC).
+- If **no** new Leads since the watermark, it logs `digest_skipped` and sends
+  nothing (rc 0), but still advances the watermark.
+
+Exit codes: `0` ok (sent or nothing to send) · `4` SMTP not configured (set the
+`SMTP_*` / `LEAD_DIGEST_*` vars) · `2` usage error. If `DIGEST_RC == 4`, note in
+the report that the digest couldn't send because SMTP env vars are missing.
+
+**One-time backfill** (not part of the daily run): to email every Lead created
+since May 29, 2026, run `uv run python -m pipeline.cli.email_digest --since 2026-05-29`.
+`--since` does **not** touch the daily watermark. Preview without sending by
+appending `--print` (renders the HTML to stdout; also leaves the watermark alone).

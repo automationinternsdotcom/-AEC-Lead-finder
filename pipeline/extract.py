@@ -2,6 +2,7 @@
 
 The LLM extraction step now happens in-context inside the daily Claude routine —
 this module provides only the deterministic pieces:
+  - resolve_article_url(url)       — decode Google News wrappers to publisher URLs
   - extract_article_text(url, http) — HTTP fetch + trafilatura cleanup
   - is_qualifying(article)          — drop rules on a Claude-produced ExtractedArticle
   - estimate_deal_size(article, rates) — janitorial rate calc
@@ -33,7 +34,7 @@ class ExtractError(RuntimeError):
     """Raised when an article cannot be turned into cleaned text."""
 
 
-def _resolve_google_news(url: str) -> str:
+def resolve_article_url(url: str) -> str:
     """Google News RSS feed entries are JS-redirect URLs. Decode to the
     publisher's real URL before fetching — httpx's follow_redirects can't
     handle JavaScript-based redirects.
@@ -68,6 +69,11 @@ def _resolve_google_news(url: str) -> str:
     return result["decoded_url"]
 
 
+def _resolve_google_news(url: str) -> str:
+    """Backward-compatible alias for older tests/callers."""
+    return resolve_article_url(url)
+
+
 # ── Stage 1: text extraction (no LLM) ─────────────────────────────────────────
 
 def extract_article_text(url: str, http: httpx.Client) -> str:
@@ -75,7 +81,7 @@ def extract_article_text(url: str, http: httpx.Client) -> str:
 
     Raises ExtractError on http >= 400, empty/short content, or paywall.
     """
-    resolved = _resolve_google_news(url)
+    resolved = resolve_article_url(url)
     resp = http.get(resolved)
     if resp.status_code >= 400:
         raise ExtractError(f"http {resp.status_code}")

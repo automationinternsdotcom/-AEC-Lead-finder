@@ -1,7 +1,8 @@
 """Discover new article URLs from sources.yaml; dedup against seen_urls.
 
 Reuses: feedparser (RSS/Atom + dates + encodings), util.make_http_client +
-        canonicalize_url + sha256_hex + log_event, db.record_seen as the dedup gate.
+        extract.resolve_article_url + canonicalize_url + sha256_hex + log_event,
+        db.record_seen as the dedup gate.
 Extend: METHOD_HANDLERS dispatch — add one key to support a new fetch type.
 Failure: per-source try/except; broken feeds log `source_failed` and skip.
 """
@@ -15,7 +16,7 @@ from typing import Callable
 import feedparser
 import httpx
 
-from pipeline import config, db, util
+from pipeline import config, db, extract, util
 
 
 @dataclass(slots=True)
@@ -71,7 +72,11 @@ def _fetch_one(
         if not link:
             continue
         try:
-            canon = util.canonicalize_url(link)
+            resolved = extract.resolve_article_url(link)
+            canon = util.canonicalize_url(resolved)
+        except extract.ExtractError as e:
+            util.log_event("article_url_resolve_failed", source=source, url=link, error=str(e))
+            continue
         except ValueError:
             continue
         h = util.sha256_hex(canon)
