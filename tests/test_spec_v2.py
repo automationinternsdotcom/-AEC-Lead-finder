@@ -25,6 +25,7 @@ class TestCampaignSpecV2Compatibility(unittest.TestCase):
         self.assertEqual(spec.campaign_id, "aether-cleaning-az")
         self.assertEqual(spec.lead_pattern.type, "event_signal")
         self.assertEqual(spec.routing.fetch, "deterministic_cli")
+        self.assertEqual(spec.routing.pattern, "deterministic_cli")
         self.assertEqual(spec.routing.enrich, "browser_chat_skill")
         self.assertTrue(spec.quality_gates.preserve_phase1_parity)
         self.assertIn("google_news_az_cre", spec.sources.source_tags)

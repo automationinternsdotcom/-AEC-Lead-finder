@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 StageName = Literal[
     "fetch",
     "extract",
+    "pattern",
     "qualify",
     "enrich",
     "preview",

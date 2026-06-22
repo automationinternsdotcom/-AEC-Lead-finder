@@ -1,0 +1,41 @@
+[
+  {
+    "entity_name": "Desert Ridge Property Management LLC",
+    "source": "county_roster",
+    "signal": "portfolio ownership",
+    "confidence": 0.9,
+    "domain": "desertridgepm.com",
+    "city": "Phoenix"
+  },
+  {
+    "entity_name": "Desert Ridge Property Management",
+    "source": "apartment_directory",
+    "signal": "multifamily portfolio",
+    "confidence": 0.86,
+    "domain": "desertridgepm.com",
+    "city": "Phoenix"
+  },
+  {
+    "entity_name": "Sun Mesa Holdings LLC",
+    "source": "county_roster",
+    "signal": "new acquisition",
+    "confidence": 0.64,
+    "domain": "sunmesa.example",
+    "city": "Mesa"
+  },
+  {
+    "entity_name": "Sun Mesa Holdings",
+    "source": "business_registry",
+    "signal": "new acquisition",
+    "confidence": 0.62,
+    "domain": "sunmesaholdings.example",
+    "city": "Mesa"
+  },
+  {
+    "entity_name": "Cactus Village Apartments",
+    "source": "apartment_directory",
+    "signal": "lease-up",
+    "confidence": 0.55,
+    "city": "Tempe"
+  }
+]

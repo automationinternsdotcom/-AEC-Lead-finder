@@ -28,6 +28,7 @@ RUNS_DIR = ROOT / "runs"
 STAGE_ORDER: tuple[StageName, ...] = (
     "fetch",
     "extract",
+    "pattern",
     "qualify",
     "enrich",
     "preview",
@@ -69,6 +70,7 @@ def build_manifest(spec: CampaignSpecV2, run_id: str, spec_path: Path) -> RunMan
     routes = {
         "fetch": spec.routing.fetch,
         "extract": spec.routing.extract,
+        "pattern": spec.routing.pattern,
         "qualify": spec.routing.qualify,
         "enrich": spec.routing.enrich,
         "preview": spec.routing.preview,

@@ -195,6 +195,7 @@ class StageRouting(BaseModel):
     """Declares which actor owns each stage; no fake browser API in Python."""
     fetch: StageRoute = "deterministic_cli"
     extract: StageRoute = "deterministic_cli"
+    pattern: StageRoute = "deterministic_cli"
     qualify: StageRoute = "codex_in_session"
     enrich: StageRoute = "browser_chat_skill"
     preview: StageRoute = "manual_review"

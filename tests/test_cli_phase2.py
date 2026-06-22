@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from pipeline.cli import init_run as init_run_cli
 from pipeline.cli import next_action as next_action_cli
+from pipeline.cli import run_pattern as run_pattern_cli
 from pipeline.cli import validate_artifact as validate_artifact_cli
 from pipeline.cli import validate_spec as validate_spec_cli
 from pipeline.contracts import ArtifactEnvelope
@@ -58,6 +59,34 @@ class TestPhase2Cli(unittest.TestCase):
         data = json.loads(stdout.getvalue())
         self.assertTrue(data["ok"])
         self.assertEqual(data["record_count"], 1)
+
+    def test_run_pattern_cli_outputs_pattern_artifact(self):
+        records = [
+            {
+                "entity_name": "Desert Ridge Property Management LLC",
+                "source": "county_roster",
+                "signal": "portfolio ownership",
+                "confidence": 0.9,
+                "domain": "desertridgepm.com",
+                "city": "Phoenix",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.json"
+            path.write_text(json.dumps(records), encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = run_pattern_cli.main([
+                    str(path),
+                    "--pattern",
+                    "entity_aggregation",
+                    "--run-id",
+                    "cli-run",
+                ])
+        self.assertEqual(rc, 0)
+        data = json.loads(stdout.getvalue())
+        self.assertEqual(data["stage"], "pattern")
+        self.assertEqual(data["metadata"]["pattern_type"], "entity_aggregation")
+        self.assertEqual(data["metadata"]["record_count"], 1)
 
 
 if __name__ == "__main__":

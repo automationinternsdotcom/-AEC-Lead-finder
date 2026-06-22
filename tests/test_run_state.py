@@ -28,6 +28,7 @@ class TestRunState(unittest.TestCase):
         self.assertEqual(manifest.campaign_id, "aether-cleaning-az")
         self.assertEqual(manifest.run_id, "test-run")
         self.assertEqual(manifest.stages["fetch"].status, "pending")
+        self.assertEqual(manifest.stages["pattern"].route, "deterministic_cli")
         self.assertEqual(manifest.stages["qualify"].route, "codex_in_session")
         self.assertTrue(manifest.preview_required)
         self.assertFalse(manifest.live_delivery_allowed)
@@ -45,7 +46,7 @@ class TestRunState(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = init_run(run_id="test-run", runs_dir=Path(tmp))
             manifest = load_manifest(run_dir / "manifest.json")
-        for stage in ("fetch", "extract", "qualify", "enrich", "preview"):
+        for stage in ("fetch", "extract", "pattern", "qualify", "enrich", "preview"):
             manifest.stages[stage].status = "complete"
         action = next_action_for_manifest(manifest)
         self.assertEqual(action.status, "blocked")
