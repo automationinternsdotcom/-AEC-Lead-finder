@@ -22,7 +22,7 @@ Claude-in-Chrome. See `skill/grok_enricher.md` (Codex port) for the browser flow
 Source the env file (it contains all required secrets):
 
 ```bash
-source ~/.aether-pipedrive.env
+source ~/.aether-pipedrive-prod.env
 ```
 
 Verify env vars are loaded:
