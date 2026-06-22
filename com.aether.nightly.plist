@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Aether nightly lead pipeline — LaunchAgent (runs in the user's GUI session,
+  which is required to drive Chrome). PREPARED, NOT INSTALLED.
+  To enable, see README-AUTOMATION.md (copy to ~/Library/LaunchAgents + bootstrap).
+  RunAtLoad is false and this file is NOT in ~/Library/LaunchAgents, so it cannot
+  fire until you deliberately install + load it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aether.nightly</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/openclaw/aether-runner/run-nightly.sh</string>
+  </array>
+
+  <!-- 02:00 every day -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>2</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Which Pipedrive account the nightly writes to. CONFIRM before enabling. -->
+    <key>AETHER_ENV</key>
+    <string>/Users/openclaw/.aether-pipedrive-prod.env</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/openclaw/aether-runner/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/openclaw/aether-runner/logs/launchd.err.log</string>
+</dict>
+</plist>
