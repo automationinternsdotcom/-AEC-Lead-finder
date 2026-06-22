@@ -1,12 +1,17 @@
 # Aether CRE Lead Pipeline
 
-A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies them, optionally enriches them with decision-maker contact info via Apollo, and pushes qualified items into **Pipedrive's Leads Inbox** for Jordan to triage. A Claude Code session reads `skill/aether_daily_routine.md` and drives the pipeline step by step.
+A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies them, optionally enriches them with decision-maker contact info via Apollo or Grok, and pushes qualified items into **Pipedrive's Leads Inbox** for Jordan to triage. A Codex session reads `skill/aether_daily_routine.md` and drives the pipeline step by step.
 
 **Client:** Jordan Whitehurst, Aether Facility Services
 
 ## Architecture
 
-Six stdlib CLI sub-tools, each reading from stdin or arguments and writing JSON to stdout:
+The default run loads `campaigns/aether-cleaning-az.yaml` as its `CampaignSpec`.
+The current engine is still Aether-specific in a few internals, but fetch source
+selection, qualification prompt substance, enrichment prompt substance, and
+destination selection now read from the campaign spec.
+
+CLI sub-tools read from stdin or arguments and write JSON/text to stdout:
 
 ```
 pipeline.cli.fetch    — discover new article URLs via Google News + RSS; filters against seen_urls (SQLite)
@@ -15,9 +20,10 @@ pipeline.cli.qualify  — gate: pass only Arizona CRE signals above confidence t
 pipeline.cli.enrich   — Apollo people lookup by company domain (optional)
 pipeline.cli.push     — create Pipedrive Org + Person + Lead; dedup on Article URL custom field
 pipeline.cli.mark     — record URL state in seen_urls (pushed / filtered / failed)
+pipeline.cli.render_prompt — render CampaignSpec-driven assess/Grok prompts
 ```
 
-Claude orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
+Codex orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
 
 **Why Leads, not Deals:** Pipedrive Leads are the right surface for machine-extracted, unvetted inputs. Jordan triages the Leads Inbox daily — promising ones convert to Deals (preserving all the data + carrying the Article URL field), the rest archive. Pushing straight to Deals would have polluted his active pipeline with ~50/day of noise and lost the conversion-as-qualification signal.
 
@@ -50,12 +56,12 @@ curl "https://<domain>.pipedrive.com/api/v1/dealFields?api_token=<token>" \
 
 The pipeline enriches qualifying leads with decision-maker contact info. Two paths:
 
-**Path A: SuperGrok via Claude in Chrome (default — no extra API costs)**
+**Path A: SuperGrok via Chrome (default — no extra API costs)**
 
-- Open SuperGrok ([grok.com](https://grok.com)) in Chrome with the [Claude in Chrome](https://www.anthropic.com/news/claude-in-chrome) extension active.
+- Open SuperGrok ([grok.com](https://grok.com)) in Chrome with the Codex Chrome Extension active.
 - Log in to your SuperGrok account.
 - Verify **Fast** mode is selected in the chat input (not Expert / Heavy / Auto). Expert mode takes 5+ minutes per query, so it's used only for the step-6b escalation, not as the starting mode.
-- The daily routine's enricher subagent (`skill/grok_enricher.md`) drives the session per-article via Chrome MCP. ~6-10s per query.
+- The daily routine's Grok enrichment flow (`skill/grok_enricher.md`) drives the session per-article. ~6-10s per Fast query.
 
 **Path B: Apollo.io API (set `APOLLO_API_KEY` in `.env`)**
 
@@ -90,27 +96,21 @@ env | grep -E '^PIPEDRIVE_' | wc -l   # should print 3
 
 ## How to Run
 
-The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Claude Code session in the repo root and trigger it one of two ways:
+The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Codex session in the repo root and run the daily routine.
 
-### Option A: Interactive via `/loop` in a Claude Code session
+### Interactive
 
-Open a Claude Code session in the repo directory and run:
+Open a Codex session in the repo directory and ask it to run the Aether daily routine.
 
-```
-/loop 24h follow skill/aether_daily_routine.md
-```
-
-Claude will re-execute the pipeline every 24 hours while the session stays open. This is the easiest option for development and testing.
-
-### Option B: Local cron via `claude code --headless`
+### Local cron via `codex exec`
 
 Add a crontab entry to run the pipeline autonomously:
 
 ```
-0 7 * * * cd /path/to/repo && source ~/.aether-pipedrive.env && claude code --headless 'follow skill/aether_daily_routine.md'
+0 7 * * * cd /path/to/repo && source ~/.aether-pipedrive.env && codex exec "run the aether daily routine"
 ```
 
-This runs at 7am daily. The machine must be on at that time. The exact `claude code --headless` invocation is approximate — verify against current Claude Code CLI docs.
+This runs at 7am daily. The machine must be on at that time.
 
 ## Testing
 
@@ -118,7 +118,16 @@ This runs at 7am daily. The machine must be on at that time. The exact `claude c
 uv run python -m unittest discover tests -v
 ```
 
-Currently 44 tests covering the CLI tools and helper modules.
+The Phase 1 parity harness is available at:
+
+```bash
+uv run python -m tests.parity.harness capture --limit 30
+uv run python -m tests.parity.harness golden
+uv run python -m tests.parity.harness compare
+```
+
+The harness never calls a model; it captures deterministic article text, emits
+prompt packets for an in-session judgment pass, and compares recorded judgments.
 
 ## Status
 

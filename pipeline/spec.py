@@ -4,9 +4,9 @@ This is Layer 2 of the product plan (the "vertical skin"). The engine reads a
 CampaignSpec and runs it; the spec is the only thing that changes per client.
 A new vertical is a new spec file (hours), not new code (weeks).
 
-Nothing here changes pipeline behavior yet — Phase 0 is purely the typed schema
-plus its loader. Later phases wire fetch/assessor/enrich/push to read from a
-loaded CampaignSpec instead of today's hardcoded CRE/AZ logic.
+Phase 1 wires the current cleaning pipeline to load this spec at runtime while
+preserving today's behavior. New verticals should add specs, not new bespoke
+pipeline branches.
 
 Reuses: pydantic (matches schema.py's ExtractedArticle style), pyyaml + the
 ROOT path convention from config.py.
@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, model_validator
 from pipeline.config import ROOT
 
 CAMPAIGNS_DIR = ROOT / "campaigns"
+DEFAULT_CAMPAIGN_ID = "aether-cleaning-az"
 
 
 class Client(BaseModel):
@@ -120,6 +121,27 @@ class CampaignSpec(BaseModel):
     schedule: Schedule = Field(default_factory=Schedule)
 
 
+def resolve_spec_path(identifier_or_path: str | Path | None = None) -> Path:
+    """Resolve a campaign id, YAML filename, or explicit path to a spec file.
+
+    Examples:
+      - None -> campaigns/aether-cleaning-az.yaml
+      - "aether-cleaning-az" -> campaigns/aether-cleaning-az.yaml
+      - "campaigns/aether-cleaning-az.yaml" -> that path
+    """
+    raw = identifier_or_path or DEFAULT_CAMPAIGN_ID
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    if path.suffix in {".yaml", ".yml"}:
+        if path.parent == Path("."):
+            return CAMPAIGNS_DIR / path.name
+        return ROOT / path
+    if path.parent != Path("."):
+        return ROOT / path
+    return CAMPAIGNS_DIR / f"{raw}.yaml"
+
+
 def load_spec(path: str | Path) -> CampaignSpec:
     """Load + validate a campaign spec from a YAML file.
 
@@ -128,3 +150,8 @@ def load_spec(path: str | Path) -> CampaignSpec:
     """
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return CampaignSpec.model_validate(data)
+
+
+def load_campaign_spec(identifier_or_path: str | Path | None = None) -> CampaignSpec:
+    """Load a CampaignSpec by id/path, defaulting to the current cleaning spec."""
+    return load_spec(resolve_spec_path(identifier_or_path))

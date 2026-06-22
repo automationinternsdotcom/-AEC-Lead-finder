@@ -1,11 +1,11 @@
 ---
 name: grok-enricher
-description: Per-article decision-maker enrichment via SuperGrok Fast mode in Claude-in-Chrome. Receives a company name, returns Lead JSON or null.
+description: Per-article decision-maker enrichment via SuperGrok Fast mode. Receives a company name, returns Lead JSON or null.
 ---
 
-# Grok Enricher Subagent
+# Grok Enricher
 
-You are the contact-enrichment subagent. Your one job: given a company name (and optional city/description), use the parent's open SuperGrok session to find 1–3 decision-makers who would have buying authority for asset-preservation and facility-services contracts at commercial / multifamily properties, then return clean JSON.
+You are the contact-enrichment operator. Your one job: given a company name (and optional city/description), use the open SuperGrok session to find 1–3 decision-makers who match the campaign's `enrichment.buyer_persona`, then return clean JSON.
 
 ## Inputs (provided in the dispatch prompt)
 
@@ -39,7 +39,7 @@ The parent routine will handle re-auth.
 
 Click **New Chat** in the sidebar so prior queries don't contaminate this response.
 
-### 3. Inject the standardized prompt
+### 3. Render + inject the standardized prompt
 
 The chat input is a TipTap / ProseMirror contenteditable. The `computer.type` action **silently collapses spaces** in these editors — DO NOT use it. Use `javascript_tool` with `execCommand('insertText', ...)` instead:
 
@@ -49,37 +49,21 @@ editor.focus();
 document.execCommand('insertText', false, /* PROMPT_TEXT */);
 ```
 
-Standardized prompt template — fill the slots.
+Render the Fast prompt from the campaign spec and provided inputs:
 
-Note: the prompt deliberately uses the literal **"janitorial/cleaning service contracts"** wording — that matches how these contracts are described in Grok's search index (procurement databases, vendor directories, etc.) and produces higher-precision matches than abstract "asset preservation" framing. The Aether brand voice is for the Pipedrive note (operator-facing); the Grok prompt is for retrieval (search-tool-facing).
-
-```
-The goal is to identify 1-3 people who would likely have buying authority or influence for janitorial/cleaning service contracts, facilities services, property management operations, or asset-preservation decisions at {company_name}{city_phrase}{description_phrase}{owner_phrase}.
-
-Article context: {article_summary}
-Article URL: {article_url}
-
-Prioritize: Owner, Chairman, CEO, Principal, COO, VP/Director of Facilities, Asset Manager, Investment Manager, Operations Manager, Property Manager.
-
-For each person, return:
-- Full name
-- Current title
-- LinkedIn URL if findable
-- Professional email if findable (mark hedged/company-format guesses with a "Likely" prefix)
-- Direct phone number if findable (direct dial only, NOT the main company switchboard)
-
-Prefer contacts tied to ownership, asset management, property management, operations, or Arizona portfolio activity. Rank the best outreach contact first.
-
-Cross-check sources such as the company website, LinkedIn, broker/property listings, chamber directories, offering memorandums, LoopNet, Zillow/property listings, press releases, and commercial real estate news.
-
-Return a numbered list only, no preamble.
+```bash
+uv run python -m pipeline.cli.render_prompt grok-fast \
+  --campaign aether-cleaning-az \
+  --company-name "$COMPANY_NAME" \
+  --city "$CITY" \
+  --description "$DESCRIPTION" \
+  --owner-entity "$OWNER_ENTITY" \
+  --article-summary "$ARTICLE_SUMMARY" \
+  --article-url "$ARTICLE_URL" \
+  > /tmp/grok_prompt.txt
 ```
 
-Where:
-- `city_phrase` = ` ({city})` if city is set, else `""`
-- `description_phrase` = ` — {description}` if description is set, else `""`
-- `owner_phrase` = ` (note: the property's recorded owner per Maricopa County records is "{owner_entity}" — this may be a holding LLC distinct from the operating company)` if `owner_entity` is set, else `""`
-- `{article_summary}` and `{article_url}` are filled verbatim from the inputs. If an input is null, write `(none)` so the line is never blank.
+Read `/tmp/grok_prompt.txt` and inject that exact text. The renderer deliberately keeps retrieval-oriented wording such as **"janitorial/cleaning service contracts"** because that matches how these contracts are described in search indexes; campaign voice for the Pipedrive note remains in `enrichment.outreach_angle`.
 
 ### 4. Submit
 
@@ -116,39 +100,27 @@ Skip the Expert retry only when every parsed entry is both `is_generic: false` A
 Expert retry steps:
 1. Click the mode selector dropdown (next to the chat input) → select **Expert**.
 2. Start a new chat (New Chat in sidebar).
-3. Inject the Expert-specific prompt below — it's more aggressive about verification + direct-dial phones than the Fast prompt.
+3. Render and inject the Expert-specific prompt — it's more aggressive about verification + direct-dial phones than the Fast prompt.
 4. Submit. Expert responses take 3-5+ minutes — poll the page every 30s until you see "Thought for X min Ys" or "Thought for Xs" with a duration (not "Agents thinking"). Cap at 8 min.
 5. Capture, parse via `--all` again.
 6. **Critical:** switch the mode selector back to **Fast** before returning, so the next dispatched subagent finds the session in the expected state.
 
-Expert prompt (more aggressive than Fast — fill the same slots, plus the article context and `{fast_findings_block}`).
+Render the Expert prompt from the campaign spec and provided inputs:
 
-Build `{fast_findings_block}` from the Fast leads you just parsed — one line per contact:
+Build `FAST_FINDINGS_BLOCK` from the Fast leads you just parsed — one line per contact:
 `N. <name> — <title> — LinkedIn: <url|null> — Email: <email|"Likely <email>"|null> — Phone: <phone|null>`. If Fast returned no usable candidates, set the block to the single line `The first-pass search returned no usable candidates — search fresh.`
 
-```
-The goal is to identify 1-3 people who would likely have buying authority or influence for janitorial/cleaning service contracts, facilities services, property management operations, or asset-preservation decisions at {company_name}{city_phrase}{description_phrase}{owner_phrase}. I need verified contact info, not pattern guesses.
-
-Article context: {article_summary}
-Article URL: {article_url}
-
-A faster first-pass search already returned the following candidates for this company. Verify, correct, and improve on them — confirm each person is still in role, replace any "Likely"/guessed emails with a publicly verified email or null, and add direct-dial phones where you can verify them:
-{fast_findings_block}
-
-Prioritize: Owner, Chairman, CEO, Principal, COO, VP/Director of Facilities, Asset Manager, Investment Manager, Operations Manager, Property Manager.
-
-For each person, return:
-- Full name (specific person, not a job title)
-- Current title (verify currency via LinkedIn or company site — confirm they're still in that role at this company)
-- LinkedIn URL
-- Professional email — only if publicly verified from at least one of: company directory, LinkedIn contact info, RocketReach, Apollo.io, ZoomInfo, broker/property listings, chamber directories, offering memorandums, press releases. Do NOT guess emails. Do NOT infer emails only from company format. If you cannot verify the email, return null.
-- Direct phone number — only if publicly verified as a direct line (NOT the main company switchboard). If you cannot verify a direct dial, return null.
-
-Prefer contacts tied to ownership, asset management, property management, operations, or Arizona portfolio activity. Rank the best outreach contact first.
-
-Cross-check sources such as the company website, LinkedIn, broker/property listings, chamber directories, offering memorandums, LoopNet, Zillow/property listings, press releases, and commercial real estate news. Cross-reference at least two sources per person when possible.
-
-Return a numbered list only, no preamble.
+```bash
+uv run python -m pipeline.cli.render_prompt grok-expert \
+  --campaign aether-cleaning-az \
+  --company-name "$COMPANY_NAME" \
+  --city "$CITY" \
+  --description "$DESCRIPTION" \
+  --owner-entity "$OWNER_ENTITY" \
+  --article-summary "$ARTICLE_SUMMARY" \
+  --article-url "$ARTICLE_URL" \
+  --fast-findings "$FAST_FINDINGS_BLOCK" \
+  > /tmp/grok_expert_prompt.txt
 ```
 
 ### 7. Pick the best result

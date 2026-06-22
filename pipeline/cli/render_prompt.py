@@ -1,0 +1,71 @@
+"""Render deterministic CampaignSpec-driven prompts.
+
+Examples:
+  uv run python -m pipeline.cli.render_prompt assess
+  uv run python -m pipeline.cli.render_prompt grok-fast --company-name Acme
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+
+from pipeline import prompts
+from pipeline.spec import load_campaign_spec
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "kind",
+        choices=("assess", "grok-fast", "grok-expert"),
+        help="Prompt to render.",
+    )
+    parser.add_argument(
+        "--campaign",
+        default=None,
+        help="Campaign id or YAML path. Defaults to the cleaning campaign.",
+    )
+    parser.add_argument("--company-name")
+    parser.add_argument("--city")
+    parser.add_argument("--description")
+    parser.add_argument("--owner-entity")
+    parser.add_argument("--article-summary")
+    parser.add_argument("--article-url")
+    parser.add_argument(
+        "--fast-findings",
+        default="",
+        help="Fast-mode findings block for grok-expert.",
+    )
+    args = parser.parse_args([] if argv is None else argv)
+
+    spec = load_campaign_spec(args.campaign)
+    if args.kind == "assess":
+        rendered = prompts.render_assess_prompt(spec)
+    else:
+        if not args.company_name:
+            parser.error(f"{args.kind} requires --company-name")
+        common = {
+            "company_name": args.company_name,
+            "city": args.city,
+            "description": args.description,
+            "owner_entity": args.owner_entity,
+            "article_summary": args.article_summary,
+            "article_url": args.article_url,
+        }
+        if args.kind == "grok-fast":
+            rendered = prompts.render_grok_fast_prompt(spec, **common)
+        else:
+            rendered = prompts.render_grok_expert_prompt(
+                spec,
+                fast_findings_block=args.fast_findings,
+                **common,
+            )
+
+    sys.stdout.write(rendered)
+    if not rendered.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

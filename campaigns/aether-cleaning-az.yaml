@@ -14,10 +14,12 @@ campaign_id: aether-cleaning-az
 client:
   name: Aether Facility Services
   company_description: >-
-    Commercial cleaning and facility services in Arizona. ICP is locally-owned
-    20-600 unit multifamily properties plus commercial properties with active
-    operations. Long sales cycle (1-2 years), so early-stage construction and
-    acquisition signals are still valuable.
+    Aether Facility Services (Jordan Whitehurst) sells commercial cleaning +
+    facility services in Arizona. The ICP is locally-owned 20-600 unit
+    multifamily properties, plus commercial properties with active operations.
+    Sales cycle is long (1-2 years from first contact to contract), so
+    early-stage leads (land acquisition, construction starts) are still
+    valuable.
   service_area:
     - Arizona
     - Goodyear to Apache Junction corridor
@@ -36,9 +38,17 @@ targeting:
     - developer land acquisitions
     - industrial / warehouse deals
   buyer_personas:
-    - facilities manager
-    - property manager
-    - developer
+    - Owner
+    - Chairman
+    - CEO
+    - Principal
+    - COO
+    - VP/Director of Facilities
+    - Asset Manager
+    - Investment Manager
+    - Operations Manager
+    - Property Manager
+    - Developer
     - GC project manager
     - HOA board
   negative_keywords:
@@ -67,28 +77,49 @@ discovery:
     - AZ
 
 qualification:
-  # Jordan's HIGH/MEDIUM/LOW protocol distilled to one rubric. HIGH/MEDIUM keep,
-  # LOW drops. Property must be in Arizona (az_relevant).
-  relevance_rubric: >-
-    A lead is an Arizona commercial property or project with a physical-activity
-    signal that implies a near-term facility-services need: new occupancy, lease
-    signing, renovation/construction completion, a new business opening, a
-    property-management change, a major buildout, or a multifamily tower reaching
-    lease-up (the ICP sweet spot). Developer land acquisitions and industrial
-    deals qualify as lower-priority leads (real, but longer timeline). DROP macro
-    market commentary, mortgage/rate news, residential/consumer coverage,
-    national stories that only mention Arizona in passing, and rankings/awards
-    with no property activity. The property itself must be in Arizona; rate down
-    anything outside the Goodyear-to-Apache-Junction corridor or Tucson.
+  # Full-fidelity Jordan protocol from skill/aether_daily_routine.md. Keep the
+  # substance here, not in the prompt template, so CampaignSpec remains the
+  # single source of truth for vertical-specific qualification.
+  relevance_rubric: |-
+    #### Jordan's HIGH/MEDIUM/LOW filter
+
+    **HIGH** - push to Pipedrive with priority emphasis:
+    - New tenant occupancy or lease signing at a commercial property
+    - Renovation, redevelopment, adaptive reuse, or construction completion
+    - New business openings (restaurants, bars, coffee shops, cannabis dispensaries, retail)
+    - Property management company changes or transitions
+    - Major expansion or buildout (e.g. TSMC north Phoenix)
+    - **New apartment / condo towers reaching lease-up phase** (this is the ICP sweet spot)
+    - HOA stand-ups for new communities
+
+    **MEDIUM** - push to Pipedrive as routine leads:
+    - Developer land acquisitions (lead is real but timeline is long)
+    - Industrial / warehouse deals (opportunity exists but smaller value per deal)
+    - General commercial property transactions without a clear physical-activity signal
+
+    **LOW** - DO NOT push (these get filtered out downstream):
+    - Macro market commentary, trend pieces, "state of the market" articles
+    - Mortgage rate news, housing market opinions, editorials
+    - Residential consumer coverage (homebuyers, single-family homes)
+    - National stories that mention Arizona in passing
+    - Rankings, awards, people-moves without property activity
+    - Anything where the *property* is outside Arizona (set `az_relevant=false`)
+
+    **Geographic scope:** Arizona only. The corridor Jordan actively works is **Goodyear east to Apache Junction, plus Tucson**. Penalize (don't reject, but rate down) anywhere else in AZ.
   min_confidence: 0.6
 
 enrichment:
-  buyer_persona: facilities / property manager, developer, or GC decision-maker
+  buyer_persona: >-
+    Owner, Chairman, CEO, Principal, COO, VP/Director of Facilities, Asset
+    Manager, Investment Manager, Operations Manager, Property Manager, developer,
+    GC project manager, or HOA board member with buying authority or influence
+    for facility-services contracts.
   # Aether "Straight Shooter" voice: asset preservation / strategic partner,
   # NOT "cleaning" or "janitor" (schema.py + push.py enforce this framing).
   outreach_angle: >-
-    Asset-preservation and strategic-partner framing for post-construction and
-    ongoing facility services — never "cleaning" or "janitor" language.
+    Brand voice - "Straight Shooter": direct, asset-minded, ROI/NOI-focused.
+    Frame the value as "asset preservation" and "strategic partner", NOT
+    "cleaning" or "janitor".
   required_fields:
     - contact_name
     - contact_title

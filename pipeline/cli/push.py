@@ -11,14 +11,27 @@ Output: {"lead_id": <uuid-str>, "org_id": <int | null>,
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 
-from pipeline import config, enrich, extract, push
+from pipeline import config, destination, enrich, extract, push
+from pipeline.spec import load_campaign_spec
 from schema import ExtractedArticle
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--campaign",
+        default=None,
+        help="Campaign id or YAML path. Defaults to the cleaning campaign.",
+    )
+    args = parser.parse_args([] if argv is None else argv)
+
+    spec = load_campaign_spec(args.campaign)
+    destination.require_pipedrive_destination(spec)
+
     raw = json.load(sys.stdin)
     article = ExtractedArticle.model_validate(raw["article"])
     lead_dict = raw.get("lead")
@@ -45,4 +58,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

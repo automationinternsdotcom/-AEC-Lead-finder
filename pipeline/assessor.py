@@ -22,6 +22,9 @@ API_URL = "https://mcassessor.maricopa.gov/search/rp/"
 
 # Cities at least partially inside Maricopa County. Conservative — better to
 # query and find nothing than to skip a valid address.
+# Cleaning-specific coverage list; do not generalize this from
+# CampaignSpec.discovery.geography. A source-plugin coverage model belongs in a
+# later productization phase.
 _MARICOPA_CITIES = frozenset({
     "phoenix", "tempe", "scottsdale", "mesa", "chandler", "glendale",
     "gilbert", "peoria", "surprise", "avondale", "goodyear", "buckeye",

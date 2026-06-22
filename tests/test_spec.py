@@ -11,7 +11,14 @@ import unittest
 
 from pydantic import ValidationError
 
-from pipeline.spec import CAMPAIGNS_DIR, CampaignSpec, load_spec
+from pipeline.spec import (
+    CAMPAIGNS_DIR,
+    DEFAULT_CAMPAIGN_ID,
+    CampaignSpec,
+    load_campaign_spec,
+    load_spec,
+    resolve_spec_path,
+)
 
 CLEANING_SPEC = CAMPAIGNS_DIR / "aether-cleaning-az.yaml"
 
@@ -38,6 +45,19 @@ def _minimal_spec_dict() -> dict:
 
 
 class TestCleaningSpec(unittest.TestCase):
+    def test_default_campaign_resolves_to_cleaning_spec(self):
+        self.assertEqual(
+            resolve_spec_path(),
+            CAMPAIGNS_DIR / f"{DEFAULT_CAMPAIGN_ID}.yaml",
+        )
+        self.assertEqual(load_campaign_spec().campaign_id, "aether-cleaning-az")
+
+    def test_yaml_filename_resolves_under_campaigns_dir(self):
+        self.assertEqual(
+            resolve_spec_path("aether-cleaning-az.yaml"),
+            CAMPAIGNS_DIR / "aether-cleaning-az.yaml",
+        )
+
     def test_cleaning_spec_loads_and_validates(self):
         spec = load_spec(CLEANING_SPEC)
         self.assertIsInstance(spec, CampaignSpec)

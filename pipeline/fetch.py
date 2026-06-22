@@ -1,4 +1,4 @@
-"""Discover new article URLs from sources.yaml; dedup against seen_urls.
+"""Discover new article URLs from a CampaignSpec-selected source set.
 
 Reuses: feedparser (RSS/Atom + dates + encodings), util.make_http_client +
         canonicalize_url + sha256_hex + log_event, db.record_seen as the dedup gate.
@@ -16,6 +16,7 @@ import feedparser
 import httpx
 
 from pipeline import config, db, util
+from pipeline.spec import CampaignSpec
 
 
 @dataclass(slots=True)
@@ -34,11 +35,68 @@ METHOD_HANDLERS: dict[str, Callable[[str], str]] = {
 }
 
 
-def discover_new_urls(conn: sqlite3.Connection) -> list[NewArticle]:
-    """Fetch every enabled source, dedup against seen_urls, return new articles."""
+def sources_for_campaign(
+    spec: CampaignSpec | None,
+    source_registry: list[dict] | None = None,
+) -> list[dict]:
+    """Return the concrete source rows this run should fetch.
+
+    Without a spec, this preserves the legacy behavior: fetch enabled rows from
+    sources.yaml. With a spec, sources.yaml acts as a registry and
+    spec.discovery.source_tags/search_queries choose the active rows.
+    """
+    sources = source_registry if source_registry is not None else config.load_sources()
+    if spec is None:
+        return [dict(src) for src in sources if src.get("enabled")]
+
+    selected: list[dict] = []
+    seen_names: set[str] = set()
+    tags = set(spec.discovery.source_tags)
+
+    for src in sources:
+        if src.get("name") not in tags:
+            continue
+        row = dict(src)
+        endpoint = str(row.get("endpoint") or "").strip()
+        if not endpoint or endpoint == "TODO":
+            raise ValueError(
+                f"campaign {spec.campaign_id!r} selected source "
+                f"{row.get('name')!r} without a real endpoint"
+            )
+        row["enabled"] = True
+        selected.append(row)
+        seen_names.add(row["name"])
+
+    selected_google_queries = {
+        row["endpoint"]
+        for row in selected
+        if row.get("method") == "google_news"
+    }
+    for idx, query in enumerate(spec.discovery.search_queries, start=1):
+        if query in selected_google_queries:
+            continue
+        name = f"{spec.campaign_id}_google_news_{idx:02d}"
+        if name in seen_names:
+            continue
+        selected.append({
+            "name": name,
+            "method": "google_news",
+            "endpoint": query,
+            "enabled": True,
+        })
+        seen_names.add(name)
+
+    return selected
+
+
+def discover_new_urls(
+    conn: sqlite3.Connection,
+    spec: CampaignSpec | None = None,
+) -> list[NewArticle]:
+    """Fetch selected sources, dedup against seen_urls, return new articles."""
     out: list[NewArticle] = []
     with util.make_http_client() as client:
-        for src in config.load_sources():
+        for src in sources_for_campaign(spec):
             db.sync_source(conn, src["name"], src["method"], src["endpoint"], src.get("enabled", False))
             if not src.get("enabled"):
                 continue

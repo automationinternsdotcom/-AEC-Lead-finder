@@ -57,7 +57,7 @@ class TestFetchCliStdoutIntegrity(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         conn.executescript(db.SCHEMA)
 
-        def fake_discover(c):
+        def fake_discover(c, spec=None):
             util.log_event("source_fetched", source="test_source", total=1, new=1)
             return [NewArticle("https://example.com/a", "h_a", "src", "T", None)]
 
