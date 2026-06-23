@@ -16,6 +16,7 @@
 set -uo pipefail
 
 RUNNER="/Users/openclaw/aether-runner"
+CODEX_BIN="${CODEX_BIN:-/opt/homebrew/bin/codex}"
 # Which Pipedrive account the nightly writes to. <-- CONFIRM THIS.
 AETHER_ENV="${AETHER_ENV:-$HOME/.aether-pipedrive-prod.env}"
 LOG_DIR="$RUNNER/logs"
@@ -28,6 +29,7 @@ echo "===== Aether nightly run: $(date) ====="
 echo "runner=$RUNNER  env=$AETHER_ENV"
 
 if [ ! -f "$AETHER_ENV" ]; then echo "FATAL: missing env file $AETHER_ENV"; exit 1; fi
+if [ ! -x "$CODEX_BIN" ]; then echo "FATAL: codex binary not executable at $CODEX_BIN"; exit 1; fi
 
 # 1) Bring Chrome up so the Grok/extension bridge can (re)connect.
 open -ga "Google Chrome" || true
@@ -57,7 +59,7 @@ PROMPT_FILE="$LOG_DIR/desktop-prompt-$TS.txt"
 printf '%s\n' "$PROMPT" > "$PROMPT_FILE"
 printf '%s' "$PROMPT" | pbcopy
 
-codex app "$RUNNER"
+"$CODEX_BIN" app "$RUNNER"
 sleep 8
 
 osascript <<'APPLESCRIPT'
