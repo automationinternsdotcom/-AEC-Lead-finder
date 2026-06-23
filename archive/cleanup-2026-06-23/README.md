@@ -7,6 +7,7 @@ This branch preserves files selected for cleanup from `main`.
 These files remain present on this archive branch even if they are removed from `main`:
 
 - `guarded_push.py`
+- `skill/aether_daily_routine.md`
 - `skill/SKILLS_Scheduled.md`
 - `skill/fetch_feeds.py`
 - `skill/setup_sheets.py`
