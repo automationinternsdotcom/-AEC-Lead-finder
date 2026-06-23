@@ -47,7 +47,7 @@ def utc_now_iso() -> str:
 
 
 def build_google_news_url(query: str) -> str:
-    """Ported from legacy skill/fetch_feeds.py — do not alter params."""
+    """Ported from the archived legacy feed script — do not alter params."""
     return (
         "https://news.google.com/rss/search?"
         f"q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"

@@ -7,7 +7,7 @@
 #
 # All entries start disabled — flip enabled:true once verified by scripts/audit_sources.py.
 
-# ──── Google News search RSS (ported from legacy skill/fetch_feeds.py) ────
+# ──── Google News search RSS (ported from archived legacy feed script) ────
 
 - name: google_news_az_cre
   method: google_news
