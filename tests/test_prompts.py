@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from pipeline import prompts
 from pipeline.cli import render_prompt as render_prompt_cli
-from pipeline.spec import load_campaign_spec
+from pipeline.spec import load_campaign_spec, load_campaign_spec_v2
 
 
 class TestPromptRendering(unittest.TestCase):
@@ -64,6 +64,21 @@ class TestPromptRendering(unittest.TestCase):
                 ])
         self.assertEqual(rc, 0)
         self.assertIn('"entity_name": "Acme"', stdout.getvalue())
+
+    def test_gemini_discovery_prompt_is_source_only(self):
+        spec = load_campaign_spec_v2()
+        rendered = prompts.render_gemini_discovery_prompt(spec, max_sources=12)
+        self.assertIn("Find source URLs", rendered)
+        self.assertIn("Do not qualify leads, enrich contacts", rendered)
+        self.assertIn('"sources"', rendered)
+        self.assertIn(spec.lead_pattern.type, rendered)
+
+    def test_gemini_discovery_cli(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = render_prompt_cli.main(["gemini-discovery", "--max-sources", "3"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Find source URLs", stdout.getvalue())
+        self.assertIn("up to 3", stdout.getvalue())
 
 
 if __name__ == "__main__":

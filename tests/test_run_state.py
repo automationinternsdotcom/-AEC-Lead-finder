@@ -27,16 +27,29 @@ class TestRunState(unittest.TestCase):
 
         self.assertEqual(manifest.campaign_id, "aether-cleaning-az")
         self.assertEqual(manifest.run_id, "test-run")
+        self.assertEqual(manifest.stages["discover"].status, "pending")
+        self.assertEqual(manifest.stages["discover"].route, "browser_chat_skill")
         self.assertEqual(manifest.stages["fetch"].status, "pending")
         self.assertEqual(manifest.stages["pattern"].route, "deterministic_cli")
         self.assertEqual(manifest.stages["qualify"].route, "codex_in_session")
         self.assertTrue(manifest.preview_required)
         self.assertFalse(manifest.live_delivery_allowed)
 
-    def test_next_action_starts_at_fetch(self):
+    def test_next_action_starts_at_discover(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = init_run(run_id="test-run", runs_dir=Path(tmp))
             manifest = load_manifest(run_dir / "manifest.json")
+        action = next_action_for_manifest(manifest)
+        self.assertEqual(action.status, "ready")
+        self.assertEqual(action.stage, "discover")
+        self.assertEqual(action.route, "browser_chat_skill")
+
+    def test_next_action_resumes_after_discover_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = init_run(run_id="test-run", runs_dir=Path(tmp))
+            manifest = load_manifest(run_dir / "manifest.json")
+        manifest.stages["discover"].status = "complete"
+        manifest.stages["discover"].artifact_path = "artifacts/discover.json"
         action = next_action_for_manifest(manifest)
         self.assertEqual(action.status, "ready")
         self.assertEqual(action.stage, "fetch")
@@ -46,7 +59,7 @@ class TestRunState(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = init_run(run_id="test-run", runs_dir=Path(tmp))
             manifest = load_manifest(run_dir / "manifest.json")
-        for stage in ("fetch", "extract", "pattern", "qualify", "enrich", "preview"):
+        for stage in ("discover", "fetch", "extract", "pattern", "qualify", "enrich", "preview"):
             manifest.stages[stage].status = "complete"
         action = next_action_for_manifest(manifest)
         self.assertEqual(action.status, "blocked")

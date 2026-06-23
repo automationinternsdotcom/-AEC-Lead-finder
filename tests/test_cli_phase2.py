@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pipeline.cli import init_run as init_run_cli
+from pipeline.cli import fetch_discovered as fetch_discovered_cli
 from pipeline.cli import next_action as next_action_cli
+from pipeline.cli import parse_gemini_discovery as parse_gemini_discovery_cli
 from pipeline.cli import parse_transcript as parse_transcript_cli
 from pipeline.cli import preview_delivery as preview_delivery_cli
 from pipeline.cli import run_pattern as run_pattern_cli
@@ -36,14 +38,14 @@ class TestPhase2Cli(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("cli-run", stdout.getvalue())
 
-    def test_next_action_cli_outputs_fetch(self):
+    def test_next_action_cli_outputs_discover(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = init_run(run_id="cli-run", runs_dir=Path(tmp))
             with patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 rc = next_action_cli.main([str(run_dir)])
         self.assertEqual(rc, 0)
         data = json.loads(stdout.getvalue())
-        self.assertEqual(data["stage"], "fetch")
+        self.assertEqual(data["stage"], "discover")
 
     def test_validate_artifact_cli_outputs_summary(self):
         envelope = ArtifactEnvelope(
@@ -138,6 +140,59 @@ Direct Phone: 480-555-0100
         self.assertEqual(data["destination_type"], "excel")
         self.assertEqual(data["record_count"], 1)
         self.assertTrue(preview_exists)
+
+    def test_parse_gemini_discovery_cli_outputs_discover_artifact(self):
+        transcript = {
+            "sources": [
+                {
+                    "url": "https://example.com/article?utm_source=x",
+                    "source_name": "Example",
+                    "source_type": "article",
+                    "title": "Example article",
+                    "reason": "Matches the campaign signal.",
+                    "confidence": 0.9,
+                    "suggested_pattern_type": "event_signal",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gemini.txt"
+            path.write_text(json.dumps(transcript), encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = parse_gemini_discovery_cli.main([
+                    str(path),
+                    "--run-id",
+                    "cli-run",
+                ])
+        self.assertEqual(rc, 0)
+        data = json.loads(stdout.getvalue())
+        self.assertEqual(data["stage"], "discover")
+        self.assertEqual(data["records"][0]["canonical_url"], "https://example.com/article")
+
+    def test_fetch_discovered_cli_prints_fetch_rows_without_db(self):
+        artifact = ArtifactEnvelope(
+            campaign_id="aether-cleaning-az",
+            run_id="cli-run",
+            stage="discover",
+            records=[
+                {
+                    "url": "https://example.com/a",
+                    "canonical_url": "https://example.com/a",
+                    "url_hash": "hash-a",
+                    "source_name": "Example",
+                    "title": "A",
+                }
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "discover.json"
+            path.write_text(json.dumps(artifact.model_dump(mode="json")), encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = fetch_discovered_cli.main([str(path), "--no-db"])
+        self.assertEqual(rc, 0)
+        rows = json.loads(stdout.getvalue())
+        self.assertEqual(rows[0]["url_hash"], "hash-a")
+        self.assertEqual(rows[0]["source"], "Example")
 
 
 if __name__ == "__main__":

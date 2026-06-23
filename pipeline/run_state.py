@@ -26,6 +26,7 @@ from pipeline.spec import CampaignSpecV2, load_campaign_spec_v2, resolve_spec_pa
 
 RUNS_DIR = ROOT / "runs"
 STAGE_ORDER: tuple[StageName, ...] = (
+    "discover",
     "fetch",
     "extract",
     "pattern",
@@ -68,6 +69,7 @@ def init_run(
 
 def build_manifest(spec: CampaignSpecV2, run_id: str, spec_path: Path) -> RunManifest:
     routes = {
+        "discover": spec.routing.discover,
         "fetch": spec.routing.fetch,
         "extract": spec.routing.extract,
         "pattern": spec.routing.pattern,

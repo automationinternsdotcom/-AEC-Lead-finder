@@ -12,14 +12,20 @@ import sys
 from pathlib import Path
 
 from pipeline import prompts
-from pipeline.spec import load_campaign_spec
+from pipeline.spec import load_campaign_spec, load_campaign_spec_v2
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "kind",
-        choices=("assess", "grok-fast", "grok-expert", "entity-adjudication"),
+        choices=(
+            "assess",
+            "grok-fast",
+            "grok-expert",
+            "entity-adjudication",
+            "gemini-discovery",
+        ),
         help="Prompt to render.",
     )
     parser.add_argument(
@@ -42,12 +48,19 @@ def main(argv: list[str] | None = None) -> int:
         "--candidate-json",
         help="Path to an ambiguous pattern candidate JSON record for entity-adjudication.",
     )
+    parser.add_argument(
+        "--max-sources",
+        type=int,
+        default=25,
+        help="Maximum source URLs to ask Gemini for.",
+    )
     args = parser.parse_args([] if argv is None else argv)
 
-    spec = load_campaign_spec(args.campaign)
     if args.kind == "assess":
+        spec = load_campaign_spec(args.campaign)
         rendered = prompts.render_assess_prompt(spec)
     elif args.kind in {"grok-fast", "grok-expert"}:
+        spec = load_campaign_spec(args.campaign)
         if not args.company_name:
             parser.error(f"{args.kind} requires --company-name")
         common = {
@@ -66,11 +79,18 @@ def main(argv: list[str] | None = None) -> int:
                 fast_findings_block=args.fast_findings,
                 **common,
             )
-    else:
+    elif args.kind == "entity-adjudication":
+        spec = load_campaign_spec(args.campaign)
         if not args.candidate_json:
             parser.error("entity-adjudication requires --candidate-json")
         candidate = json.loads(Path(args.candidate_json).read_text(encoding="utf-8"))
         rendered = prompts.render_entity_adjudication_prompt(spec, candidate=candidate)
+    else:
+        spec_v2 = load_campaign_spec_v2(args.campaign)
+        rendered = prompts.render_gemini_discovery_prompt(
+            spec_v2,
+            max_sources=args.max_sources,
+        )
 
     sys.stdout.write(rendered)
     if not rendered.endswith("\n"):

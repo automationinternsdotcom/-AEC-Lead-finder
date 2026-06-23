@@ -24,6 +24,7 @@ class TestCampaignSpecV2Compatibility(unittest.TestCase):
         self.assertEqual(spec.schema_version, "campaign_spec.v2")
         self.assertEqual(spec.campaign_id, "aether-cleaning-az")
         self.assertEqual(spec.lead_pattern.type, "event_signal")
+        self.assertEqual(spec.routing.discover, "browser_chat_skill")
         self.assertEqual(spec.routing.fetch, "deterministic_cli")
         self.assertEqual(spec.routing.pattern, "deterministic_cli")
         self.assertEqual(spec.routing.enrich, "browser_chat_skill")

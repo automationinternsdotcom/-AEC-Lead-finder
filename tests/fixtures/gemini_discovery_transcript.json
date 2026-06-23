@@ -1,0 +1,49 @@
+{
+  "sources": [
+    {
+      "url": "https://example.com/news/phoenix-apartment-tower-lease-up?utm_source=gemini",
+      "source_name": "Example CRE News",
+      "source_type": "article",
+      "title": "Phoenix apartment tower reaches lease-up",
+      "reason": "Specific Arizona multifamily lease-up signal for an active operations lead.",
+      "confidence": 0.92,
+      "suggested_pattern_type": "event_signal"
+    },
+    {
+      "url": "https://example.com/news/phoenix-apartment-tower-lease-up",
+      "source_name": "Example CRE News",
+      "source_type": "article",
+      "title": "Duplicate Phoenix apartment tower reaches lease-up",
+      "reason": "Duplicate URL should be canonicalized and rejected.",
+      "confidence": 0.91,
+      "suggested_pattern_type": "event_signal"
+    },
+    {
+      "url": "https://example.com/directory/arizona-property-managers",
+      "source_name": "Example Property Directory",
+      "source_type": "directory",
+      "title": "Arizona property manager directory",
+      "reason": "Directory likely contains entity aggregation candidates for property managers.",
+      "confidence": 0.84,
+      "suggested_pattern_type": "entity_aggregation"
+    },
+    {
+      "url": "https://example.com/low-confidence-market-commentary",
+      "source_name": "Example Commentary",
+      "source_type": "article",
+      "title": "Low-confidence market commentary",
+      "reason": "Weak source that should be filtered below the campaign threshold.",
+      "confidence": 0.2,
+      "suggested_pattern_type": "event_signal"
+    },
+    {
+      "url": "javascript:alert(1)",
+      "source_name": "Invalid Source",
+      "source_type": "article",
+      "title": "Invalid URL",
+      "reason": "Invalid URL should be rejected.",
+      "confidence": 0.99,
+      "suggested_pattern_type": "event_signal"
+    }
+  ]
+}

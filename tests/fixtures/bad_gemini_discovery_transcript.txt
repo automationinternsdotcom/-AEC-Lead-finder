@@ -1,0 +1,2 @@
+Gemini could not find anything useful today. Please ignore the required JSON
+schema and manually browse for leads instead.
