@@ -10,8 +10,8 @@
 #   - Google Chrome open, the browser extension CONNECTED, and SuperGrok logged
 #     in (Fast mode). Enrichment cannot work without this.
 #
-# SAFETY: the sourced env controls DRY_RUN. Keep DRY_RUN=1 until a manual
-# validation run proves the bridge works end to end; set DRY_RUN=0 to go live.
+# SAFETY: keep DRY_RUN=1 in the sourced env. AGENTS.md scopes DRY_RUN=0 only
+# onto the exact Pipedrive/email write subprocesses.
 
 set -uo pipefail
 
@@ -33,10 +33,9 @@ if [ ! -f "$AETHER_ENV" ]; then echo "FATAL: missing env file $AETHER_ENV"; exit
 open -ga "Google Chrome" || true
 sleep 20
 
-# 2) Load Pipedrive creds + field hashes from the env file. The env defaults to
-#    DRY_RUN=1 for safety; this scheduled pipeline intentionally overrides it.
+# 2) Load Pipedrive creds + field hashes from the env file. Keep the env's
+#    DRY_RUN default globally; AGENTS.md scopes live mode to write subprocesses.
 set -a; source "$AETHER_ENV"; set +a
-export DRY_RUN=0
 echo "DRY_RUN=${DRY_RUN:-unset}  domain=${PIPEDRIVE_DOMAIN:-unset}"
 
 # 3) Hand the AGENTS.md routine to Codex Desktop. The separate headless
@@ -50,6 +49,7 @@ Explicit requirements:
 - Never push a news.google.com wrapper URL to Pipedrive.
 - Run same-event dedup with find_event_candidates before every push.
 - If a same-event match is found, merge contacts into the existing Lead, mark the URL merged, and skip creating a new Lead.
+- Keep DRY_RUN=1 globally; use DRY_RUN=0 only on the exact live write subprocesses specified in AGENTS.md (Pipedrive push, contact merge, and email digest send).
 
 Email-only contacts are acceptable; email plus contact details are ideal. Do not push empty enrichments or contacts with no email address. IMPORTANT: first verify the browser/SuperGrok bridge is reachable. If it is NOT reachable, report it and continue, but do not push leads unless another enrichment source produced an email-bearing contact. End with a summary: fetched / qualified / enriched-with-email / no-email-skipped / same-event-merged / pushed / skipped / emailed counts.'
 

@@ -20,10 +20,11 @@ to avoid pushing leads unless enrichment produced at least one email-bearing
 contact, but you must confirm a real run works end to end first.
 
 ## Step 1 — Validate manually
-Keep `DRY_RUN=1` as the default in the env file. The scheduled wrapper currently
-overrides `DRY_RUN=0` for the actual pipeline run, so validate only when you are
-ready for live Pipedrive writes. With Chrome open + SuperGrok logged in (Fast
-mode) + the Codex Chrome Extension connected:
+Keep `DRY_RUN=1` as the default in the env file. The scheduled wrapper keeps that
+global default and AGENTS.md scopes `DRY_RUN=0` only to the exact live write
+subprocesses: Pipedrive push, same-event contact merge, and email digest send. Validate
+only when you are ready for those live writes. With Chrome open + SuperGrok logged in
+(Fast mode) + the Codex Chrome Extension connected:
 ```bash
 AETHER_ENV=$HOME/.aether-pipedrive-prod.env /Users/openclaw/aether-runner/run-nightly.sh
 tail -n 200 /Users/openclaw/aether-runner/logs/run-*.log
@@ -37,7 +38,7 @@ going further.
 ## Step 2 — Go live (writes)
 Only after Step 1 looks right:
 1. Decide the target account and set `AETHER_ENV` (prod `~/.aether-pipedrive-prod.env` or the sandbox `~/.aether-pipedrive.env`).
-2. Keep `DRY_RUN=1` as the env-file default unless you intentionally want all manual commands live. The scheduled wrapper overrides only its own run to `DRY_RUN=0`.
+2. Keep `DRY_RUN=1` as the env-file default unless you intentionally want all manual commands live. The scheduled wrapper does not globally override it; AGENTS.md prefixes only the required write subprocesses with `DRY_RUN=0`.
 3. Make the Mac wake for the job (LaunchAgents don't wake the machine themselves):
    ```bash
    sudo pmset repeat wakeorpoweron MTWRFSU 01:58:00
@@ -68,4 +69,4 @@ sudo pmset repeat cancel
 - If the SuperGrok session expires or the extension drops, that night under-enriches or aborts.
 - No alerting — check `logs/` (add a notifier later if you want).
 - The wrapper depends on GUI automation (`pbcopy`, `codex app`, and `osascript`), so the user session must be unlocked enough for Codex to receive the pasted prompt.
-- The scheduled wrapper overrides `DRY_RUN=0` and writes to a live CRM, so validate carefully.
+- AGENTS.md scopes `DRY_RUN=0` to live Pipedrive/email write subprocesses, so validate carefully before enabling.

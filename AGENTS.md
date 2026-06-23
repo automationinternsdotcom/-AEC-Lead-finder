@@ -24,9 +24,10 @@ Grok enrichment step, which now drives the **Codex Chrome Extension** instead of
 Claude-in-Chrome. See `skill/grok_enricher.md` (Codex port) for the browser flow.
 
 When launched by `run-nightly.sh`, the wrapper sources `AETHER_ENV` (default:
-`~/.aether-pipedrive-prod.env`) and exports `DRY_RUN=0` for the Desktop handoff. That
-scheduled path is intentionally live: Pipedrive pushes, same-event contact merges,
-and the Step 5 email digest are expected to write/send when their gates pass.
+`~/.aether-pipedrive-prod.env`) and keeps the env's `DRY_RUN` value global. The
+production env should default to `DRY_RUN=1`; this file scopes `DRY_RUN=0` only onto
+the exact live write subprocesses that need it: Pipedrive push, same-event contact
+merge, and the Step 5 email digest send.
 
 ---
 
@@ -50,6 +51,20 @@ env | grep -E '^PIPEDRIVE_FIELD_(DATE_POSTED|LEAD_[123])=' | wc -l       # Expec
 If the required count is fewer than 3, stop and report the missing variables.
 If the optional count is 0, warn that Date Posted + Lead 1/2/3 fields won't be
 populated and the routine will create degraded leads.
+
+### Live-write policy
+
+Keep `DRY_RUN=1` globally for the Desktop handoff. Read-only and local-state steps run
+normally under the global environment. Only prefix the exact live write subprocesses
+with `DRY_RUN=0`:
+
+- `DRY_RUN=0 uv run python -m pipeline.cli.merge_contacts`
+- `DRY_RUN=0 uv run python -m pipeline.cli.push`
+- `DRY_RUN=0 uv run python -m pipeline.cli.email_digest --daily`
+
+Do not globally export `DRY_RUN=0`. Local SQLite status updates with
+`pipeline.cli.mark` are intentionally left unprefixed because that CLI does not honor
+`DRY_RUN` and is needed to keep pipeline state consistent.
 
 ### Browser pre-flight (Codex Chrome Extension)
 
@@ -361,7 +376,7 @@ same event.
 
   ```bash
   echo '{"keeper_lead_id":"<candidate lead_id>","contacts":[<contact strings>],"merged_url":"'"$URL"'"}' \
-    | uv run python -m pipeline.cli.merge_contacts
+    | DRY_RUN=0 uv run python -m pipeline.cli.merge_contacts
   uv run python -m pipeline.cli.mark "$URL_HASH" merged
   ```
 
@@ -402,7 +417,7 @@ jq -n --argjson article '<extracted_json>' \
       --argjson extras "$EXTRAS" \
       --arg url "$URL" \
   '{article: $article, lead: $lead, extra_contacts: $extras, url: $url}' \
-  | uv run python -m pipeline.cli.push > /tmp/push_result.json
+  | DRY_RUN=0 uv run python -m pipeline.cli.push > /tmp/push_result.json
 ```
 
 The push CLI populates:
@@ -470,7 +485,7 @@ Pipedrive Leads. This is part of the canonical nightly flow requested by
 complete.
 
 ```bash
-uv run python -m pipeline.cli.email_digest --daily
+DRY_RUN=0 uv run python -m pipeline.cli.email_digest --daily
 EMAIL_RC=$?
 ```
 
