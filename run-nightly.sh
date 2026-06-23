@@ -1,8 +1,9 @@
 #!/bin/bash
 # Aether nightly lead pipeline — PREPARED, NOT ENABLED.
-# Runs the AGENTS.md Grok/browser routine headless. No Apollo, no architecture
-# change. Designed to run on THIS machine (it has the working Chrome /
-# SuperGrok browser setup).
+# Runs the AGENTS.md Grok/browser routine through Codex Desktop so browser
+# enrichment uses the Desktop app's Chrome Extension context. No Apollo, no
+# architecture change. Designed to run on THIS machine (it has the working
+# Chrome / SuperGrok browser setup).
 #
 # RUN-TIME PREREQUISITES (must be true at 02:00):
 #   - Machine awake + the user logged in (GUI session) — see pmset note in README.
@@ -38,8 +39,8 @@ set -a; source "$AETHER_ENV"; set +a
 export DRY_RUN=0
 echo "DRY_RUN=${DRY_RUN:-unset}  domain=${PIPEDRIVE_DOMAIN:-unset}"
 
-# 3) Run the AGENTS.md routine headless. Unattended => permissions bypassed (the
-#    routine makes many shell + browser calls and writes to Pipedrive).
+# 3) Hand the AGENTS.md routine to Codex Desktop. The separate headless
+#    `codex exec` path cannot reliably attach to the Desktop Chrome Extension.
 cd "$RUNNER"
 PROMPT='Run the Aether daily lead pipeline now, end to end, by following AGENTS.md exactly: fetch new articles, extract, qualify per Jordan'"'"'s HIGH/MEDIUM/LOW protocol, enrich each qualifying lead via the browser enrichment flow described in AGENTS.md using the already-open, logged-in SuperGrok session in Chrome (Fast mode), push only qualified leads that have at least one enriched contact with an email address, then run the Step 5 email digest.
 
@@ -52,9 +53,26 @@ Explicit requirements:
 
 Email-only contacts are acceptable; email plus contact details are ideal. Do not push empty enrichments or contacts with no email address. IMPORTANT: first verify the browser/SuperGrok bridge is reachable. If it is NOT reachable, report it and continue, but do not push leads unless another enrichment source produced an email-bearing contact. End with a summary: fetched / qualified / enriched-with-email / no-email-skipped / same-event-merged / pushed / skipped / emailed counts.'
 
-codex exec \
-  --dangerously-bypass-approvals-and-sandbox \
-  "$PROMPT"
+PROMPT_FILE="$LOG_DIR/desktop-prompt-$TS.txt"
+printf '%s\n' "$PROMPT" > "$PROMPT_FILE"
+printf '%s' "$PROMPT" | pbcopy
+
+codex app "$RUNNER"
+sleep 8
+
+osascript <<'APPLESCRIPT'
+tell application "Codex" to activate
+delay 1
+tell application "System Events"
+  tell process "Codex"
+    set frontmost to true
+    keystroke "v" using command down
+    delay 0.2
+    key code 36
+  end tell
+end tell
+APPLESCRIPT
 RC=$?
-echo "===== codex exit=$RC  done: $(date) ====="
+echo "desktop_prompt=$PROMPT_FILE"
+echo "===== codex desktop handoff exit=$RC  done: $(date) ====="
 exit $RC
