@@ -1,8 +1,10 @@
 # Aether Daily Lead Pipeline (Codex)
 
 > Ported from the Claude Code skill `aether_daily_routine.md`.
-> Orchestrator: **Codex CLI**. Browser enrichment: **Codex Chrome Extension** driving SuperGrok.
-> Run interactively (`codex`) or headless from cron (`codex exec "run the aether daily routine"`).
+> Orchestrator: **Codex Desktop** when launched by `run-nightly.sh`. Browser enrichment:
+> **Codex Chrome Extension** driving SuperGrok.
+> Run interactively in Codex Desktop, or from automation via `run-nightly.sh`, which opens
+> Chrome, launches Codex Desktop with this repo, and pastes/submits the daily-run prompt.
 
 You are running the Aether daily lead pipeline. Your job: discover new commercial
 real-estate news in Arizona, decide which ones represent lead opportunities, enrich
@@ -20,6 +22,11 @@ The Python CLIs (`pipeline.cli.*`) are model-agnostic and unchanged from the Cla
 Code version. The only parts that differ are (a) this orchestration file and (b) the
 Grok enrichment step, which now drives the **Codex Chrome Extension** instead of
 Claude-in-Chrome. See `skill/grok_enricher.md` (Codex port) for the browser flow.
+
+When launched by `run-nightly.sh`, the wrapper sources `AETHER_ENV` (default:
+`~/.aether-pipedrive-prod.env`) and exports `DRY_RUN=0` for the Desktop handoff. That
+scheduled path is intentionally live: Pipedrive pushes, same-event contact merges,
+and the Step 5 email digest are expected to write/send when their gates pass.
 
 ---
 
@@ -445,7 +452,49 @@ tucson source") and update this file's Step 2b accordingly.
 
 ---
 
-## Step 4: Summary
+## Step 4: Pre-email accounting
+
+Before sending the digest, compute the run counts needed for the final report:
+fetched, qualified, enriched-with-email, no-email-skipped, same-event-merged, pushed,
+skipped, filtered, failed, and Jordan feedback count. Use the per-article loop results,
+`/tmp/push_result.json` values, merge outcomes, and `/tmp/feedback.json`; do not refetch
+or re-push anything in this step.
+
+---
+
+## Step 5: Email digest
+
+After all article processing and feedback collection, email Jordan a summary of the new
+Pipedrive Leads. This is part of the canonical nightly flow requested by
+`run-nightly.sh`; do not send it before the push/merge loop and feedback step are
+complete.
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily
+EMAIL_RC=$?
+```
+
+Expected recipient is `LEAD_DIGEST_TO` from the sourced env file (currently
+`Jw@aetherclean.com` in production). The digest CLI reads newly-created Leads back
+from Pipedrive since the last successful digest watermark, renders a one-row-per-Lead
+summary table, sends the email over SMTP, and records the watermark only after a
+successful send. A Lead is not emailed twice by the daily mode after a successful
+watermark. If there are no new Leads since the watermark, the CLI logs
+`digest_skipped`, exits 0, and sends nothing.
+
+Requires `SMTP_HOST`, `LEAD_DIGEST_TO`, and `LEAD_DIGEST_FROM`; for Google Workspace use
+`smtp.gmail.com:587` with an App Password as `SMTP_PASSWORD`. Exit codes: `0` ok (sent
+or nothing to send), `4` SMTP not configured, `2` usage error. If `EMAIL_RC != 0`,
+report the failure clearly in the final summary. Do not retry in a loop and do not
+manually compose a second email unless the operator explicitly asks.
+
+One-time backfill is not part of the daily run. Use
+`uv run python -m pipeline.cli.email_digest --since YYYY-MM-DD` only when the operator
+explicitly asks; `--since` does not touch the daily watermark. Preview with `--print`.
+
+---
+
+## Step 6: Summary
 
 After the loop, report:
 - Total URLs fetched
@@ -453,40 +502,8 @@ After the loop, report:
 - Skipped (already existed in Pipedrive)
 - Filtered (didn't pass qualification rules)
 - Failed (extract errors — usually paywalls or JS-rendered pages)
+- Same-event merged (contacts added to an existing Pipedrive Lead)
+- Emailed (digest sent / skipped / failed, with count when available)
 - **Jordan's feedback:** count of `NOT RELEVANT`-flagged Leads + the list from Step 3
 
 Log a final `run_finished` event with the counts.
-
----
-
-## Step 5: Email Jordan the day's new leads
-
-After the loop, email Jordan a summary of the Leads created during this run.
-This reads the Leads back out of Pipedrive and sends a one-row-per-Lead table
-(every contact listed) over SMTP.
-
-```bash
-uv run python -m pipeline.cli.email_digest --daily
-DIGEST_RC=$?
-```
-
-Behavior:
-- Sends to `LEAD_DIGEST_TO` (set in the env file). Requires `SMTP_HOST`,
-  `LEAD_DIGEST_TO` and `LEAD_DIGEST_FROM`; for Google Workspace use
-  `smtp.gmail.com:587` with an App Password as `SMTP_PASSWORD`.
-- `--daily` covers Leads created **since the last successful digest run** — a
-  watermark persisted in `db.sqlite` (`digest_runs` table). A successful send
-  advances the watermark, so a Lead is never emailed twice even if the routine
-  runs more than once a day; a failed send leaves it so the next run retries.
-  The very first run (no watermark yet) falls back to Leads created today (UTC).
-- If **no** new Leads since the watermark, it logs `digest_skipped` and sends
-  nothing (rc 0), but still advances the watermark.
-
-Exit codes: `0` ok (sent or nothing to send) · `4` SMTP not configured (set the
-`SMTP_*` / `LEAD_DIGEST_*` vars) · `2` usage error. If `DIGEST_RC == 4`, note in
-the report that the digest couldn't send because SMTP env vars are missing.
-
-**One-time backfill** (not part of the daily run): to email every Lead created
-since May 29, 2026, run `uv run python -m pipeline.cli.email_digest --since 2026-05-29`.
-`--since` does **not** touch the daily watermark. Preview without sending by
-appending `--print` (renders the HTML to stdout; also leaves the watermark alone).
