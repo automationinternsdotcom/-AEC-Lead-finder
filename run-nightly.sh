@@ -14,6 +14,7 @@
 # onto the exact Pipedrive/email write subprocesses.
 
 set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 RUNNER="/Users/openclaw/aether-runner"
 CODEX_BIN="${CODEX_BIN:-/opt/homebrew/bin/codex}"
