@@ -8,7 +8,7 @@ this module provides only the deterministic pieces:
   - estimate_deal_size(article, rates) — janitorial rate calc
 
 Reuses: httpx, trafilatura, ExtractedArticle (pydantic, still validates Claude's JSON).
-Extend: SYSTEM_PROMPT moved to skill/aether_daily_routine.md (the routine's prompt).
+Extend: extraction prompt/rules live in AGENTS.md (the routine's prompt).
 """
 from __future__ import annotations
 

@@ -25,7 +25,7 @@ class ExtractedArticle(BaseModel):
     unit_count: int | None
     az_relevant: bool
     confidence: float
-    # Jordan's protocol (see skill/aether_daily_routine.md Step 2b for the rules):
+    # Jordan's protocol (see AGENTS.md Step 2b for the rules):
     #  high   — active lease-up, new occupancy, openings, expansions, mgmt changes
     #  medium — land acquisitions, industrial deals, generic commercial transactions
     #  low    — macro commentary, mortgage news, residential, rankings/awards,

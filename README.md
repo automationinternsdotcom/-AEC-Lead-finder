@@ -1,6 +1,6 @@
 # Aether CRE Lead Pipeline
 
-A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies them, optionally enriches them with decision-maker contact info via Apollo, and pushes qualified items into **Pipedrive's Leads Inbox** for Jordan to triage. A Claude Code session reads `skill/aether_daily_routine.md` and drives the pipeline step by step.
+A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies them, enriches them with decision-maker contact info, and pushes qualified items into **Pipedrive's Leads Inbox** for Jordan to triage. Codex follows `AGENTS.md` to drive the pipeline step by step.
 
 **Client:** Jordan Whitehurst, Aether Facility Services
 
@@ -17,7 +17,7 @@ pipeline.cli.push     — create Pipedrive Org + Person + Lead; dedup on Article
 pipeline.cli.mark     — record URL state in seen_urls (pushed / filtered / failed)
 ```
 
-Claude orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
+Codex orchestrates the loop via `AGENTS.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
 
 **Why Leads, not Deals:** Pipedrive Leads are the right surface for machine-extracted, unvetted inputs. Jordan triages the Leads Inbox daily — promising ones convert to Deals (preserving all the data + carrying the Article URL field), the rest archive. Pushing straight to Deals would have polluted his active pipeline with ~50/day of noise and lost the conversion-as-qualification signal.
 
@@ -65,7 +65,7 @@ The pipeline enriches qualifying leads with decision-maker contact info. Two pat
 
 ### 2.6 Create the `NOT RELEVANT` Lead label
 
-Jordan flags article-sourced Leads that aren't relevant by applying a Pipedrive Lead label named **`NOT RELEVANT`** (Settings → Lead labels → + Add label). The daily routine polls these flags at the end of each run and surfaces them in the run report so the operator can spot patterns and manually tune the routine's filter protocol (`skill/aether_daily_routine.md` Step 2b).
+Jordan flags article-sourced Leads that aren't relevant by applying a Pipedrive Lead label named **`NOT RELEVANT`** (Settings → Lead labels → + Add label). The daily routine polls these flags at the end of each run and surfaces them in the run report so the operator can spot patterns and manually tune the routine's filter protocol (`AGENTS.md` Step 2b).
 
 **Important:** no automated suppression — flagging the same company multiple times doesn't change pipeline behavior. The signal is informational only. If `NOT RELEVANT` flags become high-volume, the operator updates the routine's HIGH/MEDIUM/LOW protocol or disables noisy source feeds.
 
@@ -90,27 +90,23 @@ env | grep -E '^PIPEDRIVE_' | wc -l   # should print 3
 
 ## How to Run
 
-The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Claude Code session in the repo root and trigger it one of two ways:
+`AGENTS.md` contains the full step-by-step instructions. Start Codex in the repo root and trigger it one of two ways:
 
-### Option A: Interactive via `/loop` in a Claude Code session
+### Option A: Interactive Codex run
 
-Open a Claude Code session in the repo directory and run:
-
-```
-/loop 24h follow skill/aether_daily_routine.md
-```
-
-Claude will re-execute the pipeline every 24 hours while the session stays open. This is the easiest option for development and testing.
-
-### Option B: Local cron via `claude code --headless`
-
-Add a crontab entry to run the pipeline autonomously:
+Open Codex in the repo directory and ask it to:
 
 ```
-0 7 * * * cd /path/to/repo && source ~/.aether-pipedrive.env && claude code --headless 'follow skill/aether_daily_routine.md'
+Run the Aether daily lead pipeline by following AGENTS.md.
 ```
 
-This runs at 7am daily. The machine must be on at that time. The exact `claude code --headless` invocation is approximate — verify against current Claude Code CLI docs.
+This is the easiest option for development and testing.
+
+### Option B: Local automation
+
+Use the Codex Desktop handoff in `run-nightly.sh` or create a native Codex automation that follows `AGENTS.md`.
+
+See `README-AUTOMATION.md` for the local automation setup notes.
 
 ## Testing
 

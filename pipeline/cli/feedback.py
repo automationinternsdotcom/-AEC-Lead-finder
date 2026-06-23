@@ -4,7 +4,7 @@ Output shape: [{"lead_id": "...", "title": "...", "article_url": "...",
                 "flagged_at": "..."}, ...]
 
 Called by the daily routine's run-report step. Operator scans output to
-manually tune skill/aether_daily_routine.md Step 2b when patterns emerge.
+manually tune AGENTS.md Step 2b when patterns emerge.
 
 Exit codes:
   0  ok (array may be empty)

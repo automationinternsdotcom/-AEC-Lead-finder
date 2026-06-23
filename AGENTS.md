@@ -1,6 +1,6 @@
 # Aether Daily Lead Pipeline (Codex)
 
-> Ported from the Claude Code skill `aether_daily_routine.md`.
+> Ported from the archived Claude Code daily routine.
 > Orchestrator: **Codex Desktop** when launched by `run-nightly.sh`. Browser enrichment:
 > **Codex Chrome Extension** driving SuperGrok.
 > Run interactively in Codex Desktop, or from automation via `run-nightly.sh`, which opens
