@@ -27,3 +27,12 @@ Notes:
 - Saved Gemini and Grok transcript fixtures cover the artifact-chain path.
 - No Pipedrive records were created or updated.
 - No destination delivery was performed; only preview export is implemented.
+
+Phase 3 closeout prep:
+- Added a human-operated live Gemini runbook at
+  `docs/phase3-closeout-runbook.md`.
+- Added `campaigns/_template.yaml` as a valid Phase 1-shaped CampaignSpec
+  template that upconverts to V2.
+- Hardened transcript JSON extraction for prose-wrapped Gemini JSON.
+- The actual live Gemini transcript is still a human browser step and should be
+  saved as a regression fixture after a successful parse.

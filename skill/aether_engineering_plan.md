@@ -3,7 +3,11 @@
 **Source of truth:** `skill/aether_week1_implementation.md` (the implementation plan, hereafter "the plan").
 **Document purpose:** A turn-key build spec. Another engineer should be able to start coding from this without further design work.
 **Scope:** Week 1 build (Wed 2026-05-20 → Mon 2026-05-25), single pipeline producing Pipedrive deals from AZ commercial-RE RSS feeds.
-**Status:** Draft v1 — 2026-05-20.
+**Status:** Archived historical Week 1 plan — superseded by
+`docs/phase3-closeout-runbook.md` for current execution. Do not use the future
+multi-state or multi-vertical notes below as active milestones during Phase 3;
+the current scope is one Aether cleaning campaign with live Gemini discovery
+validated through Excel preview only.
 
 ---
 

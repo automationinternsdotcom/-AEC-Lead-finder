@@ -21,6 +21,7 @@ from pipeline.spec import (
 )
 
 CLEANING_SPEC = CAMPAIGNS_DIR / "aether-cleaning-az.yaml"
+TEMPLATE_SPEC = CAMPAIGNS_DIR / "_template.yaml"
 
 
 def _minimal_spec_dict() -> dict:
@@ -62,6 +63,13 @@ class TestCleaningSpec(unittest.TestCase):
         spec = load_spec(CLEANING_SPEC)
         self.assertIsInstance(spec, CampaignSpec)
         self.assertEqual(spec.campaign_id, "aether-cleaning-az")
+
+    def test_template_spec_loads_and_validates(self):
+        spec = load_spec(TEMPLATE_SPEC)
+        self.assertIsInstance(spec, CampaignSpec)
+        self.assertEqual(spec.campaign_id, "example-campaign")
+        self.assertEqual(spec.destination.type, "excel")
+        self.assertEqual(spec.schedule.cadence, "manual")
 
     def test_cleaning_spec_captures_todays_hardcoded_values(self):
         """Guards against the spec drifting from what the code does today."""

@@ -89,4 +89,13 @@ def extract_first_json_value(text: str) -> Any:
             return json.loads(candidate)
         except json.JSONDecodeError:
             continue
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        return value
     raise ValueError("no JSON object or array found in transcript")

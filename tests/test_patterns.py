@@ -59,6 +59,16 @@ class TestEventSignalPattern(unittest.TestCase):
         self.assertFalse(result.records[1].qualified)
         self.assertEqual(result.records[1].filter_reason, "low_priority")
 
+    def test_preserves_source_url_metadata(self):
+        spec = load_campaign_spec_v2()
+        article = _article()
+        article["url"] = "https://example.com/source-article"
+        result = EventSignalPattern().run(
+            [article],
+            spec,
+        )
+        self.assertEqual(result.records[0].raw["url"], "https://example.com/source-article")
+
 
 class TestEntityAggregationPattern(unittest.TestCase):
     def test_fixture_backed_entity_aggregation(self):

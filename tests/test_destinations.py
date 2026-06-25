@@ -23,7 +23,11 @@ class TestDeliveryRecords(unittest.TestCase):
                 {
                     "entity_name": "Acme",
                     "score": 88,
-                    "raw": {"title": "Acme opens property", "priority": "high"},
+                    "raw": {
+                        "title": "Acme opens property",
+                        "priority": "high",
+                        "url": "https://example.com/acme",
+                    },
                 }
             ],
         )
@@ -31,6 +35,7 @@ class TestDeliveryRecords(unittest.TestCase):
         self.assertEqual(records[0].title, "Acme opens property")
         self.assertEqual(records[0].company_name, "Acme")
         self.assertEqual(records[0].score, 88)
+        self.assertEqual(records[0].url, "https://example.com/acme")
 
 
 class TestExcelDestination(unittest.TestCase):

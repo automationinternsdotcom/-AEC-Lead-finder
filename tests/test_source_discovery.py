@@ -82,6 +82,15 @@ class TestGeminiDiscoveryParsing(unittest.TestCase):
         self.assertEqual(reasons[:2], ["duplicate_url", "below_confidence_threshold"])
         self.assertTrue(reasons[2].startswith("invalid_source:"))
 
+    def test_parses_prose_wrapped_json_output(self):
+        spec = load_campaign_spec_v2()
+        transcript = "Here are the sources I found:\n" + json.dumps({
+            "sources": [_source("https://example.com/live")]
+        }) + "\nLet me know if you want more."
+        result = parse_gemini_discovery_transcript(transcript, spec)
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.candidates[0].canonical_url, "https://example.com/live")
+
     def test_artifact_and_fetch_rows(self):
         spec = load_campaign_spec_v2()
         result = parse_gemini_discovery_transcript(

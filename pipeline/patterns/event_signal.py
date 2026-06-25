@@ -20,6 +20,10 @@ class EventSignalPattern:
             article = ExtractedArticle.model_validate(record)
             qualified, reason = extract.is_qualifying(article)
             score = score_event_signal(article, spec)
+            raw = article.model_dump(mode="json")
+            source_url = _source_url(record)
+            if source_url:
+                raw["url"] = source_url
             candidates.append(
                 PatternCandidate(
                     candidate_id=_article_candidate_id(article),
@@ -35,10 +39,18 @@ class EventSignalPattern:
                         "confidence": article.confidence,
                         "city": article.city,
                     },
-                    raw=article.model_dump(mode="json"),
+                    raw=raw,
                 )
             )
         return PatternResult.from_records("event_signal", candidates)
+
+
+def _source_url(record: dict[str, Any]) -> str | None:
+    for key in ("url", "article_url", "source_url"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _article_candidate_id(article: ExtractedArticle) -> str:

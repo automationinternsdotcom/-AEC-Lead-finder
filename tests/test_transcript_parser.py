@@ -71,6 +71,13 @@ class TestTranscriptParser(unittest.TestCase):
             {"ok": True},
         )
 
+    def test_extract_first_json_value_from_prose_wrapped_json(self):
+        transcript = 'Here are the sources:\n{"sources": [{"url": "https://example.com"}]}\nDone.'
+        self.assertEqual(
+            extract_first_json_value(transcript),
+            {"sources": [{"url": "https://example.com"}]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

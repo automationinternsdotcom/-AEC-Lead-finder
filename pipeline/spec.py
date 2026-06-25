@@ -1,12 +1,12 @@
-"""Campaign spec — the single config object that defines a client's targeting.
+"""Campaign spec — the single config object that defines Aether targeting.
 
-This is Layer 2 of the product plan (the "vertical skin"). The engine reads a
-CampaignSpec and runs it; the spec is the only thing that changes per client.
-A new vertical is a new spec file (hours), not new code (weeks).
+The engine reads a CampaignSpec and runs it. The shipped campaign remains the
+single Aether cleaning vertical; company-specific values can be edited in YAML
+without branching pipeline code.
 
 Phase 1 wires the current cleaning pipeline to load this spec at runtime while
-preserving today's behavior. New verticals should add specs, not new bespoke
-pipeline branches.
+preserving today's behavior. Phase 3 keeps that scope narrow: one campaign,
+verified against live discovery output, with live CRM writes still guarded.
 
 Reuses: pydantic (matches schema.py's ExtractedArticle style), pyyaml + the
 ROOT path convention from config.py.
@@ -27,7 +27,7 @@ DEFAULT_CAMPAIGN_ID = "aether-cleaning-az"
 
 
 class Client(BaseModel):
-    """Who we're finding leads for. Feeds the planner and every enrich prompt."""
+    """Who we're finding leads for. Feeds discovery and enrichment prompts."""
     name: str
     company_description: str
     # Free-form regions ("Arizona", "Phoenix metro", "US"). The engine uses
@@ -51,8 +51,8 @@ class Targeting(BaseModel):
 class Discovery(BaseModel):
     """How the engine finds candidates: search queries + tagged feeds + geo."""
     search_queries: list[str]
-    # Tags into the (future) sources registry — the planner selects feeds by tag
-    # rather than hardcoding URLs. Today's sources.yaml is the seed for this.
+    # Tags into the sources registry rather than hardcoding URLs in stage code.
+    # Today's sources.yaml is the seed for this.
     source_tags: list[str] = Field(default_factory=list)
     # Machine-filterable region codes (e.g. ["AZ"]). Distinct from the free-form
     # client.service_area above.
@@ -150,7 +150,7 @@ class SpecIdentity(BaseModel):
 
 
 class TargetProfileV2(BaseModel):
-    """Normalized ICP block used by future non-CRE campaign specs."""
+    """Normalized ICP block used by resolved campaign specs."""
     industry: str
     geography: list[str] = Field(default_factory=list)
     service_area: list[str] = Field(default_factory=list)

@@ -2,7 +2,7 @@
 
 The LLM calls still happen in the orchestrating Codex session or Grok browser
 session. This module keeps the prompt text deterministic and makes the
-vertical-specific substance come from CampaignSpec instead of Markdown
+campaign-specific substance come from CampaignSpec instead of Markdown
 hardcodes.
 """
 from __future__ import annotations

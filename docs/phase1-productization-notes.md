@@ -2,15 +2,16 @@
 
 ## Ultimate Goal Fit
 
-The product direction is one general engine driven by `CampaignSpec`: fetch,
-qualify, enrich, and deliver should be repeatable for a new vertical without a
-rewrite. Phase 1 moves the current Aether cleaning pipeline in that direction by
-making the runtime load `campaigns/aether-cleaning-az.yaml` and by rendering the
+The current product direction is one Aether cleaning campaign driven by
+`CampaignSpec`: fetch, qualify, enrich, and preview should stay configurable
+without branching the pipeline. Phase 1 moved the current Aether cleaning
+pipeline in that direction by making the runtime load
+`campaigns/aether-cleaning-az.yaml` and by rendering the
 qualification/enrichment prompts from that spec.
 
-This is intentionally not a full platform abstraction yet. Extraction,
-deduplication, Pipedrive writing, and contact caching remain stable so Phase 1
-can prove parity before adding a second vertical.
+This is intentionally not a full platform abstraction. Extraction,
+deduplication, Pipedrive writing, and contact caching remain stable so the
+working Aether path can keep parity while Phase 3 validates live discovery.
 
 ## Current Fetch Baseline
 
@@ -42,8 +43,8 @@ the same SQLite database can cause:
   buyer persona appears plausible but is wrong for another persona.
 
 For now, run only the Aether cleaning campaign against the default state file.
-Use staggered/manual runs only as an operational workaround until Phase 7
-introduces per-campaign storage.
+If another campaign is ever introduced, add per-campaign storage before running
+it against the same SQLite database.
 
 ## Deferred Generalization
 

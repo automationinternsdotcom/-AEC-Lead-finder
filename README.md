@@ -98,6 +98,10 @@ env | grep -E '^PIPEDRIVE_' | wc -l   # should print 3
 
 The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Codex session in the repo root and run the daily routine.
 
+For the Phase 3 discovery-first closeout, use
+`docs/phase3-closeout-runbook.md`. It includes the manual Gemini browser
+handoff, parser artifact redirects, extract handoffs, and Excel preview steps.
+
 ### Interactive
 
 Open a Codex session in the repo directory and ask it to run the Aether daily routine.

@@ -1,0 +1,81 @@
+# CampaignSpec authoring template.
+#
+# This file uses the human-authored Phase 1 YAML shape. The loader upconverts it
+# to CampaignSpecV2 internally for run-state, discovery, pattern, and preview
+# tooling. Keep the values valid so this template always passes validate-spec.
+
+# Unique run/campaign identifier used in artifact folders and reports.
+campaign_id: example-campaign
+
+client:
+  # Client or company name shown in prompts and reports.
+  name: Example Client
+  # Plain-English business context for the campaign operator and LLM prompts.
+  company_description: >-
+    Example Client sells a specific B2B service to a clearly defined customer
+    profile. Replace this with the client's real positioning, geography, and
+    buyer context before running the campaign.
+  # Human-readable service areas; machine-filterable codes live under discovery.
+  service_area:
+    - Example metro area
+
+targeting:
+  # Industry or ICP label used in discovery and qualification prompts.
+  industry: example B2B service category
+  # Public signals that indicate a possible buying moment.
+  trigger_signals:
+    - example trigger signal
+  # Job titles or roles that can influence the buying decision.
+  buyer_personas:
+    - Owner
+    - Operations Manager
+  # Terms that should bias the campaign away from irrelevant records.
+  negative_keywords:
+    - irrelevant example
+
+discovery:
+  # Search queries Gemini/static discovery can use to find candidate sources.
+  search_queries:
+    - example industry trigger signal in target geography
+  # Optional source registry tags from sources.yaml; leave empty if none apply.
+  source_tags: []
+  # Machine-filterable geography codes or labels.
+  geography:
+    - EX
+
+qualification:
+  # The keep/drop rubric applied after article/entity extraction.
+  relevance_rubric: |-
+    HIGH: The record clearly matches the target signal and geography.
+    MEDIUM: The record may match but needs human review or has weaker timing.
+    LOW: The record is generic, out of geography, or lacks a buying signal.
+  # Minimum model confidence accepted by discovery and qualification gates.
+  min_confidence: 0.6
+
+enrichment:
+  # Persona guidance for contact enrichment.
+  buyer_persona: Owner or Operations Manager with buying authority.
+  # Outreach framing used in enrichment context and delivery notes.
+  outreach_angle: >-
+    Use a direct business-value angle tied to the trigger signal and the
+    client's service, without inventing unverified claims.
+  # Fields required before a lead is considered enriched.
+  required_fields:
+    - contact_name
+    - contact_title
+    - email_or_phone
+    - company
+
+destination:
+  # Use excel in templates to stay credential-free and validation-safe.
+  type: excel
+  # Always keep Excel as the fallback preview destination.
+  fallback: excel
+
+schedule:
+  # Use manual for templates; live campaigns may choose nightly or weekly.
+  cadence: manual
+  # Human preview remains required before any live destination write.
+  preview_before_push: true
+  # Safe first-batch cap for any future live delivery.
+  max_first_push: 2

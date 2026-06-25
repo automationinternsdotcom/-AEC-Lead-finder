@@ -9,6 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from pipeline.spec import (
+    CAMPAIGNS_DIR,
     CampaignSpecV2,
     DestinationV2,
     LeadPattern,
@@ -61,6 +62,13 @@ class TestCampaignSpecV2Compatibility(unittest.TestCase):
         self.assertEqual(spec.campaign_id, "test-v2")
         self.assertEqual(spec.lead_pattern.type, "entity_aggregation")
         self.assertEqual(spec.destinations[0].type, "excel")
+
+    def test_phase1_template_upconverts_to_v2(self):
+        spec = load_campaign_spec_v2(CAMPAIGNS_DIR / "_template.yaml")
+        self.assertEqual(spec.schema_version, "campaign_spec.v2")
+        self.assertEqual(spec.campaign_id, "example-campaign")
+        self.assertEqual(spec.destinations[0].type, "excel")
+        self.assertEqual(spec.run_policy.cadence, "manual")
 
 
 class TestCampaignSpecV2Validation(unittest.TestCase):

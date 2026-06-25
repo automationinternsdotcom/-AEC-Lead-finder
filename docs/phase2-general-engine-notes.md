@@ -2,7 +2,9 @@
 
 Phase 2 extends the Phase 1 CampaignSpec work into reusable engine contracts.
 The implementation keeps Aether's existing event-signal pipeline as the parity
-anchor while adding seams for non-article lead products.
+anchor while adding seams for future lead products. Phase 3 keeps the active
+scope to one Aether cleaning vertical; no second vertical or planner build is
+part of the closeout.
 
 ## Implemented
 
@@ -35,6 +37,8 @@ anchor while adding seams for non-article lead products.
   enrich or deliver.
 - Live Pipedrive delivery is not exposed through the Phase 2 destination adapter.
 - `runs/` artifacts stay local and gitignored.
+- The planner and multi-campaign hardening remain parked until there is a real
+  second campaign to operate.
 
 ## Verification
 
