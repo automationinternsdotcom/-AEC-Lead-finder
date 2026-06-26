@@ -63,6 +63,7 @@ discovery:
     - rss_feed
     - atom_feed
     - sitemap
+    - source_listing
     - permit_listing
     - market_report
   dedupe:
@@ -104,7 +105,10 @@ discovery:
     - Do not return paywalled content.
     - Do not return residential real estate URLs.
     - Do not return generic homepages.
-    - Return specific article URLs, RSS/Atom feed URLs, sitemap URLs, permit listing pages, market report pages, or development activity pages.
+    - Return specific article URLs, RSS/Atom feed URLs, sitemap URLs, reusable source listing pages, permit listing pages, market report pages, or development activity pages.
+    - Use source_type "article" only for one specific dated article, press release, announcement, or project page.
+    - Use source_type "source_listing" for category pages, newsroom pages, project listing pages, report indexes, search/results pages, and other reusable pages that contain links to many current or future items.
+    - Never label URLs ending in /news, /newsroom, /projects, /category/..., /commercial-real-estate, /construction, or /economic-development as "article".
     - Every URL must start with http or https.
     - Only include URLs with confidence above 0.7.
 

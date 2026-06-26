@@ -27,6 +27,7 @@ SourceType = Literal[
     "rss_feed",
     "atom_feed",
     "sitemap",
+    "source_listing",
     "homepage",
     "permit_listing",
     "market_report",

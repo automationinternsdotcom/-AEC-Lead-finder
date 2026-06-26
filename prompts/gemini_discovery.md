@@ -22,6 +22,21 @@ Good sources include articles, directories, company pages, public databases,
 RSS/Atom feeds, sitemaps, permit listings, market reports, and search result
 URLs that are likely to contain current target entities or buying signals.
 
+Classify source_type carefully:
+- article: one specific dated article, press release, announcement, or project page.
+- source_listing: reusable category, newsroom, project-listing, report-index,
+  search/results, or development-activity page that contains links to many
+  current/future items and should be revisited regularly.
+- rss_feed or atom_feed: feed URL that contains article links.
+- permit_listing: city permit/development portal or searchable permit page.
+- market_report: specific research/report page or market-report index.
+
+Never label category pages, newsroom pages, project listing pages, permit
+portals, report indexes, or URLs ending in paths like /news, /newsroom,
+/projects, /category/..., /commercial-real-estate, /construction, or
+/economic-development as article. Use source_listing or the more specific
+permit_listing/market_report type instead.
+
 Do not qualify leads, enrich contacts, or write outreach copy. Only discover
 source URLs.
 

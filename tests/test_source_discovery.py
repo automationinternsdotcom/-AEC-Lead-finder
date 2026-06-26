@@ -82,7 +82,7 @@ class TestSourceCandidate(unittest.TestCase):
         )
 
     def test_accepts_campaign_source_types_from_prompt(self):
-        for source_type in ("rss_feed", "atom_feed", "sitemap", "permit_listing", "market_report"):
+        for source_type in ("rss_feed", "atom_feed", "sitemap", "source_listing", "permit_listing", "market_report"):
             candidate = SourceCandidate.model_validate(_source(
                 "https://example.com/source",
                 source_type=source_type,

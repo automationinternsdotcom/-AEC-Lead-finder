@@ -18,6 +18,7 @@ DEFAULT_GEMINI_SOURCE_TYPES = (
     "rss_feed",
     "atom_feed",
     "sitemap",
+    "source_listing",
     "permit_listing",
     "market_report",
     "company_page",

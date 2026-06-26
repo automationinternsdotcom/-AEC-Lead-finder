@@ -9,6 +9,7 @@ UrlKind = Literal[
     "rss_feed",
     "atom_feed",
     "sitemap",
+    "source_listing",
     "permit_listing",
     "market_report",
     "homepage",
@@ -24,6 +25,7 @@ _KNOWN_TYPES = {
     "rss_feed",
     "atom_feed",
     "sitemap",
+    "source_listing",
     "permit_listing",
     "market_report",
     "homepage",
@@ -37,14 +39,17 @@ _KNOWN_TYPES = {
 
 def classify_url(url: str, hinted_type: str | None = None) -> UrlKind:
     """Classify a discovered URL without trusting the model blindly."""
-    if hinted_type in _KNOWN_TYPES and hinted_type != "other":
-        return hinted_type  # type: ignore[return-value]
-
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"}:
         return "unsupported"
     path = parsed.path.lower().rstrip("/")
     query = parsed.query.lower()
+
+    if _looks_like_source_listing(path, query):
+        return "source_listing"
+
+    if hinted_type in _KNOWN_TYPES and hinted_type != "other":
+        return hinted_type  # type: ignore[return-value]
 
     if path.endswith((".xml", "/sitemap")) or "sitemap" in path:
         return "sitemap"
@@ -59,3 +64,35 @@ def classify_url(url: str, hinted_type: str | None = None) -> UrlKind:
     if "search" in path or "q=" in query:
         return "search_result"
     return "article"
+
+
+def _looks_like_source_listing(path: str, query: str) -> bool:
+    """Reusable listing/category pages should be expanded, not fetched once."""
+    segments = [segment for segment in path.split("/") if segment]
+    if any(segment in {"category", "categories", "tag", "tags"} for segment in segments):
+        return True
+    if segments and segments[-1] in {
+        "news",
+        "newsroom",
+        "projects",
+        "project",
+        "press-releases",
+        "media",
+        "articles",
+        "insights",
+        "research",
+    }:
+        return True
+    listing_tokens = {
+        "commercial-real-estate",
+        "commercial-construction",
+        "construction",
+        "economic-development",
+        "development-projects",
+        "development-services",
+    }
+    if segments and segments[-1] in listing_tokens and len(segments) <= 4:
+        return True
+    if segments and segments[-1] == "projects" and query:
+        return True
+    return False

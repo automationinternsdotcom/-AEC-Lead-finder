@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import feedparser
 
@@ -114,6 +116,8 @@ def _expand_record(
 ) -> list[FetchRow]:
     if source_type in {"article", "permit_listing", "market_report", "company_page", "public_database", "directory"}:
         return [_row(url, source_name, source_title, url, source_type, dedupe_namespace)]
+    if source_type == "source_listing":
+        return _expand_source_listing(url, source_name, source_type, dedupe_namespace, max_entries)
     if source_type in {"rss_feed", "atom_feed"}:
         return _expand_feed(url, source_name, source_type, dedupe_namespace, max_entries)
     if source_type == "sitemap":
@@ -160,6 +164,36 @@ def _expand_sitemap(
     ]
 
 
+def _expand_source_listing(
+    url: str,
+    source_name: str,
+    source_type: str,
+    dedupe_namespace: str,
+    max_entries: int,
+) -> list[FetchRow]:
+    with util.make_http_client() as client:
+        response = client.get(url)
+        response.raise_for_status()
+        html = response.text
+
+    parser = _LinkParser()
+    parser.feed(html)
+    base_host = urlsplit(url).hostname or ""
+    rows: list[FetchRow] = []
+    seen: set[str] = set()
+    for href, text in parser.links:
+        absolute = util.canonicalize_url(urljoin(url, href))
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        if not _is_candidate_listing_link(absolute, base_host):
+            continue
+        rows.append(_row(absolute, source_name, text, url, source_type, dedupe_namespace))
+        if len(rows) >= max_entries:
+            break
+    return rows
+
+
 def _row(
     url: str,
     source_name: str,
@@ -183,3 +217,50 @@ def _skip_reason(source_type: UrlKind) -> str | None:
     if source_type in {"homepage", "search_result", "unsupported", "other"}:
         return f"unsupported_source_type:{source_type}"
     return None
+
+
+class _LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attrs_dict = {name.lower(): value for name, value in attrs if value is not None}
+        href = attrs_dict.get("href")
+        if href:
+            self._href = href
+            self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or self._href is None:
+            return
+        text = " ".join(" ".join(self._text_parts).split())
+        self.links.append((self._href, text))
+        self._href = None
+        self._text_parts = []
+
+
+def _is_candidate_listing_link(url: str, base_host: str) -> bool:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.hostname and base_host and parsed.hostname != base_host:
+        return False
+    path = parsed.path.lower()
+    if not path or path == "/":
+        return False
+    if path.endswith((".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".zip")):
+        return False
+    if any(skip in path for skip in ("/tag/", "/category/", "/author/", "/page/")):
+        return False
+    if classify_url(url) in {"homepage", "search_result", "rss_feed", "atom_feed", "sitemap", "source_listing", "unsupported", "other"}:
+        return False
+    return True

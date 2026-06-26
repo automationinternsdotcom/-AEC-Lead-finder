@@ -48,6 +48,7 @@ discovery:
     - rss_feed
     - atom_feed
     - sitemap
+    - source_listing
     - permit_listing
     - market_report
   # Campaign/vertical-scoped dedupe. Change namespace per vertical/client.
