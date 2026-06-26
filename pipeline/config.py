@@ -36,6 +36,14 @@ class Settings:
     pipedrive_field_lead_2: str | None = None
     pipedrive_field_lead_3: str | None = None
     apollo_api_key: str | None = None
+    # Email digest (pipeline.cli.email_digest). All optional; the digest CLI
+    # exits clearly when a send is attempted without host + to + from set.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    lead_digest_to: str | None = None
+    lead_digest_from: str | None = None
     dry_run: bool = False
     max_articles_per_run: int = 50
     log_level: str = "INFO"
@@ -62,6 +70,12 @@ def settings() -> Settings:
         pipedrive_field_lead_2=env.get("PIPEDRIVE_FIELD_LEAD_2") or None,
         pipedrive_field_lead_3=env.get("PIPEDRIVE_FIELD_LEAD_3") or None,
         apollo_api_key=env.get("APOLLO_API_KEY") or None,
+        smtp_host=env.get("SMTP_HOST") or None,
+        smtp_port=int(env.get("SMTP_PORT") or 587),
+        smtp_user=env.get("SMTP_USER") or None,
+        smtp_password=env.get("SMTP_PASSWORD") or None,
+        lead_digest_to=env.get("LEAD_DIGEST_TO") or None,
+        lead_digest_from=env.get("LEAD_DIGEST_FROM") or None,
         dry_run=env.get("DRY_RUN", "0") == "1",
         max_articles_per_run=int(env.get("MAX_ARTICLES_PER_RUN") or 50),
         log_level=env.get("LOG_LEVEL", "INFO"),

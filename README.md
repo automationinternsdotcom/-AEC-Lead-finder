@@ -5,8 +5,8 @@ CampaignSpec-driven lead discovery pipeline for Aether Facility Services.
 The current cleaning-company flow uses Gemini API discovery to find candidate
 source URLs, deterministic Python stages to normalize/classify/expand/dedupe and
 extract, Codex to qualify articles, Grok to enrich contacts, and Pipedrive as
-the CRM destination. The final required operating step is an end-of-day email
-report after all pushed leads are complete.
+the CRM destination. After all pushed leads are complete, the daily email
+digest reads the new Leads back out of Pipedrive and sends Jordan the summary.
 
 ## Current Flow
 
@@ -65,6 +65,17 @@ export GEMINI_API_KEY="..."
 
 For Pipedrive delivery, keep the existing Pipedrive variables in the same env
 file.
+
+For the daily email digest, set the SMTP variables in the same env file:
+
+```bash
+export SMTP_HOST="smtp.gmail.com"
+export SMTP_PORT="587"
+export SMTP_USER="..."
+export SMTP_PASSWORD="..."
+export LEAD_DIGEST_TO="..."
+export LEAD_DIGEST_FROM="..."
+```
 
 Load env before running:
 
@@ -243,13 +254,26 @@ pipeline.cli.extract               fetch and clean one article/page URL
 pipeline.cli.run_pattern           score extracted records with event_signal
 pipeline.cli.preview_delivery      write Excel preview
 pipeline.cli.validate_artifact     validate artifact envelopes
+pipeline.cli.email_digest          send or preview the daily Pipedrive Lead digest
 ```
 
 Older deterministic feed fetching, Grok enrichment, Apollo enrichment, and
 Pipedrive delivery code may still exist in the repo. For the cleaning-company
 flow, Grok enrichment and Pipedrive push are part of the operating path after
-qualification. The end-of-day email report is required by the operating design,
-but an email sender CLI has not been implemented yet.
+qualification. The end-of-day email report is implemented by
+`pipeline.cli.email_digest`.
+
+Preview the digest without SMTP send:
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily --print
+```
+
+Send the daily digest:
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily
+```
 
 ## Testing
 
@@ -276,5 +300,5 @@ uv run python -m unittest \
 
 Phase 3 is API-first discovery validation plus preservation of the full
 cleaning-company operating path. Gemini discovery, URL expansion, qualification,
-Grok enrichment, and Pipedrive push are the intended daily flow. The remaining
-known gap is the automated end-of-day email sender.
+Grok enrichment, Pipedrive push, and the SMTP daily digest are the intended
+daily flow.

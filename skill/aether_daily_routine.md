@@ -45,6 +45,12 @@ Expected optional Pipedrive contact fields:
 env | grep -E '^PIPEDRIVE_FIELD_(DATE_POSTED|LEAD_[123])=' | wc -l
 ```
 
+Required to send the daily email digest:
+
+```bash
+env | grep -E '^(SMTP_HOST|LEAD_DIGEST_TO|LEAD_DIGEST_FROM)=' | wc -l
+```
+
 If the required counts are missing, stop and fix the env file.
 
 ## Step 1. Create Run
@@ -192,21 +198,33 @@ Lead, and populates Lead 1 / Lead 2 / Lead 3 custom fields when configured.
 
 ## Step 7. Email Daily Report
 
-After all Pipedrive pushes complete, send an end-of-day report with:
+After all Pipedrive pushes complete, send the daily Lead digest:
 
-- total Gemini candidates
-- accepted/rejected discovery counts
-- extracted count
-- qualified count
-- enriched count
-- pushed count
-- skipped duplicate count
-- failed count
-- links to the run directory and Excel preview if generated
-- top pushed leads with article URL and contact summary
+```bash
+uv run python -m pipeline.cli.email_digest --daily
+```
 
-Implementation note: the repo does not yet contain an email sender CLI. Add one
-before treating this step as automated.
+The digest reads newly-created Leads back out of Pipedrive, renders an
+HTML/plaintext email with article links, Pipedrive links, priority, signal,
+city, estimated value, and Lead 1 / Lead 2 / Lead 3 contacts, then sends it via
+SMTP to `LEAD_DIGEST_TO`.
+
+The CLI stores a `digest_runs` watermark in SQLite. A successful `--daily` send
+advances the watermark so tomorrow's digest only includes newer Leads. A failed
+send does not advance the watermark, so the next run retries the same window.
+If no new Leads exist, the daily watermark still advances.
+
+Preview without sending:
+
+```bash
+uv run python -m pipeline.cli.email_digest --daily --print
+```
+
+One-time backfill:
+
+```bash
+uv run python -m pipeline.cli.email_digest --since 2026-05-29
+```
 
 ## Step 8. Final Report
 
