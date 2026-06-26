@@ -78,7 +78,8 @@ check from the original skill.
   selected (not Heavy/Expert/Auto).
 - If the session is not valid, report it and continue. Articles can still be
   fetched and qualified, but do **not** push any article unless enrichment,
-  cache, or Apollo returns at least one contact with an email address.
+  cache, or Apollo returns at least one contact with an email address. Manual
+  public-contact research is not an approved substitute for Grok.
 
 ---
 
@@ -227,8 +228,20 @@ Continue to next article.
 
 ### 2d. Enrich the lead
 
-The enrichment order: **cache → Apollo (if configured) OR Grok via Codex Chrome
-Extension with optional Assessor hint → cache the result.**
+The enrichment order is **strict**: **cache → Apollo (if configured) → Grok via Codex
+Chrome Extension with optional Assessor hint → cache the result.**
+
+Grok/browser enrichment is mandatory for every qualified article that does not already
+have an email-bearing cache or Apollo result. Do **not** substitute manual web search,
+browser search results, public-contact pages, guessed company email formats, or any
+other ad hoc research for the Grok path. If Grok is needed and the Chrome/Grok session
+cannot be used after the recovery step, save `{"leads": []}`, mark the article
+`filtered` at Step 2f's email gate, and continue. The article may be pushed only when
+the email-bearing contact came from one of these approved sources:
+
+- `cache`
+- `apollo`
+- `grok`
 
 #### Cache check (always first)
 
@@ -247,7 +260,8 @@ fi
 per-article loop: always `{"leads": [<Lead>, ...]}` (zero-or-more entries). Cache hit /
 Apollo / Grok all converge on this shape, and Steps 2e/2f read `.leads` from it.
 
-If `.leads | length` is > 0, skip external enrichment and continue at 2e.
+If `.leads | length` is > 0, set `ENRICH_VIA=cache`, increment the run's cache-hit
+count, skip external enrichment, and continue at 2e.
 
 #### Maricopa Assessor hint (when address is present)
 
@@ -280,6 +294,11 @@ if [ -n "$APOLLO_API_KEY" ] && [ -n "$DOMAIN" ]; then
 fi
 ```
 
+If Apollo returns an email-bearing contact, continue to 2e with `ENRICH_VIA=apollo`.
+If Apollo returns no contacts or contacts without an email address, continue to the
+Grok path. Apollo is not a reason to skip Grok unless it produced at least one
+email-bearing contact.
+
 #### Grok path (default — Codex Chrome Extension + SuperGrok)
 
 This is the path that changed most from the Claude Code version. There is **no
@@ -289,11 +308,11 @@ orchestrator) execute the browser flow inline, following the Codex port of
 Claude-in-Chrome's (`computer.*`, `find`, `javascript_tool`, `get_page_text`,
 `tabs_context_mcp`).
 
-Run this branch only when Apollo did not produce contacts (no `APOLLO_API_KEY` or no
-domain), and only when `/tmp/lead.json` is still empty:
+Run this branch whenever neither cache nor Apollo produced at least one email-bearing
+contact:
 
 ```bash
-if [ "$(jq '.leads | length' /tmp/lead.json)" -eq 0 ] && [ "${ENRICH_VIA:-}" != "apollo" ]; then
+if [ "$(jq '[.leads[]? | select((.email // "") != "")] | length' /tmp/lead.json)" -eq 0 ]; then
   GROK_NEEDED=1
 fi
 ```
@@ -315,13 +334,17 @@ typing — use the extension's JS/DOM insert path, the Codex equivalent of the o
 `execCommand('insertText', …)` trick), clicking submit, capturing the rendered response
 text, the Fast→Expert escalation, and parsing via `grok_parse`.
 
+Record one `grok_attempted` count for every article where `GROK_NEEDED=1`, even if the
+browser session fails or Grok returns no contacts. This is the audit trail that proves
+the required browser path actually ran.
+
 The flow returns one of (matches `skill/grok_enricher.md` Step 8):
 
 - `{"company_name": "...", "mode": "fast"|"expert", "leads": [<Lead>, <Lead>, <Lead>]}` — success (1–3 leads)
 - `{"company_name": "...", "mode": "fast", "leads": []}` — no decision-maker found → `lead_gap=True` downstream
 - `{"error": "session_invalid", ...}` — re-check the Chrome login once; if it still
-  fails, continue with `{"leads": []}` and do not push unless another enrichment
-  source produced an email-bearing contact
+  fails, continue with `{"leads": []}` and do not push unless cache or Apollo already
+  produced an email-bearing contact
 
 Save the full envelope as the enrichment file:
 
@@ -332,8 +355,8 @@ ENRICH_VIA=grok
 
 If the output is an `error` envelope (no `leads` key), Step 2f's email gate treats it
 as `[]`. For session errors, re-check the Chrome login once, then continue with
-`{"leads": []}` if recovery fails; the article should not push unless enrichment
-produced at least one contact with an email address.
+`{"leads": []}` if recovery fails; the article must not push unless an approved
+enrichment source produced at least one contact with an email address.
 
 #### Cache the successful enrichment
 
@@ -471,9 +494,15 @@ tucson source") and update this file's Step 2b accordingly.
 
 Before sending the digest, compute the run counts needed for the final report:
 fetched, qualified, enriched-with-email, no-email-skipped, same-event-merged, pushed,
-skipped, filtered, failed, and Jordan feedback count. Use the per-article loop results,
-`/tmp/push_result.json` values, merge outcomes, and `/tmp/feedback.json`; do not refetch
-or re-push anything in this step.
+skipped, filtered, failed, `grok_attempted`, `grok_enriched`, `cache_enriched`,
+`apollo_enriched`, and Jordan feedback count. Use the per-article loop results,
+`/tmp/push_result.json` values, merge outcomes, `/tmp/lead.json` envelopes, and
+`/tmp/feedback.json`; do not refetch or re-push anything in this step.
+
+The accounting must prove the enrichment source for every pushed or merged article. If
+any qualified article reached push/merge with `ENRICH_VIA` outside `cache`, `apollo`, or
+`grok`, treat the run as invalid: stop before the email digest, report the offending URL
+hashes, and leave those articles unpushed.
 
 ---
 
@@ -513,11 +542,18 @@ explicitly asks; `--since` does not touch the daily watermark. Preview with `--p
 
 After the loop, report:
 - Total URLs fetched
+- Qualified
+- Enriched with email
+- No-email skipped
 - Pushed (new Leads in Pipedrive's Leads Inbox, awaiting Jordan's triage)
 - Skipped (already existed in Pipedrive)
 - Filtered (didn't pass qualification rules)
 - Failed (extract errors — usually paywalls or JS-rendered pages)
 - Same-event merged (contacts added to an existing Pipedrive Lead)
+- Grok attempted
+- Grok enriched
+- Cache enriched
+- Apollo enriched
 - Emailed (digest sent / skipped / failed, with count when available)
 - **Jordan's feedback:** count of `NOT RELEVANT`-flagged Leads + the list from Step 3
 
