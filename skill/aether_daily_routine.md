@@ -176,6 +176,32 @@ The final envelope shape must be:
 }
 ```
 
+For today's test deliverables, also append each enriched article to:
+
+```text
+$RUN_DIR/artifacts/enriched_leads.json
+```
+
+Use an artifact envelope with `stage: "enrich"` and one record per qualified
+article. Each record should include the qualified article under `article`, the
+Grok mode under `mode`, and the final contacts under `leads`:
+
+```json
+{
+  "schema_version": "artifact_envelope.v1",
+  "campaign_id": "aether-cleaning-az",
+  "run_id": "RUN_ID",
+  "stage": "enrich",
+  "records": [
+    {
+      "article": {},
+      "mode": "fast",
+      "leads": []
+    }
+  ]
+}
+```
+
 ## Step 6. Push To Pipedrive
 
 For each qualified article and enrichment envelope:
@@ -242,3 +268,30 @@ Report:
 
 Keep raw Gemini and Grok transcripts under the run directory for audit and
 parser hardening.
+
+## Today's Test Deliverables
+
+For today's validation run, create the requested Excel files from the run
+artifacts:
+
+```bash
+uv run python -m pipeline.cli.export_test_deliverables \
+  --run-dir "$RUN_DIR"
+```
+
+After Codex qualification, this writes:
+
+```text
+$RUN_DIR/deliverables/codex-qualified-leads.xlsx
+```
+
+After Grok enrichment writes `$RUN_DIR/artifacts/enriched_leads.json`, run the
+same command again. It will refresh the qualified workbook and also write:
+
+```text
+$RUN_DIR/deliverables/grok-enriched-leads.xlsx
+```
+
+`codex-qualified-leads.xlsx` is built from
+`$RUN_DIR/artifacts/pattern.json`. `grok-enriched-leads.xlsx` is built from
+`$RUN_DIR/artifacts/enriched_leads.json`.

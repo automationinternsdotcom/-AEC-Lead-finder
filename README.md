@@ -255,6 +255,7 @@ pipeline.cli.run_pattern           score extracted records with event_signal
 pipeline.cli.preview_delivery      write Excel preview
 pipeline.cli.validate_artifact     validate artifact envelopes
 pipeline.cli.email_digest          send or preview the daily Pipedrive Lead digest
+pipeline.cli.export_test_deliverables write today's qualified/enriched Excel files
 ```
 
 Older deterministic feed fetching, Grok enrichment, Apollo enrichment, and
@@ -273,6 +274,20 @@ Send the daily digest:
 
 ```bash
 uv run python -m pipeline.cli.email_digest --daily
+```
+
+For today's validation run, produce the requested Excel deliverables:
+
+```bash
+uv run python -m pipeline.cli.export_test_deliverables --run-dir "$RUN_DIR"
+```
+
+After Codex qualification this writes the qualified workbook. After Grok writes
+`$RUN_DIR/artifacts/enriched_leads.json`, run it again to create/refresh both:
+
+```text
+$RUN_DIR/deliverables/codex-qualified-leads.xlsx
+$RUN_DIR/deliverables/grok-enriched-leads.xlsx
 ```
 
 ## Testing
