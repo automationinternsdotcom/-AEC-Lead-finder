@@ -34,6 +34,38 @@ targeting:
     - irrelevant example
 
 discovery:
+  # Discovery provider. Use gemini_api for automated Gemini source discovery,
+  # deterministic for static sources/search_queries, or manual for human runs.
+  provider: gemini_api
+  # Shared template under prompts/<name>.md. Campaign-specific substance belongs
+  # in client_prompt below.
+  prompt_template: gemini_discovery
+  # Daily candidate URL cap for this campaign.
+  max_sources: 100
+  # Source URL classes this campaign accepts from discovery.
+  allowed_url_types:
+    - article
+    - rss_feed
+    - atom_feed
+    - sitemap
+    - permit_listing
+    - market_report
+  # Campaign/vertical-scoped dedupe. Change namespace per vertical/client.
+  dedupe:
+    scope: campaign
+    namespace: example-campaign
+    final_article_url_unique: true
+  # Gemini API settings. Keep API keys in env/secrets, never in this file.
+  gemini:
+    model: gemini-3.1-pro-preview
+    use_google_search: true
+    temperature: 0.1
+  # Client/vertical-specific discovery instructions. This is where the unique
+  # prompt for each product vertical belongs.
+  client_prompt: |-
+    You are a B2B lead discovery assistant. Find source URLs that contain
+    campaign-relevant buying signals for Example Client in the target geography.
+    Replace this block with the tested vertical-specific discovery prompt.
   # Search queries Gemini/static discovery can use to find candidate sources.
   search_queries:
     - example industry trigger signal in target geography
@@ -44,8 +76,12 @@ discovery:
     - EX
 
 qualification:
+  # Start from prompts/generic_b2b_qualification_rubric.md, then add only the
+  # vertical-specific examples and constraints here.
   # The keep/drop rubric applied after article/entity extraction.
   relevance_rubric: |-
+    Use the generic B2B qualification rubric.
+
     HIGH: The record clearly matches the target signal and geography.
     MEDIUM: The record may match but needs human review or has weaker timing.
     LOW: The record is generic, out of geography, or lacks a buying signal.

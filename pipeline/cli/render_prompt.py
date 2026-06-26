@@ -51,8 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-sources",
         type=int,
-        default=25,
-        help="Maximum source URLs to ask Gemini for.",
+        default=None,
+        help="Maximum source URLs to ask Gemini for. Defaults to the campaign spec.",
     )
     args = parser.parse_args([] if argv is None else argv)
 
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         spec_v2 = load_campaign_spec_v2(args.campaign)
         rendered = prompts.render_gemini_discovery_prompt(
             spec_v2,
-            max_sources=args.max_sources,
+            max_sources=args.max_sources or spec_v2.sources.max_sources,
         )
 
     sys.stdout.write(rendered)

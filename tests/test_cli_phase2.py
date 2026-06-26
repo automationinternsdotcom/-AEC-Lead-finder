@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from pipeline.cli import init_run as init_run_cli
 from pipeline.cli import fetch_discovered as fetch_discovered_cli
+from pipeline.cli import expand_discovered as expand_discovered_cli
+from pipeline.cli import gemini_discover as gemini_discover_cli
 from pipeline.cli import next_action as next_action_cli
 from pipeline.cli import parse_gemini_discovery as parse_gemini_discovery_cli
 from pipeline.cli import parse_transcript as parse_transcript_cli
@@ -18,6 +20,7 @@ from pipeline.cli import run_pattern as run_pattern_cli
 from pipeline.cli import validate_artifact as validate_artifact_cli
 from pipeline.cli import validate_spec as validate_spec_cli
 from pipeline.contracts import ArtifactEnvelope
+from pipeline.gemini_client import GeminiResponse
 from pipeline.run_state import init_run
 
 
@@ -193,6 +196,86 @@ Direct Phone: 480-555-0100
         rows = json.loads(stdout.getvalue())
         self.assertEqual(rows[0]["url_hash"], "hash-a")
         self.assertEqual(rows[0]["source"], "Example")
+
+    def test_gemini_discover_cli_writes_prompt_raw_response_and_artifact(self):
+        raw = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": json.dumps({
+                                    "sources": [
+                                        {
+                                            "url": "https://example.com/article",
+                                            "source_name": "Example",
+                                            "source_type": "article",
+                                            "title": "Article",
+                                            "reason": "Relevant signal.",
+                                            "confidence": 0.9,
+                                            "suggested_pattern_type": "event_signal",
+                                        }
+                                    ]
+                                })
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch(
+                 "pipeline.cli.gemini_discover.GeminiClient.generate_json",
+                 return_value=GeminiResponse(raw=raw, text=raw["candidates"][0]["content"]["parts"][0]["text"]),
+             ), \
+             patch("pipeline.cli.gemini_discover.GeminiClient.__init__", return_value=None), \
+             patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            run_dir = Path(tmp) / "run"
+            rc = gemini_discover_cli.main([
+                "--run-dir",
+                str(run_dir),
+                "--api-key",
+                "test-key",
+            ])
+            data = json.loads(stdout.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["stage"], "discover")
+        self.assertTrue((run_dir / "prompts" / "gemini-discovery.txt").exists())
+        self.assertTrue((run_dir / "transcripts" / "gemini-discovery-api.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "discover.json").exists())
+
+    def test_expand_discovered_cli_writes_classified_sources_and_fetch_rows(self):
+        artifact = ArtifactEnvelope(
+            campaign_id="aether-cleaning-az",
+            run_id="cli-run",
+            stage="discover",
+            records=[
+                {
+                    "url": "https://example.com/article",
+                    "canonical_url": "https://example.com/article",
+                    "source_name": "Example",
+                    "source_type": "article",
+                    "title": "Article",
+                }
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            artifact_path = run_dir / "artifacts" / "discover.json"
+            artifact_path.parent.mkdir(parents=True)
+            artifact_path.write_text(json.dumps(artifact.model_dump(mode="json")), encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                rc = expand_discovered_cli.main([
+                    str(artifact_path),
+                    "--run-dir",
+                    str(run_dir),
+                    "--no-db",
+                ])
+            rows = json.loads(stdout.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(rows[0]["url"], "https://example.com/article")
+        self.assertTrue((run_dir / "artifacts" / "classified_sources.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "fetch_rows.json").exists())
 
 
 if __name__ == "__main__":

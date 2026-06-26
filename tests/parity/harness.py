@@ -33,7 +33,7 @@ GOLDEN_OLD = ROOT / "tests" / "fixtures" / "golden_old.json"
 GOLDEN_NEW = ROOT / "tests" / "fixtures" / "golden_new.json"
 GOLDEN_PACKETS = CORPUS_DIR / "golden_prompt_packets.jsonl"
 COMPARE_PACKETS = CORPUS_DIR / "compare_prompt_packets.jsonl"
-PARITY_RESULTS = ROOT / "PARITY-RESULTS.md"
+PARITY_RESULTS = ROOT / "runs" / "parity-results.md"
 
 
 @dataclass(frozen=True)
@@ -265,6 +265,7 @@ def _compare(args: argparse.Namespace, spec: CampaignSpec) -> int:
         lines.append("- None")
     lines.append("")
 
+    PARITY_RESULTS.parent.mkdir(parents=True, exist_ok=True)
     PARITY_RESULTS.write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {PARITY_RESULTS}")
     return 0 if status == "PASS" else 1

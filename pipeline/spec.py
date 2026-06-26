@@ -57,6 +57,13 @@ class Discovery(BaseModel):
     # Machine-filterable region codes (e.g. ["AZ"]). Distinct from the free-form
     # client.service_area above.
     geography: list[str] = Field(default_factory=list)
+    provider: Literal["deterministic", "gemini_api", "manual"] = "deterministic"
+    prompt_template: str = "gemini_discovery"
+    max_sources: int = Field(default=25, ge=1)
+    allowed_url_types: list[str] = Field(default_factory=list)
+    client_prompt: str | None = None
+    dedupe: "DiscoveryDedupConfig" = Field(default_factory=lambda: DiscoveryDedupConfig())
+    gemini: "GeminiDiscoveryConfig" = Field(default_factory=lambda: GeminiDiscoveryConfig())
 
 
 class Qualification(BaseModel):
@@ -176,6 +183,27 @@ class SourceConfig(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
     source_tags: list[str] = Field(default_factory=list)
     geography: list[str] = Field(default_factory=list)
+    provider: Literal["deterministic", "gemini_api", "manual"] = "deterministic"
+    prompt_template: str = "gemini_discovery"
+    max_sources: int = Field(default=25, ge=1)
+    allowed_url_types: list[str] = Field(default_factory=list)
+    client_prompt: str | None = None
+    dedupe: "DiscoveryDedupConfig" = Field(default_factory=lambda: DiscoveryDedupConfig())
+    gemini: "GeminiDiscoveryConfig" = Field(default_factory=lambda: GeminiDiscoveryConfig())
+
+
+class DiscoveryDedupConfig(BaseModel):
+    """How discovered/final URLs are deduped for a campaign."""
+    scope: Literal["campaign", "global"] = "campaign"
+    namespace: str | None = None
+    final_article_url_unique: bool = True
+
+
+class GeminiDiscoveryConfig(BaseModel):
+    """Gemini API discovery settings. API keys stay in env/secrets."""
+    model: str = "gemini-3.1-pro-preview"
+    use_google_search: bool = True
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
 
 
 class QualificationV2(BaseModel):
@@ -280,6 +308,12 @@ def campaign_spec_v1_to_v2(spec: CampaignSpec) -> CampaignSpecV2:
     if spec.destination.fallback == "excel" and not any(d.type == "excel" for d in destinations):
         destinations.append(DestinationV2(type="excel", enabled=True))
 
+    discover_route = (
+        "deterministic_cli"
+        if spec.discovery.provider == "gemini_api"
+        else "browser_chat_skill"
+    )
+
     return CampaignSpecV2(
         identity=SpecIdentity(
             campaign_id=spec.campaign_id,
@@ -306,6 +340,13 @@ def campaign_spec_v1_to_v2(spec: CampaignSpec) -> CampaignSpecV2:
             search_queries=spec.discovery.search_queries,
             source_tags=spec.discovery.source_tags,
             geography=spec.discovery.geography,
+            provider=spec.discovery.provider,
+            prompt_template=spec.discovery.prompt_template,
+            max_sources=spec.discovery.max_sources,
+            allowed_url_types=spec.discovery.allowed_url_types,
+            client_prompt=spec.discovery.client_prompt,
+            dedupe=spec.discovery.dedupe,
+            gemini=spec.discovery.gemini,
         ),
         qualification=QualificationV2(
             relevance_rubric=spec.qualification.relevance_rubric,
@@ -316,6 +357,7 @@ def campaign_spec_v1_to_v2(spec: CampaignSpec) -> CampaignSpecV2:
             outreach_angle=spec.enrichment.outreach_angle,
             required_fields=spec.enrichment.required_fields,
         ),
+        routing=StageRouting(discover=discover_route),
         destinations=destinations,
         run_policy=RunPolicy(
             cadence=spec.schedule.cadence,

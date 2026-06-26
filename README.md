@@ -1,138 +1,280 @@
-# Aether CRE Lead Pipeline
+# Aether Lead Engine
 
-A daily pipeline for Aether Facility Services (Phoenix, AZ) that discovers Arizona commercial real-estate news, qualifies them, optionally enriches them with decision-maker contact info via Apollo or Grok, and pushes qualified items into **Pipedrive's Leads Inbox** for Jordan to triage. A Codex session reads `skill/aether_daily_routine.md` and drives the pipeline step by step.
+CampaignSpec-driven lead discovery pipeline for Aether Facility Services.
 
-**Client:** Jordan Whitehurst, Aether Facility Services
+The current cleaning-company flow uses Gemini API discovery to find candidate
+source URLs, deterministic Python stages to normalize/classify/expand/dedupe and
+extract, Codex to qualify articles, Grok to enrich contacts, and Pipedrive as
+the CRM destination. The final required operating step is an end-of-day email
+report after all pushed leads are complete.
 
-## Architecture
+## Current Flow
 
-The default run loads `campaigns/aether-cleaning-az.yaml` as its `CampaignSpec`.
-The current engine is still Aether-specific in a few internals, but fetch source
-selection, qualification prompt substance, enrichment prompt substance, and
-destination selection now read from the campaign spec.
-
-CLI sub-tools read from stdin or arguments and write JSON/text to stdout:
-
+```text
+CampaignSpec
+-> render Gemini discovery prompt
+-> Gemini API discovery
+-> discover.json
+-> classify / expand URLs
+-> fetch_rows.json
+-> extract article/page text
+-> Codex creates ExtractedArticle JSON
+-> event_signal pattern
+-> Grok Fast enrichment
+-> Grok Expert fallback when needed
+-> Pipedrive Leads
+-> end-of-day email report
 ```
-pipeline.cli.fetch    — discover new article URLs via Google News + RSS; filters against seen_urls (SQLite)
-pipeline.cli.extract  — fetch + clean article text for a single URL
-pipeline.cli.qualify  — gate: pass only Arizona CRE signals above confidence threshold
-pipeline.cli.enrich   — Apollo people lookup by company domain (optional)
-pipeline.cli.push     — create Pipedrive Org + Person + Lead; dedup on Article URL custom field
-pipeline.cli.mark     — record URL state in seen_urls (pushed / filtered / failed)
-pipeline.cli.render_prompt — render CampaignSpec-driven assess/Grok prompts
-```
 
-Codex orchestrates the loop via `skill/aether_daily_routine.md`, running each tool with Bash and making all judgment calls (extraction, qualification confidence, prompt-injection defense). SQLite (`db.sqlite`) is the local dedup state store. The `Article URL` custom field on Pipedrive (shared between Lead and Deal entities) is the secondary dedup gate.
+Gemini only discovers source URLs. It does not qualify leads, enrich contacts,
+write outreach, or deliver records. Grok only enriches contacts after Codex has
+qualified the article.
 
-**Why Leads, not Deals:** Pipedrive Leads are the right surface for machine-extracted, unvetted inputs. Jordan triages the Leads Inbox daily — promising ones convert to Deals (preserving all the data + carrying the Article URL field), the rest archive. Pushing straight to Deals would have polluted his active pipeline with ~50/day of noise and lost the conversion-as-qualification signal.
+## Key Files
 
-No GHA workflow. No Anthropic SDK. No remote scheduled job — execution is local.
+- `campaigns/aether-cleaning-az.yaml` - current cleaning-company campaign spec.
+- `campaigns/_template.yaml` - template for future vertical/client campaigns.
+- `prompts/gemini_discovery.md` - shared Gemini discovery prompt template.
+- `prompts/generic_b2b_qualification_rubric.md` - reusable HIGH/MEDIUM/LOW qualification rubric for future campaigns.
+- `docs/phase3-closeout-runbook.md` - current end-to-end runbook.
+- `skill/aether_daily_routine.md` - full cleaning-company operating routine.
+- `skill/gemini_discovery_adapter.md` - short adapter notes for Gemini discovery.
+- `skill/grok_enricher.md` - Grok Fast/Expert enrichment prompts and browser workflow.
+- `skill/grok_enrichment_adapter.md` - Grok enrichment adapter notes.
 
 ## Setup
 
-### 1. Clone and install dependencies
+Install dependencies:
 
 ```bash
-git clone <repo-url>
-cd aether-cre-lead-pipeline
-uv sync   # installs Python 3.12 + all deps
+uv sync
 ```
 
-### 2. Configure Pipedrive
-
-In your Pipedrive account, add a custom field named **"Article URL"** of type Text. Pipedrive shares custom fields between Lead and Deal entities, so creating it once works for both — and means a Lead's URL is preserved when Jordan converts it to a Deal.
-
-Capture the field hash:
-
-```bash
-curl "https://<domain>.pipedrive.com/api/v1/dealFields?api_token=<token>" \
-  | jq -r '.data[] | select(.name=="Article URL") | .key'
-```
-
-(You can also use `/leadFields` — same hash either way.)
-
-### 2.5 Configure enrichment (choose one)
-
-The pipeline enriches qualifying leads with decision-maker contact info. Two paths:
-
-**Path A: SuperGrok via Chrome (default — no extra API costs)**
-
-- Open SuperGrok ([grok.com](https://grok.com)) in Chrome with the Codex Chrome Extension active.
-- Log in to your SuperGrok account.
-- Verify **Fast** mode is selected in the chat input (not Expert / Heavy / Auto). Expert mode takes 5+ minutes per query, so it's used only for the step-6b escalation, not as the starting mode.
-- The daily routine's Grok enrichment flow (`skill/grok_enricher.md`) drives the session per-article. ~6-10s per Fast query.
-
-**Path B: Apollo.io API (set `APOLLO_API_KEY` in `.env`)**
-
-- Requires an Apollo subscription (~$99/mo+).
-- When `APOLLO_API_KEY` is set in your env, the routine uses Apollo and skips Grok entirely.
-- Useful for headless CI or environments without an active Chrome session.
-
-### 2.6 Create the `NOT RELEVANT` Lead label
-
-Jordan flags article-sourced Leads that aren't relevant by applying a Pipedrive Lead label named **`NOT RELEVANT`** (Settings → Lead labels → + Add label). The daily routine polls these flags at the end of each run and surfaces them in the run report so the operator can spot patterns and manually tune the routine's filter protocol (`skill/aether_daily_routine.md` Step 2b).
-
-**Important:** no automated suppression — flagging the same company multiple times doesn't change pipeline behavior. The signal is informational only. If `NOT RELEVANT` flags become high-volume, the operator updates the routine's HIGH/MEDIUM/LOW protocol or disables noisy source feeds.
-
-### 3. Recommend: set up a saved Leads view for Jordan
-
-In the Pipedrive UI, open **Leads Inbox**, click **+ Add filter**, and save a filter like `Article URL is not empty` named **"Aether Article Leads"**. Configure the visible columns: Title, Organization, Value, Article URL, Labels, Created, Owner. This gives Jordan a single-click daily review surface — and avoids the "902 unreviewed leads" graveyard scenario.
-
-### 4. Create your env file
+Create and load the local env file:
 
 ```bash
 cp .env.example ~/.aether-pipedrive.env
 chmod 600 ~/.aether-pipedrive.env
-# Edit and fill in real values
 ```
 
-### 5. Verify setup
+Add your Gemini key to `~/.aether-pipedrive.env`:
+
+```bash
+export GEMINI_API_KEY="..."
+```
+
+For Pipedrive delivery, keep the existing Pipedrive variables in the same env
+file.
+
+Load env before running:
 
 ```bash
 source ~/.aether-pipedrive.env
-env | grep -E '^PIPEDRIVE_' | wc -l   # should print 3
 ```
 
-## How to Run
+## Campaign Config
 
-The skill file `skill/aether_daily_routine.md` contains the full step-by-step instructions. Start a Codex session in the repo root and run the daily routine.
+The cleaning campaign is configured in `campaigns/aether-cleaning-az.yaml`.
+Important discovery fields:
 
-For the Phase 3 discovery-first closeout, use
-`docs/phase3-closeout-runbook.md`. It includes the manual Gemini browser
-handoff, parser artifact redirects, extract handoffs, and Excel preview steps.
-
-### Interactive
-
-Open a Codex session in the repo directory and ask it to run the Aether daily routine.
-
-### Local cron via `codex exec`
-
-Add a crontab entry to run the pipeline autonomously:
-
+```yaml
+discovery:
+  provider: gemini_api
+  prompt_template: gemini_discovery
+  max_sources: 100
+  allowed_url_types:
+    - article
+    - rss_feed
+    - atom_feed
+    - sitemap
+    - permit_listing
+    - market_report
+  dedupe:
+    scope: campaign
+    namespace: aether-cleaning-az
+  gemini:
+    model: gemini-3.1-pro-preview
+    use_google_search: true
+    temperature: 0.1
+  client_prompt: |-
+    ...
 ```
-0 7 * * * cd /path/to/repo && source ~/.aether-pipedrive.env && codex exec "run the aether daily routine"
+
+For a new vertical, copy `campaigns/_template.yaml`, set a new `campaign_id`,
+replace `client_prompt`, use a new `dedupe.namespace`, and adapt the campaign
+qualification examples using `prompts/generic_b2b_qualification_rubric.md`.
+
+## Run The Current Pipeline
+
+For the full cleaning-company routine, follow `skill/aether_daily_routine.md`.
+The commands below show the discovery through preview spine; the routine doc
+carries the Grok enrichment and Pipedrive push loop.
+
+Create a run:
+
+```bash
+RUN_DIR="$(uv run python -m pipeline.cli.init_run --campaign aether-cleaning-az)"
+RUN_ID="$(basename "$RUN_DIR")"
+printf 'Run directory: %s\nRun id: %s\n' "$RUN_DIR" "$RUN_ID"
 ```
 
-This runs at 7am daily. The machine must be on at that time.
+Run Gemini API discovery:
+
+```bash
+uv run python -m pipeline.cli.gemini_discover \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/discover.stdout.json"
+```
+
+Validate discovery:
+
+```bash
+uv run python -m pipeline.cli.validate_artifact "$RUN_DIR/artifacts/discover.json"
+```
+
+Classify and expand discovered URLs into fetch rows.
+
+Safe preview mode, no SQLite dedupe write:
+
+```bash
+uv run python -m pipeline.cli.expand_discovered \
+  "$RUN_DIR/artifacts/discover.json" \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  --no-db \
+  > "$RUN_DIR/artifacts/fetch_rows.stdout.json"
+```
+
+Intentional local run mode, records final URLs in `db.sqlite`:
+
+```bash
+uv run python -m pipeline.cli.expand_discovered \
+  "$RUN_DIR/artifacts/discover.json" \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/fetch_rows.stdout.json"
+```
+
+Extract the first fetch row:
+
+```bash
+FIRST_URL="$(uv run python -c 'import json, sys; print(json.load(open(sys.argv[1]))[0]["url"])' "$RUN_DIR/artifacts/fetch_rows.json")"
+uv run python -m pipeline.cli.extract "$FIRST_URL" \
+  > "$RUN_DIR/artifacts/article-001.txt"
+```
+
+Render the article-assessment prompt:
+
+```bash
+uv run python -m pipeline.cli.render_prompt assess \
+  --campaign aether-cleaning-az \
+  > "$RUN_DIR/prompts/assess.txt"
+```
+
+Use Codex/in-session reasoning to read `assess.txt` plus
+`article-001.txt`, then write `ExtractedArticle` JSON as a list:
+
+```text
+$RUN_DIR/artifacts/extracted_articles.json
+```
+
+Run the pattern stage:
+
+```bash
+uv run python -m pipeline.cli.run_pattern \
+  "$RUN_DIR/artifacts/extracted_articles.json" \
+  --campaign aether-cleaning-az \
+  --pattern event_signal \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/pattern.json"
+```
+
+Validate and preview:
+
+```bash
+uv run python -m pipeline.cli.validate_artifact "$RUN_DIR/artifacts/pattern.json"
+
+uv run python -m pipeline.cli.preview_delivery \
+  "$RUN_DIR/artifacts/pattern.json" \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/preview.json"
+```
+
+The Excel preview path is printed in `preview.json` and written under:
+
+```text
+$RUN_DIR/previews/
+```
+
+## Run Artifacts
+
+Each run writes:
+
+```text
+runs/<campaign>/<run_id>/
+  prompts/gemini-discovery.txt
+  prompts/assess.txt
+  transcripts/gemini-discovery-api.json
+  transcripts/gemini-discovery.txt
+  artifacts/discover.json
+  artifacts/classified_sources.json
+  artifacts/fetch_rows.json
+  artifacts/article-001.txt
+  artifacts/extracted_articles.json
+  artifacts/pattern.json
+  artifacts/preview.json
+  previews/*.xlsx
+```
+
+`gemini-discovery-api.json` is the raw Gemini API response. Keep it for audit
+and parser hardening.
+
+## CLI Reference
+
+```text
+pipeline.cli.init_run              create run folder and manifest
+pipeline.cli.render_prompt         render Gemini or assessment prompts
+pipeline.cli.gemini_discover       call Gemini API and write discover.json
+pipeline.cli.parse_gemini_discovery fallback parser for manual Gemini transcripts
+pipeline.cli.expand_discovered     classify/expand URLs and write fetch_rows.json
+pipeline.cli.extract               fetch and clean one article/page URL
+pipeline.cli.run_pattern           score extracted records with event_signal
+pipeline.cli.preview_delivery      write Excel preview
+pipeline.cli.validate_artifact     validate artifact envelopes
+```
+
+Older deterministic feed fetching, Grok enrichment, Apollo enrichment, and
+Pipedrive delivery code may still exist in the repo. For the cleaning-company
+flow, Grok enrichment and Pipedrive push are part of the operating path after
+qualification. The end-of-day email report is required by the operating design,
+but an email sender CLI has not been implemented yet.
 
 ## Testing
+
+Run tests with the project environment:
 
 ```bash
 uv run python -m unittest discover tests -v
 ```
 
-The Phase 1 parity harness is available at:
+Useful focused tests:
 
 ```bash
-uv run python -m tests.parity.harness capture --limit 30
-uv run python -m tests.parity.harness golden
-uv run python -m tests.parity.harness compare
+uv run python -m unittest \
+  tests.test_source_discovery \
+  tests.test_source_expansion \
+  tests.test_gemini_client \
+  tests.test_prompts \
+  tests.test_spec_v2 \
+  tests.test_cli_phase2 \
+  -v
 ```
 
-The harness never calls a model; it captures deterministic article text, emits
-prompt packets for an in-session judgment pass, and compares recorded judgments.
+## Current Status
 
-## Status
-
-POC, not production. See [docs/superpowers/plans/2026-05-21-claude-routine-refactor.md](docs/superpowers/plans/2026-05-21-claude-routine-refactor.md) for the refactor that produced this architecture.
+Phase 3 is API-first discovery validation plus preservation of the full
+cleaning-company operating path. Gemini discovery, URL expansion, qualification,
+Grok enrichment, and Pipedrive push are the intended daily flow. The remaining
+known gap is the automated end-of-day email sender.

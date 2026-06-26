@@ -1,17 +1,17 @@
 # Phase 3 Closeout Runbook
 
-Status: ready for the human-operated live Gemini probe.
+Status: ready for Gemini API discovery probe.
 
 This phase verifies the new discovery-first engine against live Gemini output
-without enabling live Pipedrive delivery. The required path ends at Excel
+without enabling live Pipedrive delivery. The API-first path ends at Excel
 preview:
 
 ```text
-Gemini discovery -> parse -> fetch_discovered -> extract -> ExtractedArticle -> pattern -> Excel preview
+Gemini API discovery -> classify/expand -> extract -> ExtractedArticle -> pattern -> Excel preview
 ```
 
-The repo does not call Gemini directly. A human must run the prompt in the
-logged-in Gemini browser UI and save the raw response verbatim.
+The repo calls Gemini directly through `GEMINI_API_KEY` for discovery. The
+manual browser copy/paste flow is now fallback only.
 
 ## 1. Create A Run
 
@@ -35,12 +35,86 @@ runs/aether-cleaning-az/<run_id>/
   transcripts/
 ```
 
-## 2. Render The Gemini Discovery Prompt
+## 2. Run Gemini API Discovery
+
+Load local secrets first:
+
+```bash
+source ~/.aether-pipedrive.env
+```
+
+Then run discovery:
+
+```bash
+uv run python -m pipeline.cli.gemini_discover \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/discover.stdout.json"
+```
+
+This writes:
+
+```text
+$RUN_DIR/prompts/gemini-discovery.txt
+$RUN_DIR/transcripts/gemini-discovery-api.json
+$RUN_DIR/transcripts/gemini-discovery.txt
+$RUN_DIR/artifacts/discover.json
+```
+
+Validate the artifact:
+
+```bash
+uv run python -m pipeline.cli.validate_artifact "$RUN_DIR/artifacts/discover.json"
+```
+
+Review `metadata.rejected` in `discover.json`. Expected rejection reasons
+include invalid source shape, invalid URL scheme, duplicate URL, and confidence
+below threshold.
+
+## 3. Classify And Expand URLs
+
+Safe probe mode, with no SQLite dedup write:
+
+```bash
+uv run python -m pipeline.cli.expand_discovered \
+  "$RUN_DIR/artifacts/discover.json" \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  --no-db \
+  > "$RUN_DIR/artifacts/fetch_rows.stdout.json"
+```
+
+Intentional local run mode, with final article/page URLs recorded in
+`db.sqlite`:
+
+```bash
+uv run python -m pipeline.cli.expand_discovered \
+  "$RUN_DIR/artifacts/discover.json" \
+  --campaign aether-cleaning-az \
+  --run-id "$RUN_ID" \
+  > "$RUN_DIR/artifacts/fetch_rows.stdout.json"
+```
+
+This writes:
+
+```text
+$RUN_DIR/artifacts/classified_sources.json
+$RUN_DIR/artifacts/fetch_rows.json
+```
+
+Use the safe probe mode unless you explicitly want this run to affect local
+dedup state.
+
+## 4. Manual Gemini Browser Fallback
+
+Use this only if the API path fails or you intentionally want to compare web UI
+output to API output.
+
+### Render The Gemini Discovery Prompt
 
 ```bash
 uv run python -m pipeline.cli.render_prompt gemini-discovery \
   --campaign aether-cleaning-az \
-  --max-sources 25 \
   > "$RUN_DIR/prompts/gemini-discovery.txt"
 ```
 
@@ -53,7 +127,7 @@ open "$RUN_DIR/prompts/gemini-discovery.txt"
 Confirm the prompt asks Gemini only for source URLs and JSON. Do not ask Gemini
 to qualify leads, enrich contacts, or write outreach copy.
 
-## 3. Human Gemini Browser Step
+### Human Gemini Browser Step
 
 1. Open Gemini in the browser account that is already logged in.
 2. Start a new chat so no previous context leaks into the run.
@@ -71,7 +145,7 @@ pbpaste > "$RUN_DIR/transcripts/gemini-discovery.txt"
 If you use a text editor instead, save to the same path. Do not repair the JSON
 manually; the goal is to test the parser against real output.
 
-## 4. Parse And Validate Discovery
+### Parse And Validate Discovery
 
 ```bash
 uv run python -m pipeline.cli.parse_gemini_discovery \
@@ -99,29 +173,9 @@ cp "$RUN_DIR/transcripts/gemini-discovery.txt" \
 Stop there. Harden the parser against the observed output, add a regression
 test, rerun tests, and then retry parsing the same transcript.
 
-## 5. Convert Discovery To Fetch Rows
+After this fallback parse succeeds, continue at **3. Classify And Expand URLs**.
 
-Safe probe mode, with no SQLite dedup write:
-
-```bash
-uv run python -m pipeline.cli.fetch_discovered \
-  "$RUN_DIR/artifacts/discover.json" \
-  --no-db \
-  > "$RUN_DIR/artifacts/fetch_rows.json"
-```
-
-Intentional local run mode, with discovered URLs recorded in `db.sqlite`:
-
-```bash
-uv run python -m pipeline.cli.fetch_discovered \
-  "$RUN_DIR/artifacts/discover.json" \
-  > "$RUN_DIR/artifacts/fetch_rows.json"
-```
-
-Use the safe probe mode unless you explicitly want this run to affect local
-dedup state.
-
-## 6. Extract Article Text
+## 5. Extract Article Text
 
 The current extract CLI handles one URL at a time. Pick one or more article URLs
 from `fetch_rows.json`.
@@ -138,7 +192,7 @@ If extraction fails for the first URL, choose the next article-like URL from
 `fetch_rows.json` and repeat. URL liveness and 404 handling belong to this
 fetch/extract boundary, not to the Gemini parser.
 
-## 7. Build ExtractedArticle JSON
+## 6. Build ExtractedArticle JSON
 
 Render the assessment prompt:
 
@@ -191,7 +245,7 @@ The file must look like:
 ]
 ```
 
-## 8. Run Pattern And Preview
+## 7. Run Pattern And Preview
 
 ```bash
 uv run python -m pipeline.cli.run_pattern \
@@ -217,7 +271,7 @@ uv run python -m pipeline.cli.preview_delivery \
 The Excel file path is printed in `preview.json` and written under
 `$RUN_DIR/previews/`.
 
-## 9. Save Regression Evidence
+## 8. Save Regression Evidence
 
 After the live Gemini transcript parses successfully and contains no secrets:
 
@@ -230,10 +284,11 @@ If parser hardening was required, add a test that reads this fixture and proves
 the live shape stays supported. Keep the existing synthetic bad-output fixtures;
 the live run complements them, it does not replace them.
 
-## 10. Completion Checklist
+## 9. Completion Checklist
 
-- Live Gemini transcript saved verbatim.
+- Live Gemini API response saved verbatim.
 - `discover.json` validates and contains expected accepted/rejected records.
+- `classified_sources.json` exists.
 - `fetch_rows.json` exists.
 - At least one live source URL was extracted into article text.
 - `extracted_articles.json` validates indirectly through `run_pattern`.

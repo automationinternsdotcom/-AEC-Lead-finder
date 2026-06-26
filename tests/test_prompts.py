@@ -70,6 +70,10 @@ class TestPromptRendering(unittest.TestCase):
         rendered = prompts.render_gemini_discovery_prompt(spec, max_sources=12)
         self.assertIn("Find source URLs", rendered)
         self.assertIn("Do not qualify leads, enrich contacts", rendered)
+        self.assertIn("Do not use Markdown links", rendered)
+        self.assertIn("Do not wrap URLs in Google search URLs", rendered)
+        self.assertIn('"https://example.com/page"', rendered)
+        self.assertIn("Commercial cleaning company serving new construction", rendered)
         self.assertIn('"sources"', rendered)
         self.assertIn(spec.lead_pattern.type, rendered)
 
@@ -79,6 +83,12 @@ class TestPromptRendering(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("Find source URLs", stdout.getvalue())
         self.assertIn("up to 3", stdout.getvalue())
+
+    def test_gemini_discovery_cli_uses_campaign_max_sources_by_default(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = render_prompt_cli.main(["gemini-discovery"])
+        self.assertEqual(rc, 0)
+        self.assertIn("up to 100", stdout.getvalue())
 
 
 if __name__ == "__main__":

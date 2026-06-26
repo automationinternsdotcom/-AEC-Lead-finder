@@ -1,13 +1,13 @@
-"""URL → cleaned article text → (Claude-produced) ExtractedArticle, then qualify, then estimate deal size.
+"""URL → cleaned article text → ExtractedArticle, then qualify, then estimate deal size.
 
-The LLM extraction step now happens in-context inside the daily Claude routine —
-this module provides only the deterministic pieces:
+The LLM extraction step happens in-session with Codex or another operator. This
+module provides only the deterministic pieces:
   - extract_article_text(url, http) — HTTP fetch + trafilatura cleanup
-  - is_qualifying(article)          — drop rules on a Claude-produced ExtractedArticle
+  - is_qualifying(article)          — drop rules on an ExtractedArticle
   - estimate_deal_size(article, rates) — janitorial rate calc
 
-Reuses: httpx, trafilatura, ExtractedArticle (pydantic, still validates Claude's JSON).
-Extend: SYSTEM_PROMPT moved to skill/aether_daily_routine.md (the routine's prompt).
+Reuses: httpx, trafilatura, ExtractedArticle (pydantic validates JSON).
+Extend: assessment prompt rendering lives in pipeline.prompts.
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ GENERAL_MIN_CONFIDENCE = 0.5    # baseline LLM confidence floor
 #                     prompt-tuning than the generic confidence guards
 #   other_low_conf  — `signal_type=other` is the catch-all bucket; demand
 #                     higher confidence to push it
-#   low_conf        — last-resort floor for anything Claude rated poorly
+#   low_conf        — last-resort floor for anything the assessment rated poorly
 DROP_RULES = (
     (lambda a: not a.az_relevant,                                                "not_az"),
     (lambda a: a.priority == "low",                                              "low_priority"),

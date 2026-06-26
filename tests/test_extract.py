@@ -126,7 +126,7 @@ class TestResolveGoogleNews(unittest.TestCase):
 
 
 class TestIsQualifying(unittest.TestCase):
-    """is_qualifying still operates on an ExtractedArticle (now Claude-produced)."""
+    """is_qualifying operates on an ExtractedArticle from the assessment step."""
 
     def _article(self, **overrides):
         from schema import ExtractedArticle
@@ -167,7 +167,7 @@ class TestIsQualifying(unittest.TestCase):
 
     def test_drops_low_priority(self):
         """Jordan's protocol: low-priority articles (macro commentary, mortgage
-        news, rankings, etc.) should never reach Pipedrive even if Claude
+        news, rankings, etc.) should never reach delivery even if the assessment
         rated them confidently."""
         passes, reason = extract.is_qualifying(self._article(priority="low"))
         self.assertFalse(passes)

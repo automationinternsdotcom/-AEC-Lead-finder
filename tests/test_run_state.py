@@ -28,7 +28,7 @@ class TestRunState(unittest.TestCase):
         self.assertEqual(manifest.campaign_id, "aether-cleaning-az")
         self.assertEqual(manifest.run_id, "test-run")
         self.assertEqual(manifest.stages["discover"].status, "pending")
-        self.assertEqual(manifest.stages["discover"].route, "browser_chat_skill")
+        self.assertEqual(manifest.stages["discover"].route, "deterministic_cli")
         self.assertEqual(manifest.stages["fetch"].status, "pending")
         self.assertEqual(manifest.stages["pattern"].route, "deterministic_cli")
         self.assertEqual(manifest.stages["qualify"].route, "codex_in_session")
@@ -42,7 +42,7 @@ class TestRunState(unittest.TestCase):
         action = next_action_for_manifest(manifest)
         self.assertEqual(action.status, "ready")
         self.assertEqual(action.stage, "discover")
-        self.assertEqual(action.route, "browser_chat_skill")
+        self.assertEqual(action.route, "deterministic_cli")
 
     def test_next_action_resumes_after_discover_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

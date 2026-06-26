@@ -1,13 +1,7 @@
-# Cleaning vertical spec — captures what the pipeline hardcodes TODAY.
-#
-# Phase 1 will prove parity: run the engine from this spec and confirm it
-# reproduces current results. Every value here is sourced from existing code,
-# not invented:
-#   - discovery.search_queries  <- sources.yaml (google_news endpoints)
-#   - discovery.source_tags     <- sources.yaml feed names
-#   - qualification.relevance_rubric <- skill/aether_daily_routine.md Step 2b
-#   - targeting.trigger_signals <- the HIGH/MEDIUM protocol in that skill
-#   - enrichment.outreach_angle <- schema.py service_angle / push.py note voice
+# Cleaning vertical spec for the current Gemini API discovery-first flow.
+# Campaign-specific discovery instructions, qualification rubric, allowed URL
+# types, Gemini settings, and dedupe namespace live here so future verticals can
+# be added by config instead of pipeline rewrites.
 
 campaign_id: aether-cleaning-az
 
@@ -61,6 +55,60 @@ targeting:
     - awards
 
 discovery:
+  provider: gemini_api
+  prompt_template: gemini_discovery
+  max_sources: 100
+  allowed_url_types:
+    - article
+    - rss_feed
+    - atom_feed
+    - sitemap
+    - permit_listing
+    - market_report
+  dedupe:
+    scope: campaign
+    namespace: aether-cleaning-az
+    final_article_url_unique: true
+  gemini:
+    model: gemini-3.1-pro-preview
+    use_google_search: true
+    temperature: 0.1
+  client_prompt: |-
+    You are a B2B lead discovery assistant. Your job is to find source URLs that contain signals relevant to a specific campaign.
+
+    CAMPAIGN CONTEXT:
+    - Client: Commercial cleaning company serving new construction and commercial buildings.
+    - Service area: Arizona, specifically the Phoenix metro area.
+    - Target signal: Companies or projects that will need commercial cleaning services within the next 3 to 12 months.
+    - Buyer personas: Facilities managers, property managers, developers, general contractor project managers.
+    - Negative keywords: residential, DIY, for sale by owner, single family home.
+
+    YOUR TASK:
+    Find source URLs that are likely to contain articles, announcements, feeds, permit listings, reports, or updates about:
+    - New commercial construction breaking ground or completing in Arizona.
+    - Commercial building permits issued in the Phoenix metro area.
+    - New office, retail, industrial, data center, semiconductor, logistics, or mixed-use developments in Arizona.
+    - Commercial tenant improvement projects in Arizona.
+    - Real estate development announcements in Phoenix, Scottsdale, Tempe, Mesa, Chandler, Gilbert, Glendale, Goodyear, and Surprise.
+    - Commercial property completions, openings, ribbon cuttings, expansions, relocations, or lease-up activity in Arizona.
+    - Corporate relocations and expansions into the Phoenix metro.
+    - New data centers, semiconductor fabs, logistics facilities, industrial parks, office campuses, retail centers, and mixed-use projects being built in Arizona.
+
+    STRICT REQUIREMENTS:
+    - Return URLs from at least 20 different domains.
+    - Do not over-index on a single source.
+    - Include a mix of local Arizona business journals and news outlets, Arizona commercial real estate publications, RSS or Atom feeds, city permit portals or development activity pages, general contractor and developer newsrooms, regional construction industry news sites, commercial real estate brokerage research pages, economic development sites, and chamber of commerce sites.
+    - Each URL must be a real, publicly accessible page.
+    - Do not return social media URLs.
+    - Do not return login-required pages.
+    - Do not return paywalled content.
+    - Do not return residential real estate URLs.
+    - Do not return generic homepages.
+    - Return specific article URLs, RSS/Atom feed URLs, sitemap URLs, permit listing pages, market report pages, or development activity pages.
+    - Every URL must start with http or https.
+    - Only include URLs with confidence above 0.7.
+
+    Prioritize breadth across domains and source types over depth in any single publication.
   # Verbatim from sources.yaml google_news endpoints.
   search_queries:
     - Arizona commercial real estate when:30d
@@ -77,9 +125,9 @@ discovery:
     - AZ
 
 qualification:
-  # Full-fidelity Jordan protocol from skill/aether_daily_routine.md. Keep the
-  # substance here, not in the prompt template, so CampaignSpec remains the
-  # single source of truth for vertical-specific qualification.
+  # Full-fidelity Jordan protocol. Keep the substance here, not in the prompt
+  # template, so CampaignSpec remains the single source of truth for
+  # vertical-specific qualification.
   relevance_rubric: |-
     #### Jordan's HIGH/MEDIUM/LOW filter
 

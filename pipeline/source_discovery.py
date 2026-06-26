@@ -15,6 +15,7 @@ from pipeline import util
 from pipeline.contracts import ArtifactEnvelope
 from pipeline.spec import CampaignSpecV2, LeadPatternType
 from pipeline.transcript_parser import extract_first_json_value
+from pipeline.url_normalizer import normalize_provider_url
 
 
 SourceType = Literal[
@@ -24,6 +25,12 @@ SourceType = Literal[
     "search_result",
     "public_database",
     "rss_feed",
+    "atom_feed",
+    "sitemap",
+    "homepage",
+    "permit_listing",
+    "market_report",
+    "unsupported",
     "other",
 ]
 
@@ -59,6 +66,8 @@ class SourceCandidate(BaseModel):
             out["suggested_pattern_type"] = out["pattern_type"]
         if "reason" not in out and "why" in out:
             out["reason"] = out["why"]
+        if isinstance(out.get("url"), str):
+            out["url"] = normalize_provider_url(out["url"])
         return out
 
     @model_validator(mode="after")

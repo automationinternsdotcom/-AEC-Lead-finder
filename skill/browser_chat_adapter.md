@@ -1,7 +1,7 @@
 # Browser Chat Adapter
 
-Purpose: standardize how Codex uses browser-based AI tools without pretending the
-Python pipeline can drive those tools directly.
+Purpose: standardize how Codex uses browser-based AI tools such as SuperGrok
+without pretending the Python pipeline can drive those tools directly.
 
 ## Contract
 
@@ -28,6 +28,7 @@ Rules:
 ## Recovery
 
 If the provider tab is logged out, rate limited, or model mode is unavailable:
+
 1. Save a short failure note in `transcripts/`.
 2. Do not overwrite any previous successful artifact.
 3. Ask the operator to re-auth or approve a fallback route.

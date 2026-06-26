@@ -25,12 +25,16 @@ class TestCampaignSpecV2Compatibility(unittest.TestCase):
         self.assertEqual(spec.schema_version, "campaign_spec.v2")
         self.assertEqual(spec.campaign_id, "aether-cleaning-az")
         self.assertEqual(spec.lead_pattern.type, "event_signal")
-        self.assertEqual(spec.routing.discover, "browser_chat_skill")
+        self.assertEqual(spec.routing.discover, "deterministic_cli")
         self.assertEqual(spec.routing.fetch, "deterministic_cli")
         self.assertEqual(spec.routing.pattern, "deterministic_cli")
         self.assertEqual(spec.routing.enrich, "browser_chat_skill")
         self.assertTrue(spec.quality_gates.preserve_phase1_parity)
         self.assertIn("google_news_az_cre", spec.sources.source_tags)
+        self.assertEqual(spec.sources.provider, "gemini_api")
+        self.assertEqual(spec.sources.max_sources, 100)
+        self.assertEqual(spec.sources.gemini.model, "gemini-3.1-pro-preview")
+        self.assertEqual(spec.sources.dedupe.namespace, "aether-cleaning-az")
 
     def test_phase1_loader_still_returns_phase1_model(self):
         phase1 = load_campaign_spec()

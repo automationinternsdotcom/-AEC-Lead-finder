@@ -3,7 +3,7 @@
 Jordan applies a `NOT RELEVANT` label in Pipedrive when an article-sourced
 Lead shouldn't have been pushed. This module gives the daily routine a way
 to surface those flags in its run report so the operator can manually tune
-the routine's protocol (skill/aether_daily_routine.md Step 2b) over time.
+the campaign qualification rubric over time.
 
 Per the design decision (see commit message): we do NOT auto-blocklist
 companies or auto-suppress URLs. The signal is *informational only* —

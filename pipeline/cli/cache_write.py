@@ -4,9 +4,8 @@ Stdin: Lead JSON (dict matching pipeline.enrich.Lead's dataclass fields).
 Args:  org_name (will be normalized in db._normalize_org_name), source
        (e.g. 'grok', 'apollo', 'in_article' — free text, used for provenance).
 
-Replaces an inline Python heredoc in skill/aether_daily_routine.md that
-broke on company names containing double-quotes (shell variable interpolation
-into Python source). CLI args avoid the quoting issue entirely.
+Keeps cache writes as a real CLI so company names with shell-sensitive
+characters pass through as arguments instead of interpolated source text.
 """
 from __future__ import annotations
 

@@ -55,6 +55,40 @@ class TestSourceCandidate(unittest.TestCase):
         self.assertEqual(candidate.source_type, "directory")
         self.assertEqual(candidate.suggested_pattern_type, "entity_aggregation")
 
+    def test_normalizes_markdown_google_search_url(self):
+        candidate = SourceCandidate.model_validate(_source(
+            "[https://www.tempe.gov/government/economic-development/news]"
+            "(https://www.google.com/search?q=https://www.tempe.gov/government/economic-development/news)",
+            source_name="City of Tempe",
+            title="Tempe Economic Development News",
+        ))
+        self.assertEqual(
+            candidate.url,
+            "https://www.tempe.gov/government/economic-development/news",
+        )
+        self.assertEqual(
+            candidate.canonical_url,
+            "https://www.tempe.gov/government/economic-development/news",
+        )
+
+    def test_unwraps_google_search_url(self):
+        candidate = SourceCandidate.model_validate(_source(
+            "https://www.google.com/search?q=https%3A%2F%2Fwww.phoenix.gov%2Fpdd%2Fdevelopment%2Fpermits",
+            source_type="permit_listing",
+        ))
+        self.assertEqual(
+            candidate.url,
+            "https://www.phoenix.gov/pdd/development/permits",
+        )
+
+    def test_accepts_campaign_source_types_from_prompt(self):
+        for source_type in ("rss_feed", "atom_feed", "sitemap", "permit_listing", "market_report"):
+            candidate = SourceCandidate.model_validate(_source(
+                "https://example.com/source",
+                source_type=source_type,
+            ))
+            self.assertEqual(candidate.source_type, source_type)
+
 
 class TestGeminiDiscoveryParsing(unittest.TestCase):
     def test_saved_fixture_has_expected_rejections(self):
