@@ -21,7 +21,7 @@ from pipeline.enrich import Lead
 # One entry runs from "N. " through the next "N+1. " or end-of-text.
 _ENTRY_HEAD = re.compile(r"^(\d+)\.\s+(.+?)$", re.MULTILINE)
 # Grok uses both "Current Title:" and the shorter "Title:" — accept either.
-_TITLE_LINE = re.compile(r"(?:Current\s+)?Title:\s*(.+?)\s*$", re.MULTILINE)
+_TITLE_LINE = re.compile(r"(?:Current\s+)?Title:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
 _LINKEDIN = re.compile(r"LinkedIn:\s*(https?://\S+)", re.IGNORECASE)
 # Same for emails: "Professional Email:" and bare "Email:". TLD min 2 chars
 # (no 1-char TLDs exist; Grok occasionally hallucinates `@example.c` truncations).
@@ -32,7 +32,7 @@ _EMAIL = re.compile(r"(?:Professional\s+)?Email:[^\n]*?([\w.+-]+@[\w.-]+\.\w{2,}
 # 10-digit US-phone-looking substring after a Phone:/Direct:/Direct Dial:/Direct Phone:
 # label. Extension suffixes (ext, x) are kept in the value.
 _PHONE = re.compile(
-    r"(?:Direct\s+(?:Phone|Dial)|Direct|Phone|Tel|Telephone):\s*"
+    r"(?:Direct\s+(?:Phone(?:\s+number)?|Dial)|Direct|Phone|Tel|Telephone):\s*"
     r"([+]?[\d().\-\s]{10,30}(?:\s*(?:ext|x|extension)\.?\s*\d+)?)",
     re.IGNORECASE,
 )
