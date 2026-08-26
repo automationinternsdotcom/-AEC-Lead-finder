@@ -67,9 +67,10 @@ class TestGetUnprocessedUrls(unittest.TestCase):
         rows = db.get_unprocessed_urls(conn)
         self.assertEqual([r["url_hash"] for r in rows], ["h_extracted"])
 
-    def test_skips_pushed_filtered_failed(self):
+    def test_skips_reported_pushed_filtered_failed(self):
         """Terminal states stay terminal; sweep does not retry them."""
         conn = _mem_conn()
+        _seed_seen(conn, "h_reported", status="reported")
         _seed_seen(conn, "h_pushed", status="pushed")
         _seed_seen(conn, "h_filtered", status="filtered")
         _seed_seen(conn, "h_failed", status="failed")

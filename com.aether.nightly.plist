@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Aether nightly lead pipeline — LaunchAgent (runs in the user's GUI session,
-  which is required to drive Chrome). PREPARED, NOT INSTALLED.
+  Aether nightly lead pipeline — LaunchAgent. PREPARED, NOT INSTALLED.
   To enable, see README-AUTOMATION.md (copy to ~/Library/LaunchAgents + bootstrap).
   RunAtLoad is false and this file is NOT in ~/Library/LaunchAgents, so it cannot
   fire until you deliberately install + load it.
@@ -27,9 +26,9 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- Which Pipedrive account the nightly writes to. CONFIRM before enabling. -->
+    <!-- Optional env file for Responses API / Apollo settings. -->
     <key>AETHER_ENV</key>
-    <string>/Users/openclaw/.aether-pipedrive-prod.env</string>
+    <string>/Users/openclaw/aether-runner/.env</string>
   </dict>
 
   <key>RunAtLoad</key>

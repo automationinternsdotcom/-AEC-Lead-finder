@@ -4,7 +4,8 @@ Reuses: sqlite3 (stdlib, Row factory + INSERT OR IGNORE / REPLACE / ON CONFLICT
         for upsert/dedup at the SQL layer), util.utc_now_iso for all timestamps.
 Extend: the SCHEMA constant for DDL changes; add a thin helper per new write op.
 Schema invariants: all timestamps are utc_now_iso strings; seen_urls.status ∈
-  {new, extracted, filtered, pushed, failed, merged}; runs.status ∈ {in_progress, ok, failed}.
+  {new, extracted, reported, filtered, pushed, failed, merged};
+  runs.status ∈ {in_progress, ok, failed}.
 """
 from __future__ import annotations
 
@@ -118,7 +119,7 @@ def finalize_run(
 def sync_source(
     conn: sqlite3.Connection, name: str, method: str, endpoint: str, enabled: bool,
 ) -> None:
-    """UPSERT one sources.yaml entry into the sources table."""
+    """UPSERT one configured discovery source into the sources table."""
     conn.execute(
         "INSERT INTO sources (name, method, endpoint, enabled, last_synced) "
         "VALUES (?, ?, ?, ?, ?) "
@@ -157,8 +158,8 @@ def get_unprocessed_urls(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     - 'extracted' = extracted but never pushed (process crashed between
                     push.sync_to_pipedrive and mark_seen_status('pushed')).
 
-    Terminal states ('pushed', 'filtered', 'failed') are excluded — operators
-    can recover 'failed' rows manually.
+    Terminal states ('reported', 'pushed', 'filtered', 'failed', 'merged') are
+    excluded — operators can recover failed rows manually.
     """
     return conn.execute(
         "SELECT url_hash, url, source, title, first_seen_at FROM seen_urls "
