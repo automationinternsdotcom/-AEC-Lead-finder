@@ -6,7 +6,9 @@ Required env vars are listed in .env.example.
 """
 from __future__ import annotations
 
+import csv
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -15,8 +17,9 @@ import yaml
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCES_YAML = ROOT / "sources.yaml"
+NEWS_WEBSITES_CSV = ROOT / "news_websites.csv"
 RATES_YAML = ROOT / "rates.yaml"
+RESULTS_DIR = ROOT / "results"
 
 # Static defaults — change in code, not via env.
 HTTP_TIMEOUT_SEC = 15
@@ -86,11 +89,54 @@ def settings() -> Settings:
     )
 
 
+_NON_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def _source_slug(name: str, fallback: str) -> str:
+    slug = _NON_SLUG.sub("_", name.lower()).strip("_")
+    return slug or fallback
+
+
 def load_sources() -> list[dict]:
-    """sources.yaml → list of {name, method, endpoint, enabled} dicts."""
-    return yaml.safe_load(SOURCES_YAML.read_text(encoding="utf-8")) or []
+    """news_websites.csv → enabled website sources for article discovery.
+
+    NEWS_WEBSITES_CSV may point at an operator-maintained file. By default the
+    checked-in CSV is used so discovery never falls back to broad Google News
+    searches.
+    """
+    csv_path = Path(os.environ.get("NEWS_WEBSITES_CSV") or NEWS_WEBSITES_CSV)
+    return load_news_websites_csv(csv_path)
+
+
+def load_news_websites_csv(path: Path) -> list[dict]:
+    """Load Resource Name/URL rows as website scrape sources."""
+    sources: list[dict] = []
+    seen_names: dict[str, int] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for idx, row in enumerate(csv.DictReader(f), start=1):
+            display_name = (row.get("Resource Name") or row.get("name") or "").strip()
+            endpoint = (row.get("URL") or row.get("url") or "").strip()
+            if not endpoint:
+                continue
+            base_name = _source_slug(display_name, f"source_{idx}")
+            count = seen_names.get(base_name, 0) + 1
+            seen_names[base_name] = count
+            name = base_name if count == 1 else f"{base_name}_{count}"
+            sources.append({
+                "name": name,
+                "display_name": display_name or name,
+                "method": "website",
+                "endpoint": endpoint,
+                "enabled": True,
+            })
+    return sources
 
 
 def load_rates() -> dict[str, float]:
     """rates.yaml → {property_type: $/sqft/month or $/unit/month for multifamily}."""
     return yaml.safe_load(RATES_YAML.read_text(encoding="utf-8")) or {}
+
+
+def results_dir() -> Path:
+    """Daily artifact directory root, GPS-style: results/YYYY-MM-DD/."""
+    return Path(os.environ.get("RESULTS_DIR") or RESULTS_DIR)

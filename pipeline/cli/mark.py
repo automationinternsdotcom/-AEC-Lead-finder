@@ -1,6 +1,6 @@
 """`python -m pipeline.cli.mark <url_hash> <status>` — update seen_urls.status.
 
-Valid statuses: new, extracted, filtered, pushed, failed, merged.
+Valid statuses: new, extracted, reported, filtered, pushed, failed, merged.
 Exit codes: 0 = ok, 2 = bad args.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ import sys
 
 from pipeline import db
 
-VALID_STATUSES = {"new", "extracted", "filtered", "pushed", "failed", "merged"}
+VALID_STATUSES = {"new", "extracted", "reported", "filtered", "pushed", "failed", "merged"}
 
 
 def main() -> int:

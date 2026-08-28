@@ -17,6 +17,10 @@ Thumbs.db
 # Temp
 /tmp/
 *.json.bak
+logs/
+scout/logs/
+results/*
+!results/.gitkeep
 
 # Credentials (never commit)
 .env
@@ -29,3 +33,6 @@ client_secret_*.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+scout.db
+scout.db-shm
+scout.db-wal

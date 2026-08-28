@@ -1,7 +1,7 @@
 """Pure / shared helpers: URL canon, hash, UTC time, HTTP client, JSON log.
 
 Reuses: urllib.parse, hashlib, datetime, json (stdlib) + httpx.
-Extend here: _TRACK_PREFIXES/_TRACK_EXACT, BROWSER_UA, Google News URL template.
+Extend here: _TRACK_PREFIXES/_TRACK_EXACT, BROWSER_UA.
 Cross-module consumers: anything that does HTTP fetch, logs an event, or hashes a URL.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ import hashlib
 import json
 import sys
 from datetime import datetime, timezone
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -44,14 +44,6 @@ def sha256_hex(s: str) -> str:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def build_google_news_url(query: str) -> str:
-    """Ported from the archived legacy feed script — do not alter params."""
-    return (
-        "https://news.google.com/rss/search?"
-        f"q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
-    )
 
 
 def make_http_client() -> httpx.Client:
