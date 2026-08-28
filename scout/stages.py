@@ -2,9 +2,21 @@
 from __future__ import annotations
 
 import csv
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+from pathlib import Path
 from threading import Lock
 from urllib.parse import urlparse
+
+# ``scout/run.py`` is launched as a file by the canonical pipeline. In that
+# mode Python puts ``scout/`` ahead of the repository root on sys.path, which
+# makes ``from pipeline`` resolve to ``scout/pipeline.py`` instead of the
+# existing top-level ``pipeline`` package. Put the repository root first so the
+# website fetcher imports consistently from both scripts and tests.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if sys.path[0] != str(REPO_ROOT):
+    sys.path.insert(0, str(REPO_ROOT))
 
 import article_judge
 import config
@@ -27,7 +39,11 @@ def collect(window_days=1):
                 {
                     "link": link,
                     "title": title,
-                    "published_iso": "",
+                    "published_iso": (
+                        website_fetch._date_from_url(link).isoformat()
+                        if website_fetch._date_from_url(link)
+                        else ""
+                    ),
                     "source_site": _site(link),
                     "source_name": source["name"],
                 }
@@ -46,6 +62,39 @@ def collect(window_days=1):
         }
     logbook.log("collect", f"{len(sources)} websites scraped, {len(by_link)} unique articles found")
     return list(by_link.values())
+
+
+def filter_since(entries, since):
+    """Keep entries with a URL publication date on or after ``since``.
+
+    Curated website pages often expose large archives. Judging undated archive
+    links would make a daily run spend hundreds of model calls and mix old news
+    into today's digest, so undated entries are excluded from the daily path.
+    """
+    cutoff = date.fromisoformat(since)
+    recent = []
+    undated = 0
+    stale = 0
+    for entry in entries:
+        published = entry.get("published_iso", "")
+        if not published:
+            undated += 1
+            continue
+        try:
+            published_date = date.fromisoformat(published)
+        except ValueError:
+            undated += 1
+            continue
+        if published_date >= cutoff:
+            recent.append(entry)
+        else:
+            stale += 1
+    logbook.log(
+        "freshness",
+        f"{len(recent)} on/after {cutoff.isoformat()}, "
+        f"{stale} older and {undated} undated skipped",
+    )
+    return recent
 
 
 def judge(new_entries, workers):

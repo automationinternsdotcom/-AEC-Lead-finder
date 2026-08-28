@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["feedparser", "googlenewsdecoder", "httpx", "python-dotenv", "pyyaml", "trafilatura"]
+# dependencies = ["feedparser", "googlenewsdecoder", "httpx", "pydantic>=2.8", "python-dotenv", "pyyaml", "trafilatura"]
 # ///
 """news_websites.csv scrape -> Grok judges each article -> DB -> dedup -> dated CSV."""
 from __future__ import annotations
@@ -29,6 +29,7 @@ def main():
 
     db.init_db()
     unique_entries = stages.collect()
+    unique_entries = stages.filter_since(unique_entries, args.since)
     known_links = db.all_links()
     new_entries = [entry for entry in unique_entries if entry["link"] not in known_links]
     logbook.log("judge", f"{len(unique_entries) - len(new_entries)} already in DB, skipped")
