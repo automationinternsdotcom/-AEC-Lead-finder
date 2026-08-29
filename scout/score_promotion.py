@@ -14,12 +14,22 @@ def main(argv=None) -> int:
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--final-dir", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--human-override",
+        type=Path,
+        help="optional JSON object with decision, signed_by, and reason",
+    )
     args = parser.parse_args(argv)
     inputs = PromotionInputs(**json.loads(args.inputs.read_text(encoding="utf-8")))
     card = build_scorecard(
         inputs,
         final_dir=args.final_dir,
         input_artifacts=args.artifact,
+        human_override=(
+            json.loads(args.human_override.read_text(encoding="utf-8"))
+            if args.human_override
+            else None
+        ),
         judge_call=lambda prompt, model, temperature: llm.call(
             model,
             prompt,

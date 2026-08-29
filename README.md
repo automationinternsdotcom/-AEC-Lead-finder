@@ -208,7 +208,9 @@ message. Its `--monitor` mode is read-only and never retries a send.
 After delivery, `scout/prepare_promotion.py` derives deterministic inputs and
 `scout/score_promotion.py` writes the versioned scorecard plus exact judge prompt and
 raw response. Automatic promotion requires two green days out of three and no manual
-review, veto, or hard blocker.
+review, veto, or hard blocker. Apply the final gate with
+`scout/aggregate_promotion.py day1.json day2.json day3.json`; signed human overrides
+are supplied to the scoring command as a JSON file.
 
 ## GitHub Production Run
 
