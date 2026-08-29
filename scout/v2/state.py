@@ -30,6 +30,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Make `with store.connect()` close, not merely commit, the connection."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS v2_schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -286,7 +296,7 @@ class StateStore:
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(self.path, timeout=30, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
