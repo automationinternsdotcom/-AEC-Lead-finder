@@ -33,6 +33,11 @@ jobs:
       EXTRACTOR_MODEL: ${{ vars.EXTRACTOR_MODEL || 'grok-3-mini' }}
       APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
       APOLLO_WEBHOOK_URL: ${{ secrets.APOLLO_WEBHOOK_URL }}
+      PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+      PIPEDRIVE_DOMAIN: aether
+      PIPEDRIVE_FIELD_ARTICLE_URL: cad02131af9ab1c52e857604a0271aeb82e5cbe7
+      PIPEDRIVE_ARTICLE_DEAL_PIPELINE_ID: "47"
+      PIPEDRIVE_ARTICLE_DEAL_STAGE_ID: "311"
       DB_PATH: scout.db
       RESULTS_DIR: results
       NEWS_WEBSITES_CSV: news_websites.csv
@@ -64,6 +69,7 @@ jobs:
           test -n "$CLIPROXY_BASE_URL" || { echo "Missing secret CLIPROXY_BASE_URL"; exit 1; }
           test -n "$CLIPROXY_API_KEY" || { echo "Missing secret CLIPROXY_API_KEY"; exit 1; }
           test -n "$APOLLO_API_KEY" || { echo "Missing secret APOLLO_API_KEY"; exit 1; }
+          test -n "$PIPEDRIVE_API_TOKEN" || { echo "Missing secret PIPEDRIVE_API_TOKEN"; exit 1; }
 
       - name: Run AEC scout pipeline
         run: |
