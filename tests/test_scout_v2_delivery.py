@@ -15,6 +15,7 @@ from v2.delivery import (  # noqa: E402
     DISCLOSURE,
     DeliveryCollisionError,
     ExactlyOnceDelivery,
+    GogMailGateway,
     ProfileMismatchError,
     monitor_comparison_day,
 )
@@ -73,6 +74,26 @@ def test_delivery_can_exclude_authenticated_sender_from_recipients(tmp_path):
 
     assert result.recipients == ("jon@automationinterns.com",)
     assert gateway.bodies[0][1] == ("jon@automationinterns.com",)
+
+
+def test_gog_send_uses_authenticated_account_without_from_override(monkeypatch):
+    gateway = GogMailGateway("automationinterns@gmail.com")
+    calls = []
+    monkeypatch.setattr(
+        gateway,
+        "_json",
+        lambda arguments: calls.append(arguments) or {"id": "message-1"},
+    )
+
+    message_id = gateway.send_html(
+        sender="automationinterns@gmail.com",
+        recipients=["jon@automationinterns.com"],
+        subject="subject",
+        html="<p>body</p>",
+    )
+
+    assert message_id == "message-1"
+    assert "--from" not in calls[0]
 
 
 def test_delivery_blocks_profile_collision_and_nonterminal_artifacts(tmp_path):

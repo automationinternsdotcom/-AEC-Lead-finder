@@ -79,8 +79,6 @@ class GogMailGateway:
                 subject,
                 "--body-html",
                 html,
-                "--from",
-                sender,
             ]
         )
         identifiers = _find_values(payload, {"id", "messageId"})
