@@ -71,7 +71,18 @@ ARIZONA_TERMS = (
     "arizona", "phoenix", "tucson", "mesa", "scottsdale", "tempe",
     "chandler", "gilbert", "glendale", "peoria", "surprise", "goodyear",
     "avondale", "flagstaff", "prescott", "yuma", "buckeye", "queen creek",
-    "maricopa", "pinal county", "maricopa county",
+    "maricopa", "pinal county", "maricopa county", "casa grande",
+    "lake havasu city", "bullhead city", "apache junction", "oro valley",
+    "sierra vista", "prescott valley", "fountain hills", "cottonwood",
+    "sedona", "nogales", "kingman", "eloy", "coolidge", "marana",
+    "sahuarita", "san tan valley",
+)
+NON_ARIZONA_STATE_TERMS = (
+    "california", "colorado", "florida", "georgia", "illinois", "indiana",
+    "maryland", "massachusetts", "michigan", "minnesota", "missouri",
+    "nevada", "new jersey", "new mexico", "new york", "north carolina",
+    "ohio", "oregon", "pennsylvania", "south carolina", "tennessee",
+    "texas", "utah", "virginia", "washington", "wisconsin",
 )
 AEC_EVENT_TERMS = (
     "open", "lease", "occup", "construct", "develop", "redevelop",
@@ -97,7 +108,7 @@ class BulkOptions:
     seed_run_id: str = ""
     search_fallback: bool = True
     reuse_discovery_corpus: bool = False
-    batch_size: int = 12
+    batch_size: int = 20
 
 
 class SourceCoverage(BaseModel):
@@ -988,11 +999,7 @@ class BulkRunner:
             archive_until=self.archive_until,
         )
         seed = StateStore(self.options.seed_db)
-        events = [
-            item
-            for item in seed.events_for_run(self.options.seed_run_id)
-            if item.record_status == RecordStatus.VALID
-        ]
+        events = seed.active_events_for_run(self.options.seed_run_id)
         candidate_ids = {
             candidate_id_value
             for event in events
@@ -1345,13 +1352,14 @@ class BulkRunner:
             event_evidence_urls = list(dict.fromkeys(
                 item.url for event in events for item in event.evidence
             ))
+            anchor_evidence_urls = [item.url for item in anchor.evidence]
             variants = {
                 key: _validate_variant((payload.get("variants") or {}).get(key) or {})
                 for key in WHY_KEYS
             }
             for key in ("a", "c"):
                 variants[key] = _require_event_evidence(
-                    variants[key], event_evidence_urls
+                    variants[key], anchor_evidence_urls
                 )
             canonical_name = str(payload.get("canonical_name") or names[0]).strip()
             domain = _domain(str(payload.get("domain") or ""))
@@ -1413,10 +1421,20 @@ class BulkRunner:
             )
 
     def _repair_profiles(self, profiles: list[CompanyProfile]) -> list[CompanyProfile]:
+        events_by_id = {
+            item.lead_event_id: item
+            for item in self.state.active_events_for_run(self.options.run_id)
+        }
         repair_items = {}
         for profile in profiles:
             for key, variant in profile.variants.items():
                 if variant.text and variant.source_urls and variant.status != "valid":
+                    if key in {"a", "c"}:
+                        anchor = events_by_id.get(profile.anchor_lead_event_id)
+                        anchor_urls = [item.url for item in anchor.evidence] if anchor else []
+                        checked = _require_event_evidence(variant, anchor_urls)
+                        if "why_line_missing_event_evidence" in checked.validation_errors:
+                            continue
                     repair_items[f"{profile.profile_key}:{key}"] = variant.text
         if not repair_items:
             return profiles
@@ -1479,6 +1497,12 @@ class BulkRunner:
                         "source_urls": variant.source_urls,
                     }
                 )
+                if key in {"a", "c"}:
+                    anchor = events_by_id.get(profile.anchor_lead_event_id)
+                    candidate = _require_event_evidence(
+                        candidate,
+                        [item.url for item in anchor.evidence] if anchor else [],
+                    )
                 variants[key] = candidate if candidate.status == "valid" else WhyVariant(
                     confidence=variant.confidence,
                     source_urls=variant.source_urls,
@@ -1638,14 +1662,38 @@ def _offline_screen(candidate: DiscoveryCandidate) -> str:
         except OSError:
             return "ambiguous"
     combined = f"{headline} {body[:40_000]}"
-    headline_places = {term for term in ARIZONA_TERMS if term in headline}
-    body_places = {term for term in ARIZONA_TERMS if term in combined}
-    event_hits = {term for term in AEC_EVENT_TERMS if term in combined}
-    if not event_hits or not body_places:
-        return "reject"
+    headline_places = {term for term in ARIZONA_TERMS if _place_present(headline, term)}
+    body_places = {term for term in ARIZONA_TERMS if _place_present(combined, term)}
+    event_hits = {term for term in AEC_EVENT_TERMS if _prefix_present(combined, term)}
+    if not event_hits:
+        return "ambiguous"
+    if not body_places:
+        non_arizona = {
+            term for term in NON_ARIZONA_STATE_TERMS if _term_present(combined, term)
+        }
+        return "reject" if non_arizona else "ambiguous"
     if headline_places or len(body_places) >= 2:
         return "keep"
     return "ambiguous"
+
+
+def _term_present(value: str, term: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value))
+
+
+def _place_present(value: str, term: str) -> bool:
+    if term not in {"mesa", "surprise", "gilbert"}:
+        return _term_present(value, term)
+    place_context = (
+        rf"(?:\b(?:in|near|at|city of)\s+{re.escape(term)}\b)"
+        rf"|(?:\b{re.escape(term)}(?:\s*,?\s*(?:arizona|az)\b"
+        rf"|\s+(?:property|site|development|warehouse|industrial|retail|office|hotel)\b))"
+    )
+    return bool(re.search(place_context, value))
+
+
+def _prefix_present(value: str, term: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}", value))
 
 
 def _archive_url_in_scope(source: CuratedSource, page_url: str) -> bool:
@@ -1776,13 +1824,16 @@ def _require_event_evidence(
             allowed.add(canonicalize_url(value))
         except ValueError:
             continue
-    if variant.status == "valid" and not (set(variant.source_urls) & allowed):
+    if not (set(variant.source_urls) & allowed):
         return WhyVariant(
             text="",
             confidence=variant.confidence,
             source_urls=variant.source_urls,
             status="review",
-            validation_errors=["why_line_missing_event_evidence"],
+            validation_errors=list(dict.fromkeys([
+                *variant.validation_errors,
+                "why_line_missing_event_evidence",
+            ])),
         )
     return variant
 

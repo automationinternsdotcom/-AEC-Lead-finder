@@ -18,7 +18,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from bulk_lib import (  # noqa: E402
     BulkOptions,
     BulkRunner,
+    CompanyProfile,
+    WhyVariant,
     _archive_url_in_scope,
+    _offline_screen,
     _require_event_evidence,
     _validate_variant,
 )
@@ -30,6 +33,7 @@ from v2.contracts import (  # noqa: E402
     StageStatus,
 )
 from v2.http import FetchResponse  # noqa: E402
+from v2.discovery import load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 
 
@@ -193,6 +197,64 @@ def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tm
     assert [item.candidate_id for item in candidates] == [persisted.candidate_id]
 
 
+def test_legacy_interrupted_run_reuses_saved_corpus_without_fetching(tmp_path):
+    base_options = options(tmp_path)
+    state = StateStore(base_options.output_dir / "state.sqlite")
+    state.migrate()
+    state.create_run(
+        "bulk-run",
+        "2026-08-28",
+        "2026-07-24",
+        configuration={
+            "kind": "explicit_bulk_enrichment",
+            "model": "grok-4.3",
+            "archive_until": "2026-08-28",
+            "seed_db": "",
+            "seed_run_id": "",
+            "apollo": False,
+            "email_delivery": False,
+            "search_fallback": False,
+        },
+    )
+    source = load_curated_sources(base_options.sources_csv)[0]
+    state.upsert_source(
+        source.source_id, source.name, source.url, source.domain
+    )
+    raw_path = tmp_path / "saved.html"
+    raw_path.write_text(
+        "<title>Phoenix warehouse opens</title><p>A Phoenix warehouse opened.</p>"
+    )
+    article = "https://example.com/2026/08/01/phoenix-warehouse-opens"
+    state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="saved-candidate",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=article,
+            resolved_url=article,
+            canonical_url=article,
+            title="Phoenix warehouse opens",
+            source_id=source.source_id,
+            source_name=source.name,
+            source_domain=source.domain,
+            published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            raw_artifact_path=str(raw_path),
+        )
+    )
+    runner = BulkRunner(
+        options(tmp_path, resume=True, reuse_discovery_corpus=True),
+        fetch=lambda url: (_ for _ in ()).throw(
+            AssertionError(f"saved-corpus recovery fetched {url}")
+        ),
+        model_call=lambda *args: ("{}", {}),
+    )
+
+    counters = runner._discover()
+
+    assert counters["corpus_reused"] == 1
+    assert counters["distinct_urls"] == 1
+
+
 def test_why_line_validation_is_sourced_and_fail_closed():
     valid = _validate_variant(
         {
@@ -219,6 +281,34 @@ def test_why_line_validation_is_sourced_and_fail_closed():
     assert wrong_event_source.validation_errors == [
         "why_line_missing_event_evidence"
     ]
+
+
+def test_offline_screen_treats_missing_or_ambiguous_geography_conservatively(tmp_path):
+    article_path = tmp_path / "article.html"
+    article_path.write_text(
+        "<title>Mesa Capital Partners</title>"
+        "<p>Mesa Capital Partners announced construction of a new warehouse.</p>"
+    )
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate-screen",
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url="https://example.com/story",
+        resolved_url="https://example.com/story",
+        canonical_url="https://example.com/story",
+        title="Mesa Capital Partners announces construction",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        raw_artifact_path=str(article_path),
+    )
+
+    assert _offline_screen(candidate) == "ambiguous"
+    article_path.write_text(
+        "<title>Texas warehouse</title><p>A new warehouse opened in Texas.</p>"
+    )
+    assert _offline_screen(candidate) == "reject"
 
 
 def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
@@ -278,6 +368,74 @@ def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
 
 
+def test_why_repair_cannot_bypass_anchor_event_evidence(tmp_path):
+    runner = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: (_ for _ in ()).throw(
+            AssertionError("wrong-source why line must not be repaired")
+        ),
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    article = "https://example.com/anchor"
+    runner.state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-anchor",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=article,
+            resolved_url=article,
+            canonical_url=article,
+            title="Phoenix warehouse opens",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+            published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+    )
+    runner.state.save_organization(
+        Organization(organization_id="org-anchor", canonical_name="Anchor Co")
+    )
+    runner.state.save_lead_event(
+        LeadEvent(
+            lead_event_id="event-anchor",
+            run_id="bulk-run",
+            organization_id="org-anchor",
+            primary_candidate_id="candidate-anchor",
+            supporting_candidate_ids=["candidate-anchor"],
+            event="Opened a warehouse",
+            location="Phoenix, Arizona",
+            priority="high",
+            evidence=[Evidence(url=article, supports="Reports the opening")],
+        )
+    )
+    wrong_source = WhyVariant(
+        text="This deliberately malformed sourced sentence is too short for the format contract but still should never be repaired using an unrelated source URL.",
+        confidence="high",
+        source_urls=["https://unrelated.example/context"],
+        status="review",
+        validation_errors=["why_line_word_count"],
+    )
+    profile = CompanyProfile(
+        profile_key="profile-anchor",
+        canonical_name="Anchor Co",
+        organization_ids=["org-anchor"],
+        lead_event_ids=["event-anchor"],
+        anchor_lead_event_id="event-anchor",
+        variants={
+            "a": wrong_source,
+            "b": WhyVariant(),
+            "c": WhyVariant(),
+        },
+    )
+
+    repaired = runner._repair_profiles([profile])
+
+    assert repaired[0].variants["a"] == wrong_source
+
+
 def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
     seed_path = tmp_path / "seed.sqlite"
     seed = StateStore(seed_path)
@@ -316,6 +474,20 @@ def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
             evidence=[Evidence(url="https://example.com/story", supports="Reports opening")],
         )
     )
+    seed.save_lead_event(
+        LeadEvent(
+            lead_event_id="event-merged",
+            run_id="seed-run",
+            organization_id="org-1",
+            primary_candidate_id="candidate-1",
+            supporting_candidate_ids=["candidate-1"],
+            event="Duplicate marketplace opening",
+            location="Phoenix, Arizona",
+            priority="high",
+            evidence=[Evidence(url="https://example.com/story", supports="Duplicate")],
+        )
+    )
+    seed.save_event_merge("seed-run", "event-merged", "event-1")
     runner = BulkRunner(
         options(
             tmp_path,
@@ -385,6 +557,8 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
                 }}
             ), {}
         if "Score each Arizona" in prompt:
+            assert tools == []
+            assert '"contacts"' not in prompt
             event_id = runner.state.active_events_for_run("bulk-run")[0].lead_event_id
             return json.dumps({event_id: 88}), {}
         if "Resolve one Aether" in prompt:

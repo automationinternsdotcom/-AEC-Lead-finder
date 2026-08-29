@@ -39,7 +39,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="resume from already persisted discovery pages without crawling sites again",
     )
-    value.add_argument("--batch-size", type=int, default=12)
+    value.add_argument("--batch-size", type=int, default=20)
     value.add_argument("--seed-db", type=Path)
     value.add_argument("--seed-run-id", default="")
     value.add_argument(
