@@ -192,7 +192,7 @@ Items: {items}"""
 
 BULK_QUALIFICATION_PROMPT = """Qualify this bounded batch using only the supplied saved article evidence. Do not search the web and do not identify people. For every exact candidate_id, decide whether the article reports a specific Arizona commercial-property event that creates a facilities-services opportunity.
 
-Return strict JSON only as one object mapping every exact candidate_id to an object with keys: qualified, business_name, event, date_posted, location, summary, state, priority, property_type, service_angle, filter_reason, confidence. Include every submitted ID exactly once and invent no IDs. A rejection requires a specific filter_reason. A qualification requires state Arizona, priority high or medium, and nonempty business_name, event, and location.
+Return strict JSON only as one object mapping every exact candidate_id to an object with keys: qualified, business_name, event, date_posted, location, summary, state, priority, property_type, service_angle, filter_reason, confidence. date_posted must be YYYY-MM-DD or an empty string, never a timestamp. Include every submitted ID exactly once and invent no IDs. A rejection requires a specific filter_reason. A qualification requires state Arizona, priority high or medium, and nonempty business_name, event, and location.
 
 Candidates:
 {candidates}"""
@@ -797,8 +797,15 @@ class BulkRunner:
             item
             for item in self.state.candidates_for_run(self.options.run_id)
             if item.metadata.get("selected_for_qualification")
-            and item.record_status == RecordStatus.VALID
+            and item.record_status in {RecordStatus.VALID, RecordStatus.REVIEW}
             and not item.metadata.get("bulk_qualified")
+        ]
+        candidates = [
+            item.model_copy(
+                update={"record_status": RecordStatus.VALID, "validation_errors": []}
+            )
+            if item.record_status == RecordStatus.REVIEW else item
+            for item in candidates
         ]
         batches = list(_chunks(candidates, self.options.batch_size))
         with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
@@ -849,9 +856,15 @@ class BulkRunner:
                     f"missing={sorted(expected - set(raw))}, "
                     f"unknown={sorted(set(raw) - expected)}"
                 )
-            judgments = {
-                key: JudgmentPayload.model_validate(value) for key, value in raw.items()
-            }
+            judgments: dict[str, JudgmentPayload] = {}
+            invalid: dict[str, Exception] = {}
+            for key, value in raw.items():
+                try:
+                    judgments[key] = JudgmentPayload.model_validate(
+                        _normalize_judgment(value)
+                    )
+                except Exception as exc:
+                    invalid[key] = exc
         except Exception as exc:
             for candidate in candidates:
                 self._quarantine_bulk_candidate(candidate, response_path, exc)
@@ -870,8 +883,14 @@ class BulkRunner:
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
             return {"qualified": 0, "rejected": 0, "reviews": len(candidates)}
-        qualified = rejected = 0
+        qualified = rejected = reviews = 0
         for candidate in candidates:
+            if candidate.candidate_id in invalid:
+                self._quarantine_bulk_candidate(
+                    candidate, response_path, invalid[candidate.candidate_id]
+                )
+                reviews += 1
+                continue
             judgment = judgments[candidate.candidate_id]
             metadata = {**candidate.metadata, "bulk_qualified": True}
             if not judgment.qualified:
@@ -885,6 +904,11 @@ class BulkRunner:
             self._save_bulk_event(candidate, judgment)
             self.state.save_candidate(candidate.model_copy(update={"metadata": metadata}))
             qualified += 1
+        attempt_status = "review" if invalid else "completed"
+        attempt_error = {
+            "type": "PartialValidationError",
+            "message": f"{len(invalid)} candidate judgments were invalid",
+        } if invalid else {}
         self.state.record_provider_attempt(
             attempt_id=attempt_id,
             run_id=self.options.run_id,
@@ -892,14 +916,15 @@ class BulkRunner:
             provider="model",
             target_type="discovery_candidate_batch",
             target_id=batch_id,
-            status="completed",
+            status=attempt_status,
             token_usage=usage,
             request_artifact_path=request["path"],
             response_artifact_path=response_path,
+            error=attempt_error,
             started_at=started,
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
-        return {"qualified": qualified, "rejected": rejected, "reviews": 0}
+        return {"qualified": qualified, "rejected": rejected, "reviews": reviews}
 
     def _save_bulk_event(
         self, candidate: DiscoveryCandidate, payload: JudgmentPayload
@@ -1731,6 +1756,18 @@ def _candidate_excerpt(candidate: DiscoveryCandidate, limit: int) -> str:
     raw = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", raw)
     value = html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw))
     return re.sub(r"\s+", " ", value).strip()[:limit]
+
+
+def _normalize_judgment(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    raw_date = normalized.get("date_posted")
+    if isinstance(raw_date, str) and raw_date.strip():
+        parsed = parse_datetime(raw_date)
+        if parsed:
+            normalized["date_posted"] = parsed.date().isoformat()
+    return normalized
 
 
 def _chunks(items: list, size: int) -> Iterable[list]:

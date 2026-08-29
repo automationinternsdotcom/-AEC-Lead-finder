@@ -368,6 +368,78 @@ def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
 
 
+def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_path):
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        first, second = (row["candidate_id"] for row in rows)
+        return json.dumps(
+            {
+                first: {
+                    "qualified": True,
+                    "business_name": "Acme Warehouse",
+                    "event": "Opened a warehouse",
+                    "date_posted": "2026-08-01T08:30:00+00:00",
+                    "location": "Phoenix, Arizona",
+                    "summary": "A warehouse opened.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "property_type": "industrial",
+                    "service_angle": "Support the operating warehouse.",
+                    "confidence": "high",
+                },
+                second: {
+                    "qualified": True,
+                    "business_name": "Broken Result",
+                    "event": "Opened a site",
+                    "state": "Arizona",
+                    "priority": "high",
+                },
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=2),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    for index in range(2):
+        url = f"https://example.com/story-{index}"
+        runner.state.save_candidate(
+            DiscoveryCandidate(
+                candidate_id=f"candidate-isolated-{index}",
+                run_id="bulk-run",
+                provider="archive",
+                discovered_url=url,
+                resolved_url=url,
+                canonical_url=url,
+                title=f"Phoenix warehouse {index}",
+                source_id="source-1",
+                source_name="Example",
+                source_domain="example.com",
+                published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                metadata={"selected_for_qualification": True},
+            )
+        )
+
+    counters = runner._qualify()
+
+    assert counters["qualified"] == 1
+    assert counters["reviews"] == 1
+    event = runner.state.events_for_run("bulk-run")[0]
+    assert event.date_posted.isoformat() == "2026-08-01"
+    statuses = {
+        item.candidate_id: item.record_status.value
+        for item in runner.state.candidates_for_run("bulk-run")
+    }
+    assert statuses == {
+        "candidate-isolated-0": "valid",
+        "candidate-isolated-1": "review",
+    }
+
+
 def test_why_repair_cannot_bypass_anchor_event_evidence(tmp_path):
     runner = BulkRunner(
         options(tmp_path),
