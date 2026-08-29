@@ -34,6 +34,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--model", default="grok-4.3")
     value.add_argument("--run-id", default="")
     value.add_argument("--resume", action="store_true")
+    value.add_argument(
+        "--reuse-discovery-corpus",
+        action="store_true",
+        help="resume from already persisted discovery pages without crawling sites again",
+    )
+    value.add_argument("--batch-size", type=int, default=12)
     value.add_argument("--seed-db", type=Path)
     value.add_argument("--seed-run-id", default="")
     value.add_argument(
@@ -65,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         seed_db=args.seed_db.resolve() if args.seed_db else None,
         seed_run_id=args.seed_run_id,
         search_fallback=not args.no_search_fallback,
+        reuse_discovery_corpus=args.reuse_discovery_corpus,
+        batch_size=max(1, min(args.batch_size, 25)),
     )
     try:
         result = BulkRunner(options).run()

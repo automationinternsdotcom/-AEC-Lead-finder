@@ -43,8 +43,16 @@ daily V2 run, monitoring, email delivery, or ordinary contact enrichment.
    Add `--seed-db PATH --seed-run-id ID` only when a completed prior V2 run should be
    reused. When that seed supplies the final day, also pass `--archive-until` for the
    day before it so the expensive daily work is not repeated. Add `--run-id ID
-   --resume` after interruption.
-5. Verify the terminal manifest, `coverage.csv`, `leads.csv`, and `companies.csv`.
+   --resume` after interruption. Add `--reuse-discovery-corpus` only when an audited,
+   interrupted run already contains saved article pages and the user wants those pages
+   screened without another crawl. Resume rejects changed dates, sources, seed, model,
+   batch contract, or recovery mode after those values have been recorded.
+5. Discovery is followed by offline Arizona/AEC screening, person-free exact-ID batch
+   qualification from saved evidence, bounded fuzzy dedup/scoring, and company work.
+   Web search is reserved for scoped source fallback and company sourcing.
+6. Verify the terminal manifest and the files under
+   `<output>/<until>/runs/<run_id>/final/`, including `coverage.csv`, `leads.csv`, and
+   `companies.csv`.
    Report lead/company counts, uncovered sources, review count, model usage, and paths.
 
 The skill produces all three labeled why-line variants for later testing; it does not

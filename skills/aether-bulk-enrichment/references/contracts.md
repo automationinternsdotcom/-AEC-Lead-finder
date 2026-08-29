@@ -7,8 +7,21 @@
 - Safety limits are 100 sitemap documents and 10,000 URL entries per source. A limit
   hit is an incomplete-coverage review, not a successful zero-result source.
 - Sitemap dates prioritize work; final acceptance uses page publication metadata.
+- A regional path on a national domain must not expand into a whole-domain crawl.
+  Out-of-scope sitemap URLs are skipped and the source is handed to bounded search
+  fallback. Canonical pages already saved by another curated source are reused globally.
 - Run one bounded Grok web-search fallback only for a source with no dated archive
   candidates or incomplete sitemap coverage.
+
+## Screening and model batches
+
+- Saved pages receive conservative offline Arizona/AEC screening before model spend.
+- Qualification uses saved evidence, excludes people, performs no web search, and
+  requires exact candidate-ID coverage in batches of at most 25.
+- Fuzzy dedup and contact-independent scoring use deterministic batches of at most 40
+  lead events. Invalid or incomplete batches enter review without dropping records.
+- Resume configuration, curated-source hash, seed range, and run-scoped artifact paths
+  are integrity boundaries.
 
 ## Seed runs
 
@@ -31,10 +44,11 @@
   - `c`: a specific blend of the anchor event and operating context.
 - Each nonblank line is one sourced sentence of 25–45 words with no en/em dash.
   Unsupported lines are blank and enter review. Sourced format failures receive one
-  zero-search repair batch with exact ID coverage.
+  bounded zero-search repair batches with exact ID coverage.
 
 ## Outputs
 
+- All exports are isolated under `<output>/<until>/runs/<run_id>/final/`.
 - `leads.csv`: one row per final lead event, including `company_id`, score, evidence,
   and projected A/B/C why lines.
 - `companies.csv`: one row per final company with domain, locations, event IDs/count,

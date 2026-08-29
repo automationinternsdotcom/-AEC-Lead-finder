@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
+import html
 import json
 import re
 import threading
@@ -23,12 +24,13 @@ from v2.contracts import (
     DiscoveryCandidate,
     Evidence,
     LeadEvent,
+    LeadScore,
     Organization,
     RecordStatus,
     ReviewItem,
     StageStatus,
 )
-from v2.dedup import FuzzyEventDeduper, dedupe_candidates_exact
+from v2.dedup import FUZZY_PROMPT, dedupe_candidates_exact, validate_fuzzy_groups
 from v2.discovery import (
     CuratedSiteAdapter,
     CuratedSource,
@@ -40,9 +42,17 @@ from v2.discovery import (
     same_registrable_domain,
 )
 from v2.http import FetchResponse, HttpFetcher
-from v2.ids import candidate_id, canonicalize_url, normalize_text, stable_hash, stable_uuid
-from v2.qualification import QualificationService
-from v2.scoring import ScoringService
+from v2.ids import (
+    candidate_id,
+    canonicalize_url,
+    event_id,
+    normalize_text,
+    organization_id,
+    stable_hash,
+    stable_uuid,
+)
+from v2.qualification import JudgmentPayload
+from v2.scoring import parse_scores
 from v2.state import SCHEMA_VERSION, StateStore
 
 
@@ -57,6 +67,19 @@ CONVENTIONAL_SITEMAPS = (
     "/wp-sitemap.xml",
 )
 WHY_KEYS = ("a", "b", "c")
+ARIZONA_TERMS = (
+    "arizona", "phoenix", "tucson", "mesa", "scottsdale", "tempe",
+    "chandler", "gilbert", "glendale", "peoria", "surprise", "goodyear",
+    "avondale", "flagstaff", "prescott", "yuma", "buckeye", "queen creek",
+    "maricopa", "pinal county", "maricopa county",
+)
+AEC_EVENT_TERMS = (
+    "open", "lease", "occup", "construct", "develop", "redevelop",
+    "acqui", "sold", "sale", "tenant", "facility", "warehouse",
+    "industrial", "retail", "multifamily", "hotel", "restaurant", "office",
+    "medical", "campus", "data center", "distribution", "manufactur",
+    "groundbreak", "expan", "renovat", "property", "real estate",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +96,8 @@ class BulkOptions:
     seed_db: Path | None = None
     seed_run_id: str = ""
     search_fallback: bool = True
+    reuse_discovery_corpus: bool = False
+    batch_size: int = 12
 
 
 class SourceCoverage(BaseModel):
@@ -154,8 +179,27 @@ REPAIR_PROMPT = """Rewrite each supplied sourced why line to exactly 25-45 words
 Items: {items}"""
 
 
+BULK_QUALIFICATION_PROMPT = """Qualify this bounded batch using only the supplied saved article evidence. Do not search the web and do not identify people. For every exact candidate_id, decide whether the article reports a specific Arizona commercial-property event that creates a facilities-services opportunity.
+
+Return strict JSON only as one object mapping every exact candidate_id to an object with keys: qualified, business_name, event, date_posted, location, summary, state, priority, property_type, service_angle, filter_reason, confidence. Include every submitted ID exactly once and invent no IDs. A rejection requires a specific filter_reason. A qualification requires state Arizona, priority high or medium, and nonempty business_name, event, and location.
+
+Candidates:
+{candidates}"""
+
+
+BULK_SCORE_PROMPT = """Score each Arizona commercial-property lead event from 0 to 100 for Aether Facility Services outreach priority. Consider event fit, commercial property fit, timing, geography, and facilities-service need. Do not consider contact availability.
+
+Return strict JSON only as one object mapping every exact lead_event_id to one integer 0-100. Include every submitted ID exactly once and invent no IDs.
+
+Events:
+{events}"""
+
+
 class BulkRunner:
-    STAGES = ("discover", "qualify", "seed", "dedup", "score", "companies", "export")
+    STAGES = (
+        "discover", "screen", "qualify", "seed", "dedup", "score",
+        "companies", "export",
+    )
 
     def __init__(
         self,
@@ -180,11 +224,13 @@ class BulkRunner:
         self.fetch = fetch or HttpFetcher()
         self.model_call = model_call or _default_model_call
         self.sources = load_curated_sources(options.sources_csv)
+        self.sources_sha256 = hashlib.sha256(options.sources_csv.read_bytes()).hexdigest()
         self.artifacts = ArtifactStore(
             options.output_dir, options.until, options.run_id, self.state
         )
         configuration = {
             "kind": "explicit_bulk_enrichment",
+            "workflow_version": 2,
             "schema_version": SCHEMA_VERSION,
             "since": options.since,
             "until": options.until,
@@ -196,7 +242,11 @@ class BulkRunner:
             "email_delivery": False,
             "seed_db": str(options.seed_db or ""),
             "seed_run_id": options.seed_run_id,
+            "sources_sha256": self.sources_sha256,
+            "reuse_discovery_corpus": options.reuse_discovery_corpus,
+            "batch_size": options.batch_size,
         }
+        self._validate_resume(configuration)
         self.state.create_run(
             options.run_id,
             options.until,
@@ -220,6 +270,38 @@ class BulkRunner:
             max(1, options.workers * 2)
         )
         self._persisted_archive_by_source: dict[str, list[DiscoveryCandidate]] = {}
+        self._persisted_archive_by_url: dict[str, DiscoveryCandidate] = {}
+
+    def _validate_resume(self, configuration: dict) -> None:
+        with self.state.connect() as conn:
+            row = conn.execute(
+                "SELECT stamp, since_date, configuration_json FROM v2_runs WHERE run_id=?",
+                (self.options.run_id,),
+            ).fetchone()
+        if not row:
+            if self.options.resume:
+                raise ValueError("--resume run ID does not exist in this output database")
+            return
+        if not self.options.resume:
+            raise ValueError("run ID already exists; use --resume")
+        if row["stamp"] != self.options.until or row["since_date"] != self.options.since:
+            raise ValueError("resume date range does not match the existing run")
+        prior = json.loads(row["configuration_json"] or "{}")
+        immutable = (
+            "kind", "model", "archive_until", "seed_db", "seed_run_id",
+            "apollo", "email_delivery", "search_fallback", "workflow_version",
+            "reuse_discovery_corpus", "batch_size",
+        )
+        mismatched = [
+            key for key in immutable
+            if key in prior and prior.get(key) != configuration.get(key)
+        ]
+        if prior.get("sources_sha256") and prior["sources_sha256"] != self.sources_sha256:
+            mismatched.append("sources_sha256")
+        if mismatched:
+            raise ValueError(
+                "resume configuration mismatch: " + ", ".join(sorted(set(mismatched)))
+            )
 
     def run(self) -> dict:
         self.manifest.status = StageStatus.RUNNING
@@ -227,6 +309,7 @@ class BulkRunner:
         self.artifacts.write_manifest(self.manifest)
         try:
             self._stage("discover", self._discover)
+            self._stage("screen", self._screen)
             self._stage("qualify", self._qualify)
             self._stage("seed", self._seed)
             self._stage("dedup", self._dedup)
@@ -247,7 +330,7 @@ class BulkRunner:
             "manifest": str(self.artifacts.manifest_path),
             "leads": len(self.state.active_events_for_run(self.options.run_id)),
             "companies": len(self._load_profiles()),
-            "output": str(self.options.output_dir),
+            "output": str(self.artifacts.final_dir),
         }
 
     def _stage(self, name: str, function: Callable[[], dict]) -> None:
@@ -292,6 +375,35 @@ class BulkRunner:
                 source.state,
                 source.enabled,
             )
+        if self.options.reuse_discovery_corpus:
+            persisted = [
+                item
+                for item in self.state.candidates_for_run(self.options.run_id)
+                if item.record_status == RecordStatus.VALID
+            ]
+            if not persisted:
+                raise ValueError("saved-corpus reuse requested but this run has no valid candidates")
+            counts: dict[str, int] = defaultdict(int)
+            for candidate in persisted:
+                counts[candidate.source_id] += 1
+            self.coverage = [
+                SourceCoverage(
+                    source_id=source.source_id,
+                    source_name=source.name,
+                    source_url=source.url,
+                    dated_candidates=counts.get(source.source_id, 0),
+                    incomplete=True,
+                    errors=["reconstructed_from_interrupted_discovery_corpus"],
+                )
+                for source in self.sources
+            ]
+            self._write_coverage()
+            return {
+                "sources": len(self.sources),
+                "corpus_reused": len(persisted),
+                "distinct_urls": len({item.canonical_url for item in persisted}),
+                "incomplete_sources": len(self.sources),
+            }
         current = CuratedSiteAdapter(
             self.sources,
             self.state,
@@ -314,6 +426,9 @@ class BulkRunner:
         for candidate in persisted_archive:
             persisted_by_source[candidate.source_id].append(candidate)
         self._persisted_archive_by_source = dict(persisted_by_source)
+        self._persisted_archive_by_url = {
+            item.canonical_url: item for item in persisted_archive
+        }
         with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
             archive_results = list(pool.map(self._discover_source_archive, self.sources))
         archive_candidates = [item for _, rows in archive_results for item in rows]
@@ -420,6 +535,11 @@ class BulkRunner:
                     continue
                 if not same_registrable_domain(page_url, source.url):
                     continue
+                if not _archive_url_in_scope(source, page_url):
+                    coverage.incomplete = True
+                    if "regional_scope_requires_search_fallback" not in coverage.errors:
+                        coverage.errors.append("regional_scope_requires_search_fallback")
+                    continue
                 title = _descendant_text(node, "title")
                 raw_date = _descendant_text(node, "publication_date") or _child_text(node, "lastmod")
                 hint = parse_datetime(raw_date) if raw_date else None
@@ -438,7 +558,14 @@ class BulkRunner:
             coverage.errors.append("sitemap_document_cap_reached")
         coverage.sitemap_urls = len(entries)
         candidates = list(self._persisted_archive_by_source.get(source.source_id, []))
-        existing_urls = {item.canonical_url for item in candidates}
+        existing_urls = set(self._persisted_archive_by_url)
+        reused = [
+            self._persisted_archive_by_url[url]
+            for url in entries
+            if url in self._persisted_archive_by_url
+            and self._persisted_archive_by_url[url] not in candidates
+        ]
+        candidates.extend(reused)
         pending = [
             (page_url, sitemap_title)
             for page_url, (sitemap_title, _) in entries.items()
@@ -497,6 +624,42 @@ class BulkRunner:
                 candidates.append(candidate)
         coverage.dated_candidates = len(candidates)
         return coverage, candidates
+
+    def _screen(self) -> dict:
+        candidates = [
+            item
+            for item in self.state.candidates_for_run(self.options.run_id)
+            if item.record_status == RecordStatus.VALID
+            and item.provider not in {"seed"}
+        ]
+        selected = dedupe_candidates_exact(candidates)
+        kept = rejected = ambiguous = 0
+        for candidate in selected:
+            decision = _offline_screen(candidate)
+            metadata = {
+                **candidate.metadata,
+                "bulk_screen": decision,
+                "selected_for_qualification": decision != "reject",
+            }
+            status = candidate.record_status
+            if decision == "reject":
+                status = RecordStatus.REJECTED
+                rejected += 1
+            elif decision == "ambiguous":
+                ambiguous += 1
+                kept += 1
+            else:
+                kept += 1
+            self.state.save_candidate(
+                candidate.model_copy(update={"metadata": metadata, "record_status": status})
+            )
+        return {
+            "submitted": len(candidates),
+            "distinct_urls": len(selected),
+            "selected": kept,
+            "ambiguous": ambiguous,
+            "rejected": rejected,
+        }
 
     def _sitemap_roots(
         self, source: CuratedSource, coverage: SourceCoverage
@@ -624,25 +787,206 @@ class BulkRunner:
             for item in self.state.candidates_for_run(self.options.run_id)
             if item.metadata.get("selected_for_qualification")
             and item.record_status == RecordStatus.VALID
+            and not item.metadata.get("bulk_qualified")
         ]
-        result = QualificationService(
-            self.state,
-            self.artifacts,
-            self.options.model,
-            call_model=self.model_call,
-            workers=self.options.workers,
-        ).qualify(candidates)
+        batches = list(_chunks(candidates, self.options.batch_size))
+        with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
+            outcomes = list(pool.map(self._qualify_batch, batches))
         return {
             "submitted": len(candidates),
-            "qualified": len(result.events),
-            "rejected": len(result.rejected_candidate_ids),
-            "reviews": len(result.reviews),
+            "batches": len(batches),
+            "qualified": sum(item["qualified"] for item in outcomes),
+            "rejected": sum(item["rejected"] for item in outcomes),
+            "reviews": sum(item["reviews"] for item in outcomes),
         }
+
+    def _qualify_batch(self, candidates: list[DiscoveryCandidate]) -> dict[str, int]:
+        batch_id = stable_hash(*(item.candidate_id for item in candidates))[:20]
+        payload = [
+            {
+                "candidate_id": item.candidate_id,
+                "url": item.canonical_url,
+                "title": item.title,
+                "published_at": str(item.published_at or ""),
+                "saved_article_excerpt": _candidate_excerpt(item, 2_500),
+            }
+            for item in candidates
+        ]
+        prompt = BULK_QUALIFICATION_PROMPT.format(
+            candidates=json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        )
+        attempt_id = stable_uuid(
+            "attempt", self.options.run_id, "bulk-qualify", batch_id
+        )
+        request = self.artifacts.write_raw(
+            "qualify", f"{attempt_id}-request.json",
+            {"model": self.options.model, "prompt": prompt},
+        )
+        started = datetime.now(timezone.utc).isoformat()
+        response_path = ""
+        try:
+            text, usage = self.model_call(self.options.model, prompt, [])
+            response = self.artifacts.write_raw_text(
+                "qualify", f"{attempt_id}-response.txt", text
+            )
+            response_path = response["path"]
+            raw = _parse_object(text)
+            expected = {item.candidate_id for item in candidates}
+            if set(raw) != expected:
+                raise ValueError(
+                    "qualification IDs must match exactly; "
+                    f"missing={sorted(expected - set(raw))}, "
+                    f"unknown={sorted(set(raw) - expected)}"
+                )
+            judgments = {
+                key: JudgmentPayload.model_validate(value) for key, value in raw.items()
+            }
+        except Exception as exc:
+            for candidate in candidates:
+                self._quarantine_bulk_candidate(candidate, response_path, exc)
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id,
+                run_id=self.options.run_id,
+                stage="qualify",
+                provider="model",
+                target_type="discovery_candidate_batch",
+                target_id=batch_id,
+                status="review",
+                request_artifact_path=request["path"],
+                response_artifact_path=response_path,
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return {"qualified": 0, "rejected": 0, "reviews": len(candidates)}
+        qualified = rejected = 0
+        for candidate in candidates:
+            judgment = judgments[candidate.candidate_id]
+            metadata = {**candidate.metadata, "bulk_qualified": True}
+            if not judgment.qualified:
+                self.state.save_candidate(
+                    candidate.model_copy(
+                        update={"metadata": metadata, "record_status": RecordStatus.REJECTED}
+                    )
+                )
+                rejected += 1
+                continue
+            self._save_bulk_event(candidate, judgment)
+            self.state.save_candidate(candidate.model_copy(update={"metadata": metadata}))
+            qualified += 1
+        self.state.record_provider_attempt(
+            attempt_id=attempt_id,
+            run_id=self.options.run_id,
+            stage="qualify",
+            provider="model",
+            target_type="discovery_candidate_batch",
+            target_id=batch_id,
+            status="completed",
+            token_usage=usage,
+            request_artifact_path=request["path"],
+            response_artifact_path=response_path,
+            started_at=started,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return {"qualified": qualified, "rejected": rejected, "reviews": 0}
+
+    def _save_bulk_event(
+        self, candidate: DiscoveryCandidate, payload: JudgmentPayload
+    ) -> None:
+        org_id = organization_id(payload.business_name, "", payload.location)
+        support_ids = candidate.metadata.get("exact_duplicate_candidate_ids") or [
+            candidate.candidate_id
+        ]
+        support_candidates = {
+            item.candidate_id: item for item in self.state.candidates_by_ids(support_ids)
+        }
+        evidence = [
+            Evidence(
+                url=support_candidates[item].canonical_url,
+                supports="Saved source article for the qualified property event.",
+                provider=support_candidates[item].provider,
+            )
+            for item in support_ids if item in support_candidates
+        ] or [
+            Evidence(
+                url=candidate.canonical_url,
+                supports="Saved source article for the qualified property event.",
+                provider=candidate.provider,
+            )
+        ]
+        self.state.save_organization(
+            Organization(
+                organization_id=org_id,
+                canonical_name=payload.business_name.strip(),
+                location=payload.location.strip(),
+                evidence=evidence,
+            )
+        )
+        lead_id = event_id(
+            org_id, payload.event, payload.location,
+            payload.date_posted or (
+                candidate.published_at.date() if candidate.published_at else ""
+            ),
+        )
+        self.state.save_lead_event(
+            LeadEvent(
+                lead_event_id=lead_id,
+                run_id=self.options.run_id,
+                organization_id=org_id,
+                primary_candidate_id=candidate.candidate_id,
+                supporting_candidate_ids=list(support_ids),
+                event=payload.event.strip(),
+                location=payload.location.strip(),
+                date_posted=payload.date_posted or (
+                    candidate.published_at.date() if candidate.published_at else None
+                ),
+                summary=payload.summary.strip(),
+                priority=payload.priority,
+                property_type=payload.property_type.strip() or "other",
+                service_angle=payload.service_angle.strip(),
+                filter_reason=payload.filter_reason.strip(),
+                confidence=payload.confidence,
+                evidence=evidence,
+            )
+        )
+
+    def _quarantine_bulk_candidate(
+        self, candidate: DiscoveryCandidate, response_path: str, exc: Exception
+    ) -> None:
+        error = f"{type(exc).__name__}:{exc}"
+        self.state.save_candidate(
+            candidate.model_copy(
+                update={
+                    "record_status": RecordStatus.REVIEW,
+                    "validation_errors": [*candidate.validation_errors, error],
+                }
+            )
+        )
+        self.state.add_review(
+            ReviewItem(
+                review_id=stable_uuid(
+                    "review", self.options.run_id, "bulk-qualify", candidate.candidate_id
+                ),
+                run_id=self.options.run_id,
+                stage="qualify",
+                record_type="discovery_candidate",
+                record_id=candidate.candidate_id,
+                reason_code="bulk_model_contract_invalid",
+                validation_errors=[error],
+                raw_artifact_path=response_path,
+            )
+        )
 
     def _seed(self) -> dict:
         if not self.options.seed_db:
             return {"events": 0, "organizations": 0, "candidates": 0}
-        _verify_seed_manifest(self.options.seed_db, self.options.seed_run_id)
+        _verify_seed_manifest(
+            self.options.seed_db,
+            self.options.seed_run_id,
+            overall_since=self.since,
+            overall_until=self.until,
+            archive_until=self.archive_until,
+        )
         seed = StateStore(self.options.seed_db)
         events = [
             item
@@ -683,23 +1027,223 @@ class BulkRunner:
 
     def _dedup(self) -> dict:
         events = self.state.active_events_for_run(self.options.run_id)
-        kept, reviews = FuzzyEventDeduper(
-            self.state,
-            self.artifacts,
-            self.options.model,
-            call_model=self.model_call,
-        ).dedupe(events)
-        return {"submitted": len(events), "events": len(kept), "reviews": len(reviews)}
+        organizations = {
+            item.organization_id: item for item in self.state.organizations()
+        }
+        buckets: dict[str, list[LeadEvent]] = defaultdict(list)
+        for event in events:
+            city = normalize_text(event.location.split(",", 1)[0]) or "unknown"
+            buckets[city].append(event)
+        batches: list[list[LeadEvent]] = []
+        for rows in buckets.values():
+            ordered = sorted(
+                rows,
+                key=lambda item: (
+                    normalize_text(
+                        organizations.get(item.organization_id).canonical_name
+                        if organizations.get(item.organization_id)
+                        else item.organization_id
+                    ),
+                    normalize_text(item.event),
+                    item.lead_event_id,
+                ),
+            )
+            batches.extend(_chunks(ordered, 40))
+        outcomes = [
+            self._dedup_batch(batch, organizations)
+            for batch in batches if len(batch) > 1
+        ]
+        return {
+            "submitted": len(events),
+            "batches": len(outcomes),
+            "events": len(self.state.active_events_for_run(self.options.run_id)),
+            "reviews": sum(item["reviews"] for item in outcomes),
+        }
+
+    def _dedup_batch(
+        self,
+        events: list[LeadEvent],
+        organizations: dict[str, Organization],
+    ) -> dict[str, int]:
+        batch_id = stable_hash(*(item.lead_event_id for item in events))[:20]
+        inputs = [
+            {
+                "lead_event_id": event.lead_event_id,
+                "organization": (
+                    organizations[event.organization_id].canonical_name
+                    if event.organization_id in organizations else event.organization_id
+                ),
+                "event": event.event,
+                "location": event.location,
+                "date_posted": str(event.date_posted or ""),
+            }
+            for event in events
+        ]
+        prompt = FUZZY_PROMPT.format(events=json.dumps(inputs, sort_keys=True))
+        attempt_id = stable_uuid("attempt", self.options.run_id, "bulk-dedup", batch_id)
+        request = self.artifacts.write_raw(
+            "dedup", f"{attempt_id}-request.json",
+            {"model": self.options.model, "prompt": prompt},
+        )
+        started = datetime.now(timezone.utc).isoformat()
+        response_path = ""
+        try:
+            text, usage = self.model_call(self.options.model, prompt, [])
+            response = self.artifacts.write_raw_text(
+                "dedup", f"{attempt_id}-response.txt", text
+            )
+            response_path = response["path"]
+            match = re.search(r"\[.*\]", re.sub(r"<<ccr:[^>]+>>", "", text), re.DOTALL)
+            if not match:
+                raise ValueError("dedup response did not contain a JSON list")
+            groups = validate_fuzzy_groups(
+                [item.lead_event_id for item in events], json.loads(match.group())
+            )
+        except Exception as exc:
+            for event in events:
+                self.state.add_review(
+                    ReviewItem(
+                        review_id=stable_uuid(
+                            "review", self.options.run_id, "bulk-dedup", event.lead_event_id
+                        ),
+                        run_id=self.options.run_id,
+                        stage="dedup",
+                        record_type="lead_event",
+                        record_id=event.lead_event_id,
+                        reason_code="bulk_fuzzy_dedup_contract_invalid",
+                        validation_errors=[f"{type(exc).__name__}:{exc}"],
+                    )
+                )
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id, run_id=self.options.run_id, stage="dedup",
+                provider="model", target_type="lead_event_batch", target_id=batch_id,
+                status="review", request_artifact_path=request["path"],
+                response_artifact_path=response_path,
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return {"events": len(events), "reviews": len(events)}
+        by_id = {item.lead_event_id: item for item in events}
+        for group in groups:
+            kept = by_id[group.kept_id]
+            members = [by_id[item] for item in group.member_ids]
+            merged = kept.model_copy(
+                update={
+                    "supporting_candidate_ids": list(dict.fromkeys(
+                        candidate_id_value
+                        for member in members
+                        for candidate_id_value in member.supporting_candidate_ids
+                    )),
+                    "evidence": list({
+                        (evidence.url, evidence.supports, evidence.provider): evidence
+                        for member in members for evidence in member.evidence
+                    }.values()),
+                }
+            )
+            self.state.save_lead_event(merged)
+            for member in members:
+                self.state.save_event_merge(
+                    self.options.run_id, member.lead_event_id, kept.lead_event_id
+                )
+        self.state.record_provider_attempt(
+            attempt_id=attempt_id, run_id=self.options.run_id, stage="dedup",
+            provider="model", target_type="lead_event_batch", target_id=batch_id,
+            status="completed", token_usage=usage,
+            request_artifact_path=request["path"], response_artifact_path=response_path,
+            started_at=started, completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return {"events": len(groups), "reviews": 0}
 
     def _score(self) -> dict:
         events = self.state.active_events_for_run(self.options.run_id)
-        scores, reviews = ScoringService(
-            self.state,
-            self.artifacts,
-            self.options.model,
-            call_model=self.model_call,
-        ).score(events, [])
-        return {"submitted": len(events), "scored": len(scores), "reviews": len(reviews)}
+        existing = {
+            item.lead_event_id for item in self.state.scores_for_run(self.options.run_id)
+        }
+        pending = [item for item in events if item.lead_event_id not in existing]
+        batches = list(_chunks(pending, 40))
+        outcomes = [self._score_batch(batch) for batch in batches]
+        return {
+            "submitted": len(events),
+            "pending": len(pending),
+            "batches": len(batches),
+            "scored": len(existing) + sum(item["scored"] for item in outcomes),
+            "reviews": sum(item["reviews"] for item in outcomes),
+        }
+
+    def _score_batch(self, events: list[LeadEvent]) -> dict[str, int]:
+        batch_id = stable_hash(*(item.lead_event_id for item in events))[:20]
+        inputs = [
+            {
+                "lead_event_id": item.lead_event_id,
+                "event": item.event,
+                "location": item.location,
+                "date_posted": str(item.date_posted or ""),
+                "summary": item.summary,
+                "priority": item.priority,
+                "property_type": item.property_type,
+                "service_angle": item.service_angle,
+            }
+            for item in events
+        ]
+        prompt = BULK_SCORE_PROMPT.format(events=json.dumps(inputs, sort_keys=True))
+        attempt_id = stable_uuid("attempt", self.options.run_id, "bulk-score", batch_id)
+        request = self.artifacts.write_raw(
+            "score", f"{attempt_id}-request.json",
+            {"model": self.options.model, "prompt": prompt},
+        )
+        started = datetime.now(timezone.utc).isoformat()
+        response_path = ""
+        try:
+            text, usage = self.model_call(self.options.model, prompt, [])
+            response = self.artifacts.write_raw_text(
+                "score", f"{attempt_id}-response.txt", text
+            )
+            response_path = response["path"]
+            parsed = parse_scores(text, {item.lead_event_id for item in events})
+        except Exception as exc:
+            for event in events:
+                self.state.add_review(
+                    ReviewItem(
+                        review_id=stable_uuid(
+                            "review", self.options.run_id, "bulk-score", event.lead_event_id
+                        ),
+                        run_id=self.options.run_id,
+                        stage="score",
+                        record_type="lead_event",
+                        record_id=event.lead_event_id,
+                        reason_code="bulk_score_contract_invalid",
+                        validation_errors=[f"{type(exc).__name__}:{exc}"],
+                    )
+                )
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id, run_id=self.options.run_id, stage="score",
+                provider="model", target_type="lead_event_batch", target_id=batch_id,
+                status="review", request_artifact_path=request["path"],
+                response_artifact_path=response_path,
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return {"scored": 0, "reviews": len(events)}
+        for event in events:
+            self.state.save_score(
+                LeadScore(
+                    run_id=self.options.run_id,
+                    lead_event_id=event.lead_event_id,
+                    score=parsed[event.lead_event_id],
+                    model=self.options.model,
+                    attempt_id=attempt_id,
+                )
+            )
+        self.state.record_provider_attempt(
+            attempt_id=attempt_id, run_id=self.options.run_id, stage="score",
+            provider="model", target_type="lead_event_batch", target_id=batch_id,
+            status="completed", token_usage=usage,
+            request_artifact_path=request["path"], response_artifact_path=response_path,
+            started_at=started, completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return {"scored": len(events), "reviews": 0}
 
     def _companies(self) -> dict:
         events = self.state.active_events_for_run(self.options.run_id)
@@ -712,7 +1256,7 @@ class BulkRunner:
         for event in events:
             org = organizations.get(event.organization_id)
             groups[normalize_text(org.canonical_name if org else event.organization_id)].append(event)
-        raw_dir = self.options.output_dir / "company_raw"
+        raw_dir = self.artifacts.raw_dir / "company-profiles"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
         def enrich(group_item: tuple[str, list[LeadEvent]]) -> CompanyProfile:
@@ -798,10 +1342,17 @@ class BulkRunner:
                 "companies", f"{attempt_id}-response.txt", text
             )
             payload = _parse_object(text)
+            event_evidence_urls = list(dict.fromkeys(
+                item.url for event in events for item in event.evidence
+            ))
             variants = {
                 key: _validate_variant((payload.get("variants") or {}).get(key) or {})
                 for key in WHY_KEYS
             }
+            for key in ("a", "c"):
+                variants[key] = _require_event_evidence(
+                    variants[key], event_evidence_urls
+                )
             canonical_name = str(payload.get("canonical_name") or names[0]).strip()
             domain = _domain(str(payload.get("domain") or ""))
             profile = CompanyProfile(
@@ -815,7 +1366,7 @@ class BulkRunner:
                 lead_event_ids=sorted(event.lead_event_id for event in events),
                 anchor_lead_event_id=anchor.lead_event_id,
                 variants=variants,
-                evidence_urls=list(dict.fromkeys([item.url for event in events for item in event.evidence])),
+                evidence_urls=event_evidence_urls,
                 record_status="valid" if all(item.status == "valid" for item in variants.values()) else "review",
                 raw_artifact_path=response["path"],
             )
@@ -869,49 +1420,51 @@ class BulkRunner:
                     repair_items[f"{profile.profile_key}:{key}"] = variant.text
         if not repair_items:
             return profiles
-        prompt = REPAIR_PROMPT.format(items=json.dumps(repair_items, sort_keys=True))
-        attempt_id = stable_uuid("attempt", self.options.run_id, "company-why-repair")
-        request = self.artifacts.write_raw(
-            "companies", f"{attempt_id}-request.json", {"model": self.options.model, "prompt": prompt}
-        )
-        started = datetime.now(timezone.utc).isoformat()
-        try:
-            text, usage = self.model_call(self.options.model, prompt, [])
-            response = self.artifacts.write_raw_text(
-                "companies", f"{attempt_id}-response.txt", text
+        payload: dict[str, str] = {}
+        for batch in _chunks(list(repair_items.items()), 25):
+            batch_items = dict(batch)
+            batch_id = stable_hash(*batch_items)[:20]
+            prompt = REPAIR_PROMPT.format(items=json.dumps(batch_items, sort_keys=True))
+            attempt_id = stable_uuid(
+                "attempt", self.options.run_id, "company-why-repair", batch_id
             )
-            payload = _parse_object(text)
-            if set(payload) != set(repair_items):
-                raise ValueError("why repair IDs must match exactly")
+            request = self.artifacts.write_raw(
+                "companies", f"{attempt_id}-request.json",
+                {"model": self.options.model, "prompt": prompt},
+            )
+            started = datetime.now(timezone.utc).isoformat()
+            response_path = ""
+            try:
+                text, usage = self.model_call(self.options.model, prompt, [])
+                response = self.artifacts.write_raw_text(
+                    "companies", f"{attempt_id}-response.txt", text
+                )
+                response_path = response["path"]
+                batch_payload = _parse_object(text)
+                if set(batch_payload) != set(batch_items):
+                    raise ValueError("why repair IDs must match exactly")
+                payload.update({key: str(value) for key, value in batch_payload.items()})
+                status = "completed"
+                error = {}
+            except Exception as exc:
+                usage = {}
+                status = "review"
+                error = {"type": type(exc).__name__, "message": str(exc)}
             self.state.record_provider_attempt(
                 attempt_id=attempt_id,
                 run_id=self.options.run_id,
                 stage="companies",
                 provider="model",
                 target_type="why_repair_batch",
-                target_id=self.options.run_id,
-                status="completed",
+                target_id=batch_id,
+                status=status,
                 token_usage=usage,
                 request_artifact_path=request["path"],
-                response_artifact_path=response["path"],
+                response_artifact_path=response_path,
+                error=error,
                 started_at=started,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
-        except Exception as exc:
-            self.state.record_provider_attempt(
-                attempt_id=attempt_id,
-                run_id=self.options.run_id,
-                stage="companies",
-                provider="model",
-                target_type="why_repair_batch",
-                target_id=self.options.run_id,
-                status="review",
-                request_artifact_path=request["path"],
-                error={"type": type(exc).__name__, "message": str(exc)},
-                started_at=started,
-                completed_at=datetime.now(timezone.utc).isoformat(),
-            )
-            return profiles
         updated = []
         for profile in profiles:
             variants = dict(profile.variants)
@@ -1000,21 +1553,22 @@ class BulkRunner:
         ]
         company_rows = [_company_row(item, self.options.run_id) for item in profiles]
         company_rows.sort(key=lambda item: (-int(item["lead_event_count"]), item["business_name"]))
-        _write_csv(self.options.output_dir / "leads.csv", lead_fields, lead_rows)
-        _write_csv(self.options.output_dir / "companies.csv", company_fields, company_rows)
-        _write_jsonl(self.options.output_dir / "lead_events.jsonl", events)
-        _write_jsonl(self.options.output_dir / "company_profiles.jsonl", profiles)
+        final_dir = self.artifacts.final_dir
+        _write_csv(final_dir / "leads.csv", lead_fields, lead_rows)
+        _write_csv(final_dir / "companies.csv", company_fields, company_rows)
+        _write_jsonl(final_dir / "lead_events.jsonl", events)
+        _write_jsonl(final_dir / "company_profiles.jsonl", profiles)
         _write_jsonl(
-            self.options.output_dir / "reviews.jsonl",
+            final_dir / "reviews.jsonl",
             self.state.reviews_for_run(self.options.run_id),
         )
         for path, kind in (
-            (self.options.output_dir / "leads.csv", "csv"),
-            (self.options.output_dir / "companies.csv", "csv"),
-            (self.options.output_dir / "lead_events.jsonl", "jsonl"),
-            (self.options.output_dir / "company_profiles.jsonl", "jsonl"),
-            (self.options.output_dir / "reviews.jsonl", "jsonl"),
-            (self.options.output_dir / "coverage.csv", "csv"),
+            (final_dir / "leads.csv", "csv"),
+            (final_dir / "companies.csv", "csv"),
+            (final_dir / "lead_events.jsonl", "jsonl"),
+            (final_dir / "company_profiles.jsonl", "jsonl"),
+            (final_dir / "reviews.jsonl", "jsonl"),
+            (final_dir / "coverage.csv", "csv"),
         ):
             self.artifacts.record_existing("export", kind, path)
         return {
@@ -1030,19 +1584,19 @@ class BulkRunner:
             value = item.model_dump(mode="json")
             value["errors"] = " | ".join(item.errors)
             rows.append(value)
-        _write_csv(self.options.output_dir / "coverage.csv", fields, rows)
-        (self.options.output_dir / "coverage.json").write_text(
+        _write_csv(self.artifacts.final_dir / "coverage.csv", fields, rows)
+        (self.artifacts.final_dir / "coverage.json").write_text(
             json.dumps([item.model_dump(mode="json") for item in self.coverage], indent=2),
             encoding="utf-8",
         )
-        self.artifacts.record_existing("discover", "csv", self.options.output_dir / "coverage.csv")
-        self.artifacts.record_existing("discover", "json", self.options.output_dir / "coverage.json")
+        self.artifacts.record_existing("discover", "csv", self.artifacts.final_dir / "coverage.csv")
+        self.artifacts.record_existing("discover", "json", self.artifacts.final_dir / "coverage.json")
 
     def _write_profiles(self, profiles: list[CompanyProfile]) -> None:
-        _write_jsonl(self.options.output_dir / "company_profiles.jsonl", profiles)
+        _write_jsonl(self.artifacts.final_dir / "company_profiles.jsonl", profiles)
 
     def _load_profiles(self) -> list[CompanyProfile]:
-        path = self.options.output_dir / "company_profiles.jsonl"
+        path = self.artifacts.final_dir / "company_profiles.jsonl"
         if not path.exists():
             return self.profiles
         return [
@@ -1053,7 +1607,7 @@ class BulkRunner:
 
     def _hydrate(self, stage: str) -> None:
         if stage == "discover":
-            path = self.options.output_dir / "coverage.json"
+            path = self.artifacts.final_dir / "coverage.json"
             if path.exists():
                 self.coverage = [SourceCoverage.model_validate(item) for item in json.loads(path.read_text())]
         elif stage == "companies":
@@ -1068,6 +1622,72 @@ class BulkRunner:
 def _parse_sitemap(content: bytes) -> ET.Element:
     payload = gzip.decompress(content) if content[:2] == b"\x1f\x8b" else content
     return ET.fromstring(payload)
+
+
+def _offline_screen(candidate: DiscoveryCandidate) -> str:
+    """Conservatively remove obvious non-Arizona/non-AEC pages without model spend."""
+    headline = normalize_text(f"{candidate.title} {candidate.canonical_url}")
+    body = ""
+    if candidate.raw_artifact_path:
+        try:
+            raw = Path(candidate.raw_artifact_path).read_text(
+                encoding="utf-8", errors="replace"
+            )[:200_000]
+            raw = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", raw)
+            body = normalize_text(html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw)))
+        except OSError:
+            return "ambiguous"
+    combined = f"{headline} {body[:40_000]}"
+    headline_places = {term for term in ARIZONA_TERMS if term in headline}
+    body_places = {term for term in ARIZONA_TERMS if term in combined}
+    event_hits = {term for term in AEC_EVENT_TERMS if term in combined}
+    if not event_hits or not body_places:
+        return "reject"
+    if headline_places or len(body_places) >= 2:
+        return "keep"
+    return "ambiguous"
+
+
+def _archive_url_in_scope(source: CuratedSource, page_url: str) -> bool:
+    """Prevent a regional curated entry from expanding into a national domain crawl."""
+    source_parts = urlsplit(source.url)
+    page_parts = urlsplit(page_url)
+    host = source_parts.netloc.casefold()
+    local_host_hints = (
+        "arizona", "phoenix", "tucson", "azbigmedia", "azbex", "azcentral",
+        "arizcc", "roselawgroupreporter",
+    )
+    if any(term in host for term in local_host_hints):
+        return True
+    scope_terms = {
+        term
+        for term in ("arizona", "phoenix", "tucson", "southwest")
+        if term in normalize_text(source_parts.path)
+        or term in normalize_text(source.name)
+    }
+    if not scope_terms:
+        return source_parts.path in {"", "/"}
+    page_scope = normalize_text(page_parts.path)
+    return bool(scope_terms & {term for term in scope_terms if term in page_scope})
+
+
+def _candidate_excerpt(candidate: DiscoveryCandidate, limit: int) -> str:
+    if not candidate.raw_artifact_path:
+        return ""
+    try:
+        raw = Path(candidate.raw_artifact_path).read_text(
+            encoding="utf-8", errors="replace"
+        )[:200_000]
+    except OSError:
+        return ""
+    raw = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", raw)
+    value = html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw))
+    return re.sub(r"\s+", " ", value).strip()[:limit]
+
+
+def _chunks(items: list, size: int) -> Iterable[list]:
+    for start in range(0, len(items), max(1, size)):
+        yield items[start : start + max(1, size)]
 
 
 def _local(tag: str) -> str:
@@ -1147,6 +1767,26 @@ def _validate_variant(raw: dict) -> WhyVariant:
     )
 
 
+def _require_event_evidence(
+    variant: WhyVariant, event_evidence_urls: Iterable[str]
+) -> WhyVariant:
+    allowed = set()
+    for value in event_evidence_urls:
+        try:
+            allowed.add(canonicalize_url(value))
+        except ValueError:
+            continue
+    if variant.status == "valid" and not (set(variant.source_urls) & allowed):
+        return WhyVariant(
+            text="",
+            confidence=variant.confidence,
+            source_urls=variant.source_urls,
+            status="review",
+            validation_errors=["why_line_missing_event_evidence"],
+        )
+    return variant
+
+
 def _anchor_event(events: list[LeadEvent], scores: dict[str, int]) -> LeadEvent:
     priority = {"high": 2, "medium": 1, "low": 0}
     return sorted(
@@ -1199,14 +1839,30 @@ def _dedupe_profiles(profiles: list[CompanyProfile]) -> list[CompanyProfile]:
     return sorted(output, key=lambda item: item.company_id)
 
 
-def _verify_seed_manifest(db_path: Path, run_id: str) -> None:
+def _verify_seed_manifest(
+    db_path: Path,
+    run_id: str,
+    *,
+    overall_since: date | None = None,
+    overall_until: date | None = None,
+    archive_until: date | None = None,
+) -> None:
     state = StateStore(db_path)
     with state.connect() as conn:
         row = conn.execute(
-            "SELECT status, manifest_path FROM v2_runs WHERE run_id=?", (run_id,)
+            "SELECT status, manifest_path, stamp, since_date FROM v2_runs WHERE run_id=?",
+            (run_id,),
         ).fetchone()
     if not row or row["status"] != StageStatus.COMPLETED.value:
         raise ValueError("seed run is not completed")
+    seed_since = date.fromisoformat(row["since_date"])
+    seed_until = date.fromisoformat(row["stamp"])
+    if overall_since and seed_since < overall_since:
+        raise ValueError("seed run begins before the bulk range")
+    if overall_until and seed_until > overall_until:
+        raise ValueError("seed run ends after the bulk range")
+    if archive_until and seed_since <= archive_until:
+        raise ValueError("seed run overlaps the archive discovery range")
     manifest_path = Path(row["manifest_path"])
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if payload.get("status") != StageStatus.COMPLETED.value:

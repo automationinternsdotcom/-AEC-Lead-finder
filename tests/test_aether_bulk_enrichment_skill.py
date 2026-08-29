@@ -7,6 +7,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = ROOT / "skills" / "aether-bulk-enrichment" / "scripts"
@@ -16,6 +18,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from bulk_lib import (  # noqa: E402
     BulkOptions,
     BulkRunner,
+    _archive_url_in_scope,
+    _require_event_evidence,
     _validate_variant,
 )
 from v2.contracts import (  # noqa: E402
@@ -58,6 +62,49 @@ def options(tmp_path: Path, **changes) -> BulkOptions:
 def test_skill_is_explicit_only():
     metadata = (ROOT / "skills/aether-bulk-enrichment/agents/openai.yaml").read_text()
     assert "allow_implicit_invocation: false" in metadata
+
+
+def test_resume_rejects_changed_source_snapshot(tmp_path):
+    BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    resume_options = options(tmp_path, resume=True)
+    resume_options.sources_csv.write_text(
+        "Resource Name,URL\nChanged,https://changed.example/\n"
+    )
+
+    with pytest.raises(ValueError, match="sources_sha256"):
+        BulkRunner(
+            resume_options,
+            fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+            model_call=lambda *args: ("{}", {}),
+        )
+
+
+def test_regional_source_does_not_expand_into_national_sitemap(tmp_path):
+    source_path = tmp_path / "sources.csv"
+    source_path.write_text(
+        "Resource Name,URL\nJLL Phoenix,https://www.jll.com/en-us/locations/west/phoenix\n"
+    )
+    runner_options = options(tmp_path, sources_csv=source_path)
+    source_path.write_text(
+        "Resource Name,URL\nJLL Phoenix,https://www.jll.com/en-us/locations/west/phoenix\n"
+    )
+    runner = BulkRunner(
+        runner_options,
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+
+    assert not _archive_url_in_scope(
+        source, "https://www.jll.com/en-us/insights/national-market-report"
+    )
+    assert _archive_url_in_scope(
+        source, "https://www.jll.com/en-us/insights/phoenix-industrial-market"
+    )
 
 
 def test_archive_discovery_reads_gzip_sitemap_and_exact_dates(tmp_path):
@@ -114,6 +161,11 @@ def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tm
             raise RuntimeError("not found")
         return response(url, pages[url])
 
+    BulkRunner(
+        options(tmp_path),
+        fetch=fetch,
+        model_call=lambda *args: ("{}", {}),
+    )
     runner = BulkRunner(
         options(tmp_path, resume=True),
         fetch=fetch,
@@ -159,6 +211,71 @@ def test_why_line_validation_is_sourced_and_fail_closed():
 
     assert valid.status == "valid"
     assert unsupported.status == "review" and unsupported.text == ""
+    wrong_event_source = _require_event_evidence(
+        valid, ["https://example.com/different-event"]
+    )
+    assert wrong_event_source.status == "review"
+    assert wrong_event_source.text == ""
+    assert wrong_event_source.validation_errors == [
+        "why_line_missing_event_evidence"
+    ]
+
+
+def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
+    calls = []
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        calls.append((len(rows), tools))
+        return json.dumps(
+            {
+                row["candidate_id"]: {
+                    "qualified": False,
+                    "filter_reason": "Not a specific Arizona commercial-property event",
+                }
+                for row in rows
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=5),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    for index in range(13):
+        url = f"https://example.com/2026/08/{index + 1:02d}/story"
+        runner.state.save_candidate(
+            DiscoveryCandidate(
+                candidate_id=f"candidate-{index}",
+                run_id="bulk-run",
+                provider="archive",
+                discovered_url=url,
+                resolved_url=url,
+                canonical_url=url,
+                title=f"Story {index}",
+                source_id="source-1",
+                source_name="Example",
+                source_domain="example.com",
+                published_at=datetime(2026, 8, index + 1, tzinfo=timezone.utc),
+                metadata={"selected_for_qualification": True},
+            )
+        )
+
+    counters = runner._qualify()
+
+    assert counters == {
+        "submitted": 13,
+        "batches": 3,
+        "qualified": 0,
+        "rejected": 13,
+        "reviews": 0,
+    }
+    assert calls == [(5, []), (5, []), (3, [])]
+    with runner.state.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
 
 
 def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
@@ -200,7 +317,12 @@ def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
         )
     )
     runner = BulkRunner(
-        options(tmp_path, seed_db=seed_path, seed_run_id="seed-run"),
+        options(
+            tmp_path,
+            archive_until="2026-08-27",
+            seed_db=seed_path,
+            seed_run_id="seed-run",
+        ),
         fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
         model_call=lambda *args: ("{}", {}),
     )
@@ -239,9 +361,14 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
     why_c = "The new Phoenix marketplace expands Acme's operating footprint, making timely facilities support valuable for opening stability while establishing a scalable asset-preservation standard across future company locations."
 
     def model_call(model, prompt, tools):
-        if "Candidate ID:" in prompt:
+        if "bounded batch" in prompt:
+            candidate_id = next(
+                item.candidate_id
+                for item in runner.state.candidates_for_run("bulk-run")
+                if item.metadata.get("selected_for_qualification")
+            )
             return json.dumps(
-                {
+                {candidate_id: {
                     "qualified": True,
                     "business_name": "Acme Marketplace",
                     "person": "",
@@ -254,8 +381,8 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
                     "property_type": "retail",
                     "service_angle": "Protect the newly operating asset.",
                     "filter_reason": "Specific opening",
-                    "confidence": "high",
-                }
+                    "confidence": "high"
+                }}
             ), {}
         if "Score each Arizona" in prompt:
             event_id = runner.state.active_events_for_run("bulk-run")[0].lead_event_id
@@ -279,6 +406,10 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
     result = runner.run()
 
     assert result["leads"] == 1 and result["companies"] == 1
-    assert (tmp_path / "output/leads.csv").exists()
-    assert (tmp_path / "output/companies.csv").exists()
+    final_dir = tmp_path / "output/2026-08-28/runs/bulk-run/final"
+    assert (final_dir / "leads.csv").exists()
+    assert (final_dir / "companies.csv").exists()
+    assert not (tmp_path / "output/leads.csv").exists()
     assert not list((tmp_path / "output").glob("*.html"))
+    with runner.state.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
