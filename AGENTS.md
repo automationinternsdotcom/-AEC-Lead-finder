@@ -8,7 +8,7 @@ The canonical daily command is:
 uv run scout/pipeline.py
 ```
 
-The pipeline runs six GPS-style steps:
+The pipeline runs seven GPS-style steps:
 
 1. `scout/run.py` discovers articles, judges them, deduplicates them, and writes
    `raw_leads.csv` plus `uncertain_leads.csv`.
@@ -18,6 +18,7 @@ The pipeline runs six GPS-style steps:
 4. `scout/apollo_lead_enrichment.py` optionally fills missing contact data.
 5. `scout/score_leads.py` scores and sorts the lead/contact CSVs.
 6. `scout/build_email.py` writes `leads_email.html`.
+7. `scout/push_deals.py` creates article deals in Aether's Pipeline.
 
 The only intentional architecture difference from `gps-grok-leadfinder` is discovery:
 GPS uses Google News/provider expansion, while Aether AEC uses the curated

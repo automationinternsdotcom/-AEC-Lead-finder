@@ -12,6 +12,8 @@ uv run scout/pipeline.py
 `run-nightly.sh` is a thin wrapper around that command. It loads `.env` when present,
 writes a timestamped log under `logs/`, and exits with the same status as the scout
 pipeline.
+The final step now pushes scored article leads to Pipedrive as deals in
+Aether's Pipeline.
 
 ## Files
 
@@ -24,6 +26,8 @@ pipeline.
 ## Enable Locally
 
 1. Confirm `.env` contains the Responses API settings from `README.md`.
+   Include the Pipedrive settings as well, especially `PIPEDRIVE_API_TOKEN`
+   and `PIPEDRIVE_FIELD_ARTICLE_URL`.
 2. Run a manual smoke test:
 
    ```bash

@@ -3,7 +3,8 @@
 # dependencies = ["feedparser", "googlenewsdecoder", "httpx", "python-dotenv", "pyyaml", "trafilatura", "certifi"]
 # ///
 """Chains the AEC scout pipeline: website discovery -> decision makers ->
-enrichment -> Apollo -> scoring -> email. Stops on the first failing step.
+enrichment -> Apollo -> scoring -> email -> Pipedrive Deals.
+Stops on the first failing step.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def main():
 
     steps = [
         (
-            "step 1/6: scout fetch (daily, AEC websites)",
+            "step 1/7: scout fetch (daily, AEC websites)",
             [
                 "uv", "run", "scout/run.py",
                 "--workers", str(args.workers),
@@ -44,16 +45,17 @@ def main():
                 "--since", args.since,
             ],
         ),
-        ("step 2/6: decision makers (pass 1)", ["python3", "scout/find_decision_maker.py", "--csv", raw]),
-        ("step 2/6: decision makers (pass 2, retry empties)", ["python3", "scout/find_decision_maker.py", "--csv", raw]),
-        ("step 3/6: contact enrichment (pass 1)", ["python3", "scout/agent_lead_enrichment.py", "--csv", raw, contacts]),
-        ("step 3/6: contact enrichment (pass 2, retry empties)", ["python3", "scout/agent_lead_enrichment.py", "--csv", raw, contacts]),
+        ("step 2/7: decision makers (pass 1)", ["python3", "scout/find_decision_maker.py", "--csv", raw]),
+        ("step 2/7: decision makers (pass 2, retry empties)", ["python3", "scout/find_decision_maker.py", "--csv", raw]),
+        ("step 3/7: contact enrichment (pass 1)", ["python3", "scout/agent_lead_enrichment.py", "--csv", raw, contacts]),
+        ("step 3/7: contact enrichment (pass 2, retry empties)", ["python3", "scout/agent_lead_enrichment.py", "--csv", raw, contacts]),
         (
-            "step 4/6: apollo fallback lookup",
+            "step 4/7: apollo fallback lookup",
             ["uv", "run", "scout/apollo_lead_enrichment.py", "--csv", contacts, *(["--go"] if args.apollo_go else [])],
         ),
-        ("step 5/6: score leads", ["python3", "scout/score_leads.py", raw, contacts]),
-        ("step 6/6: build lead email", ["python3", "scout/build_email.py", stamp]),
+        ("step 5/7: score leads", ["python3", "scout/score_leads.py", raw, contacts]),
+        ("step 6/7: build lead email", ["python3", "scout/build_email.py", stamp]),
+        ("step 7/7: push article deals to Pipedrive", ["python3", "scout/push_deals.py", stamp]),
     ]
 
     for banner, cmd in steps:

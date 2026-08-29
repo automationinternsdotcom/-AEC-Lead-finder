@@ -1,0 +1,49 @@
+name: AltaVista Leads
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
+  workflow_dispatch: {} # allows manual "Run workflow" button in GitHub UI
+
+concurrency:
+  group: altavista-leads
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Validate script syntax
+        run: node --check scripts/altavista-leads.js
+
+      - name: Validate required GitHub secrets
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+        run: |
+          if [ -z "$PIPEDRIVE_API_TOKEN" ]; then
+            echo "::error title=Missing GitHub secret::PIPEDRIVE_API_TOKEN is required in repository Actions secrets."
+            exit 1
+          fi
+          echo "PIPEDRIVE_API_TOKEN is configured."
+
+      - name: Run AltaVista lead automation
+        run: node scripts/altavista-leads.js
+        env:
+          PIPEDRIVE_API_TOKEN: ${{ secrets.PIPEDRIVE_API_TOKEN }}
+          PIPEDRIVE_DOMAIN: aether
+          PIPEDRIVE_PIPELINE_ID: 28
+          PIPEDRIVE_STAGE_ID: 178
+          ALTAVISTA_INTAKE_KEY_FIELD: 78247fb086fa8f461048aebecef5ed0e65ec436c
+          ALTAVISTA_SUBJECT_MATCH: "AltaVista Client Opportunity"
+          ALTAVISTA_MAX_AGE_HOURS: 168
+          ALTAVISTA_BATCH_SIZE: 25
