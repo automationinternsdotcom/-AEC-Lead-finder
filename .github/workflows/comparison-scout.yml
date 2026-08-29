@@ -22,7 +22,8 @@ jobs:
     env:
       CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
       CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
-      GROK_MODEL: ${{ vars.GROK_MODEL || 'grok-4.3' }}
+      # Comparison is deliberately model-pinned; the harness enforces this too.
+      GROK_MODEL: grok-4.3
       EXTRACTOR_MODEL: ${{ vars.EXTRACTOR_MODEL || 'grok-3-mini' }}
       APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
       APOLLO_AUTHORIZED: ${{ github.event.inputs.apollo_go == 'true' || (github.event_name == 'schedule' && vars.AETHER_COMPARISON_APOLLO_ENABLED == 'true') }}

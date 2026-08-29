@@ -16,6 +16,9 @@ from .ids import normalize_text
 from .state import SCHEMA_VERSION, StateStore
 
 
+COMPARISON_GROK_MODEL = "grok-4.3"
+
+
 class ComparisonPreflightError(RuntimeError):
     pass
 
@@ -162,6 +165,9 @@ class ComparisonHarness:
             "NEWS_WEBSITES_CSV": str(self.source_snapshot),
             "SCOUT_COMPARISON_VERSION": spec.version.upper(),
             "SCOUT_COMPARISON_STAMP": self.stamp,
+            # Both frozen runtimes must use the same primary model even when a
+            # checkout .env or repository environment specifies another value.
+            "GROK_MODEL": COMPARISON_GROK_MODEL,
         }
 
 
@@ -289,6 +295,7 @@ def _write_runtime_manifest(
         "since": since,
         "frozen_sha": spec.frozen_sha,
         "cache_namespace": spec.cache_namespace,
+        "models": {"primary": COMPARISON_GROK_MODEL},
         "source_snapshot": {
             "path": str(source_snapshot),
             "sha256": _sha256(source_snapshot),

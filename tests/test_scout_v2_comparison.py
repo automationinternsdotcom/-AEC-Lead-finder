@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -61,6 +62,10 @@ def test_harness_enforces_frozen_v1_no_spend_and_separate_namespaces(tmp_path):
     assert all(Path(result.manifest_paths[0]).exists() for result in results)
     assert all("--apollo-go" not in call[0] for call in calls)
     assert calls[0][2]["DB_PATH"] != calls[1][2]["DB_PATH"]
+    assert {call[2]["GROK_MODEL"] for call in calls} == {"grok-4.3"}
+    for result in results:
+        payload = json.loads(Path(result.manifest_paths[0]).read_text())
+        assert payload["models"]["primary"] == "grok-4.3"
 
     bad = spec(tmp_path, "V1", command=("python", "pipeline.py", "--apollo-go"))
     with pytest.raises(ComparisonPreflightError):
