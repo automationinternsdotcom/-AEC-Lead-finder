@@ -23,7 +23,7 @@ from .contracts import (
 from .ids import normalize_text
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -266,6 +266,19 @@ CREATE INDEX IF NOT EXISTS v2_verification_expiry
     ON v2_verification_cache(kind, expires_at);
 """
 
+MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS v2_event_merges (
+    run_id TEXT NOT NULL,
+    merged_event_id TEXT NOT NULL,
+    kept_event_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, merged_event_id),
+    FOREIGN KEY (run_id) REFERENCES v2_runs(run_id),
+    FOREIGN KEY (merged_event_id) REFERENCES v2_lead_events(lead_event_id),
+    FOREIGN KEY (kept_event_id) REFERENCES v2_lead_events(lead_event_id)
+);
+"""
+
 
 class StateStore:
     def __init__(self, path: str | Path):
@@ -309,6 +322,12 @@ class StateStore:
                 conn.execute(
                     "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
                     (2, _now()),
+                )
+            if 3 not in applied:
+                conn.executescript(MIGRATION_3)
+                conn.execute(
+                    "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _now()),
                 )
         return SCHEMA_VERSION
 
@@ -549,6 +568,19 @@ class StateStore:
                 )
             ]
 
+    def candidates_by_ids(self, candidate_ids: set[str]) -> list[DiscoveryCandidate]:
+        if not candidate_ids:
+            return []
+        placeholders = ", ".join("?" for _ in candidate_ids)
+        with self.connect() as conn:
+            return [
+                DiscoveryCandidate.model_validate_json(row["payload_json"])
+                for row in conn.execute(
+                    f"SELECT payload_json FROM v2_discovery_candidates WHERE candidate_id IN ({placeholders})",
+                    sorted(candidate_ids),
+                )
+            ]
+
     def save_organization(self, organization: Organization) -> None:
         self.upsert_model(
             "v2_organizations",
@@ -660,6 +692,33 @@ class StateStore:
                     (run_id,),
                 )
             ]
+
+    def active_events_for_run(self, run_id: str) -> list[LeadEvent]:
+        with self.connect() as conn:
+            return [
+                LeadEvent.model_validate_json(row["payload_json"])
+                for row in conn.execute(
+                    """SELECT e.payload_json
+                    FROM v2_lead_events e
+                    LEFT JOIN v2_event_merges m
+                      ON m.run_id=e.run_id AND m.merged_event_id=e.lead_event_id
+                    WHERE e.run_id=? AND m.merged_event_id IS NULL
+                    ORDER BY e.lead_event_id""",
+                    (run_id,),
+                )
+            ]
+
+    def save_event_merge(self, run_id: str, merged_event_id: str, kept_event_id: str) -> None:
+        if merged_event_id == kept_event_id:
+            return
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO v2_event_merges(run_id, merged_event_id, kept_event_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id, merged_event_id) DO UPDATE SET
+                    kept_event_id=excluded.kept_event_id, created_at=excluded.created_at""",
+                (run_id, merged_event_id, kept_event_id, _now()),
+            )
 
     def organizations(self, organization_ids: set[str] | None = None) -> list[Organization]:
         with self.connect() as conn:
@@ -819,6 +878,32 @@ class StateStore:
                 ),
             )
 
+    def usage_summary(self, run_id: str) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        with self.connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT token_usage_json, billable FROM v2_provider_attempts WHERE run_id=?",
+                    (run_id,),
+                )
+            )
+        totals["provider_attempts"] = len(rows)
+        totals["billable_attempts"] = sum(int(row["billable"]) for row in rows)
+        for row in rows:
+            usage = json.loads(row["token_usage_json"])
+            for key, value in usage.items():
+                if isinstance(value, (int, float)):
+                    totals[key] = totals.get(key, 0) + int(value)
+        return totals
+
+    def artifacts_for_run(self, run_id: str) -> list[dict]:
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(
+                """SELECT stage, kind, path, sha256, byte_count, created_at
+                FROM v2_artifacts WHERE run_id=? ORDER BY created_at, path""",
+                (run_id,),
+            )]
+
     def upsert_model(self, table: str, key_column: str, key: str, model: BaseModel, **columns: object) -> None:
         allowed = {
             "v2_discovery_candidates",
@@ -884,6 +969,16 @@ class StateStore:
         sql += " ORDER BY created_at, review_id"
         with self.connect() as conn:
             return [ReviewItem.model_validate_json(row["payload_json"]) for row in conn.execute(sql, params)]
+
+    def reviews_for_run(self, run_id: str) -> list[ReviewItem]:
+        with self.connect() as conn:
+            return [
+                ReviewItem.model_validate_json(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM v2_review_items WHERE run_id=? ORDER BY created_at, review_id",
+                    (run_id,),
+                )
+            ]
 
     def record_artifact(
         self,

@@ -476,9 +476,13 @@ class FeedRegistry:
             latest = max((item["published_at"] for item in entries if item["published_at"]), default=now)
             failures = 0
             chain = [*response.history, response.url]
-            self.artifacts.write_raw_text(
+            artifact = self.artifacts.write_raw_text(
                 "discover-rss", f"feed-{stable_hash(url)[:20]}.xml", response.text
             )
+            for entry in entries:
+                entry["feed_url"] = canonicalize_url(url)
+                entry["raw_artifact_path"] = artifact["path"]
+                entry["raw_artifact_hash"] = artifact["sha256"]
         except Exception as exc:
             failures += 1
             latest = parse_datetime(prior["last_valid_item_at"]) if prior and prior["last_valid_item_at"] else None
@@ -515,12 +519,14 @@ class FeedRegistry:
                 continue
             errors = [] if published else ["publication_date_missing"]
             status = RecordStatus.REVIEW if errors else RecordStatus.VALID
-            cid = candidate_id("rss", entry.get("provider_id", ""), entry["url"])
+            raw_provider_id = entry.get("provider_id", "")
+            feed_identity = f"{entry.get('feed_url', '')}#{raw_provider_id}" if raw_provider_id else ""
+            cid = candidate_id("rss", feed_identity, entry["url"])
             candidate = DiscoveryCandidate(
                 candidate_id=cid,
                 run_id=run_id,
                 provider="rss",
-                provider_id=entry.get("provider_id", ""),
+                provider_id=feed_identity,
                 discovered_url=entry["url"],
                 resolved_url=entry["url"],
                 canonical_url=entry["url"],
@@ -529,6 +535,8 @@ class FeedRegistry:
                 source_name=source.name,
                 source_domain=source.domain,
                 published_at=published,
+                raw_artifact_path=entry.get("raw_artifact_path", ""),
+                raw_artifact_hash=entry.get("raw_artifact_hash", ""),
                 record_status=status,
                 validation_errors=errors,
                 metadata={"feed_url": entry.get("feed_url", "")},

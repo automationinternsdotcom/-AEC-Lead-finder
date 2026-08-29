@@ -99,11 +99,19 @@ class QualificationService:
         self.model = model
         self.call_model = call_model or _default_model_call
 
-    def qualify(self, candidates: list[DiscoveryCandidate]) -> QualificationResult:
+    def qualify(
+        self, candidates: list[DiscoveryCandidate], *, retry_review: bool = False
+    ) -> QualificationResult:
         result = QualificationResult()
         for candidate in candidates:
-            if candidate.record_status != RecordStatus.VALID:
+            if candidate.record_status != RecordStatus.VALID and not (
+                retry_review and candidate.record_status == RecordStatus.REVIEW
+            ):
                 continue
+            if retry_review and candidate.record_status == RecordStatus.REVIEW:
+                candidate = candidate.model_copy(
+                    update={"record_status": RecordStatus.VALID, "validation_errors": []}
+                )
             event, person, review, rejected = self._qualify_one(candidate)
             if event:
                 result.events.append(event)
@@ -178,7 +186,23 @@ class QualificationService:
             return None, None, None, True
 
         org_id = organization_id(payload.business_name, "", payload.location)
+        support_ids = candidate.metadata.get("exact_duplicate_candidate_ids") or [
+            candidate.candidate_id
+        ]
+        support_candidates = {
+            item.candidate_id: item
+            for item in self.state.candidates_for_run(candidate.run_id)
+            if item.candidate_id in support_ids
+        }
         evidence = [
+            Evidence(
+                url=support_candidates[item].canonical_url,
+                supports="Source article for the qualified property event.",
+                provider=support_candidates[item].provider,
+            )
+            for item in support_ids
+            if item in support_candidates
+        ] or [
             Evidence(
                 url=candidate.canonical_url,
                 supports="Source article for the qualified property event.",
@@ -203,7 +227,7 @@ class QualificationService:
             run_id=candidate.run_id,
             organization_id=org_id,
             primary_candidate_id=candidate.candidate_id,
-            supporting_candidate_ids=[candidate.candidate_id],
+            supporting_candidate_ids=list(support_ids),
             event=payload.event.strip(),
             location=payload.location.strip(),
             date_posted=payload.date_posted or (

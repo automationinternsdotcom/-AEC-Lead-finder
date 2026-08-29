@@ -114,6 +114,10 @@ class DecisionMakerService:
             )
             payload = DecisionMakerPayload.model_validate(_parse_json(text))
             evidence = _evidence(payload.sources, "Supports the decision-maker research result.")
+            if payload.employee_count is not None:
+                self.state.save_organization(
+                    organization.model_copy(update={"employee_count": payload.employee_count})
+                )
             people: list[Person] = []
             for raw in payload.decision_makers[:3]:
                 name = str(raw.get("name") or "").strip()
@@ -212,9 +216,12 @@ class ContactResearchService:
             last_review = None
             for attempt in range(1, attempts + 1):
                 payload, last_review = self._research_one(person, organization, attempt)
-                if payload is not None:
+                if payload is not None and any(
+                    (payload.email, payload.phone, payload.linkedin)
+                ):
                     last_review = None
                     break
+                payload = None
             if last_review:
                 reviews.append(last_review)
             if payload is None:

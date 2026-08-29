@@ -58,8 +58,8 @@ def test_review_candidate_requires_validation_reason():
 
 def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
     store = StateStore(tmp_path / "scout.db")
-    assert store.migrate() == 2
-    assert store.migrate() == 2
+    assert store.migrate() == 3
+    assert store.migrate() == 3
     store.create_run("run-1", "2026-08-28", "2026-08-27", {"workers": 5})
     store.set_stage_status("run-1", "discover", StageStatus.RUNNING)
     store.set_stage_status("run-1", "discover", StageStatus.COMPLETED, counters={"candidates": 3})
@@ -69,7 +69,7 @@ def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
 
     assert store.completed_stages("run-1") == {"discover"}
     with sqlite3.connect(tmp_path / "scout.db") as conn:
-        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 3
         assert conn.execute(
             "SELECT attempt_count FROM v2_stage_runs WHERE run_id='run-1' AND stage='qualify'"
         ).fetchone()[0] == 2

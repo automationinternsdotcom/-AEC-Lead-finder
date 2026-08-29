@@ -13,8 +13,8 @@ import email_html
 PRIORITY_SCORE = 50
 
 
-def build(day):
-    day_dir = os.path.join(config.RESULTS_DIR, day)
+def build(day, results_dir=None):
+    day_dir = os.path.join(results_dir or config.RESULTS_DIR, day)
     raw_path = os.path.join(day_dir, "raw_leads.csv")
     contacts_path = os.path.join(day_dir, "contacts.csv")
     with open(raw_path, newline="", encoding="utf-8") as f:
@@ -23,7 +23,8 @@ def build(day):
     if os.path.exists(contacts_path):
         with open(contacts_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                contacts[row["business_name"]].append(row)
+                key = row.get("lead_event_id") or row["business_name"]
+                contacts[key].append(row)
 
     leads.sort(key=lambda r: -int(r.get("score") or 0))
     priority = [r for r in leads if int(r.get("score") or 0) >= PRIORITY_SCORE]
@@ -47,8 +48,10 @@ def build(day):
         )
 
     out_path = os.path.join(day_dir, "leads_email.html")
-    with open(out_path, "w", encoding="utf-8") as f:
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(email_html.page(sections))
+    os.replace(tmp_path, out_path)
     print(f"wrote {out_path}: {len(priority)} priority + {len(nurture)} nurture")
     return out_path
 

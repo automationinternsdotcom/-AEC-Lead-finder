@@ -67,14 +67,19 @@ def lead_row(row, people, first, shade):
         f'{html.escape(event[:100])} &#8212; {html.escape(row.get("location", ""))}.</span><br>'
         f'<a href="{html.escape(link, quote=True)}" style="display:inline-block;margin-top:5px;color:{BLUE};text-decoration:none;font-size:12px" target="_blank">{html.escape(row.get("summary", "")[:110])}</a>'
         f'<div style="margin-top:6px;font-size:11px;line-height:1.4;color:{MUTE}"><strong>Aether angle:</strong> {html.escape(row.get("service_angle", ""))}</div>'
-        f'{buttons(feedback_key(name, row.get("link")))}</td>'
+        f'{buttons(feedback_key(name, row.get("lead_event_id") or row.get("link")))}</td>'
         f'<td style="padding:14px 12px;{top}">{contact_cell(people)}</td></tr>'
     )
 
 
 def table(rows, contacts):
     body = "".join(
-        lead_row(r, contacts.get(r["business_name"], []), i == 0, "#ffffff" if i % 2 == 0 else "#fbfdfc")
+        lead_row(
+            r,
+            contacts.get(r.get("lead_event_id") or r["business_name"], []),
+            i == 0,
+            "#ffffff" if i % 2 == 0 else "#fbfdfc",
+        )
         for i, r in enumerate(rows)
     )
     return (

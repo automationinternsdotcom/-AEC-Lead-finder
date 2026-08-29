@@ -60,6 +60,22 @@ class ArtifactStore:
     def load_manifest(self) -> RunManifest:
         return RunManifest.model_validate_json(self.manifest_path.read_text(encoding="utf-8"))
 
+    def record_existing(self, stage: str, kind: str, path: str | Path) -> dict:
+        target = Path(path)
+        payload = target.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        artifact = {
+            "stage": stage,
+            "kind": kind,
+            "path": str(target),
+            "sha256": digest,
+            "byte_count": len(payload),
+        }
+        self.state.record_artifact(
+            self.run_id, stage, kind, str(target), digest, len(payload)
+        )
+        return artifact
+
     def _write(self, stage: str, kind: str, path: Path, payload: bytes) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(path.name + ".tmp")

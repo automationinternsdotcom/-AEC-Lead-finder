@@ -2,27 +2,16 @@
 from __future__ import annotations
 
 import csv
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from pathlib import Path
 from threading import Lock
 from urllib.parse import urlparse
-
-# ``scout/run.py`` is launched as a file by the canonical pipeline. In that
-# mode Python puts ``scout/`` ahead of the repository root on sys.path, which
-# makes ``from pipeline`` resolve to ``scout/pipeline.py`` instead of the
-# existing top-level ``pipeline`` package. Put the repository root first so the
-# website fetcher imports consistently from both scripts and tests.
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if sys.path[0] != str(REPO_ROOT):
-    sys.path.insert(0, str(REPO_ROOT))
 
 import article_judge
 import config
 import logbook
-from pipeline import fetch as website_fetch
-from pipeline import util as pipeline_util
+from v2.discovery import date_from_url, parse_index
+from v2.http import HttpFetcher
 
 
 def collect(window_days=1):
@@ -31,17 +20,15 @@ def collect(window_days=1):
 
     def fetch_one(source):
         try:
-            with pipeline_util.make_http_client() as client:
-                resp = client.get(source["url"])
-                resp.raise_for_status()
-                links = website_fetch._candidate_article_links(resp.text, source["url"])
+            response = HttpFetcher()(source["url"])
+            links = parse_index(response.text, response.url).article_links
             return [
                 {
                     "link": link,
                     "title": title,
                     "published_iso": (
-                        website_fetch._date_from_url(link).isoformat()
-                        if website_fetch._date_from_url(link)
+                        date_from_url(link).isoformat()
+                        if date_from_url(link)
                         else ""
                     ),
                     "source_site": _site(link),

@@ -98,6 +98,7 @@ class Organization(BaseModel):
     domain: str = ""
     location: str = ""
     aliases: list[str] = Field(default_factory=list)
+    employee_count: dict[str, Any] | None = None
     evidence: list[Evidence] = Field(default_factory=list)
     inferred_identity: bool = False
 
