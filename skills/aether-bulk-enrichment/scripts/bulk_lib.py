@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import re
+import threading
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -213,6 +214,12 @@ class BulkRunner:
             self.artifacts.write_manifest(self.manifest)
         self.coverage: list[SourceCoverage] = []
         self.profiles: list[CompanyProfile] = []
+        # Source discovery is parallel too, so keep total article traffic bounded
+        # while still allowing a large final sitemap to use more than one worker.
+        self._archive_fetch_slots = threading.BoundedSemaphore(
+            max(1, options.workers * 2)
+        )
+        self._persisted_archive_by_source: dict[str, list[DiscoveryCandidate]] = {}
 
     def run(self) -> dict:
         self.manifest.status = StageStatus.RUNNING
@@ -297,6 +304,16 @@ class BulkRunner:
             max_candidates=0,
             until=self.archive_until,
         )
+        persisted_archive = [
+            item
+            for item in self.state.candidates_for_run(self.options.run_id)
+            if item.provider in {"archive", "archive-search"}
+            and item.record_status == RecordStatus.VALID
+        ]
+        persisted_by_source: dict[str, list[DiscoveryCandidate]] = defaultdict(list)
+        for candidate in persisted_archive:
+            persisted_by_source[candidate.source_id].append(candidate)
+        self._persisted_archive_by_source = dict(persisted_by_source)
         with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
             archive_results = list(pool.map(self._discover_source_archive, self.sources))
         archive_candidates = [item for _, rows in archive_results for item in rows]
@@ -420,18 +437,25 @@ class BulkRunner:
             coverage.incomplete = True
             coverage.errors.append("sitemap_document_cap_reached")
         coverage.sitemap_urls = len(entries)
-        candidates: list[DiscoveryCandidate] = []
-        for page_url, (sitemap_title, _) in entries.items():
+        candidates = list(self._persisted_archive_by_source.get(source.source_id, []))
+        existing_urls = {item.canonical_url for item in candidates}
+        pending = [
+            (page_url, sitemap_title)
+            for page_url, (sitemap_title, _) in entries.items()
+            if page_url not in existing_urls
+        ]
+
+        def fetch_page(item: tuple[str, str]) -> tuple[DiscoveryCandidate | None, str, bool]:
+            page_url, sitemap_title = item
             try:
-                page = self.fetch(page_url)
-                coverage.pages_fetched += 1
+                with self._archive_fetch_slots:
+                    page = self.fetch(page_url)
                 canonical = canonicalize_url(page.url)
                 published = publication_date(page.text, canonical)
                 if not published:
-                    coverage.undated_pages += 1
-                    continue
+                    return None, "", True
                 if not self.since <= published.date() <= self.archive_until:
-                    continue
+                    return None, "", False
                 artifact = self.artifacts.write_raw_text(
                     "archive-discover",
                     f"article-{stable_hash(canonical)[:20]}.html",
@@ -454,10 +478,23 @@ class BulkRunner:
                     raw_artifact_hash=artifact["sha256"],
                     metadata={"archive_method": "sitemap"},
                 )
-                self.state.save_candidate(item)
-                candidates.append(item)
+                return item, "", False
             except Exception as exc:
-                coverage.errors.append(f"article:{page_url}:{type(exc).__name__}")
+                return None, f"article:{page_url}:{type(exc).__name__}", False
+
+        # A source-level pool eliminates the serial long tail when one large
+        # sitemap remains after the outer source pool has drained.
+        with ThreadPoolExecutor(max_workers=max(1, self.options.workers)) as pool:
+            page_results = list(pool.map(fetch_page, pending))
+        coverage.pages_fetched += len(pending)
+        for candidate, error, undated in page_results:
+            if error:
+                coverage.errors.append(error)
+            if undated:
+                coverage.undated_pages += 1
+            if candidate:
+                self.state.save_candidate(candidate)
+                candidates.append(candidate)
         coverage.dated_candidates = len(candidates)
         return coverage, candidates
 

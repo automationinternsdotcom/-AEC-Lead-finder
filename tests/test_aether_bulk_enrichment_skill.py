@@ -97,6 +97,50 @@ def test_archive_discovery_reads_gzip_sitemap_and_exact_dates(tmp_path):
     assert candidates[0].published_at.date().isoformat() == "2026-07-25"
 
 
+def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tmp_path):
+    article = "https://example.com/2026/07/25/major-commercial-project-opens"
+    sitemap = f"""<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>{article}</loc><lastmod>2026-07-25</lastmod></url>
+    </urlset>"""
+    pages = {
+        "https://example.com/robots.txt": "Sitemap: https://example.com/sitemap.xml",
+        "https://example.com/sitemap.xml": sitemap,
+    }
+
+    def fetch(url):
+        if url == article:
+            raise AssertionError("persisted archive article was fetched again")
+        if url not in pages:
+            raise RuntimeError("not found")
+        return response(url, pages[url])
+
+    runner = BulkRunner(
+        options(tmp_path, resume=True),
+        fetch=fetch,
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+    persisted = DiscoveryCandidate(
+        candidate_id="persisted-archive-candidate",
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url=article,
+        resolved_url=article,
+        canonical_url=article,
+        title="Major commercial project opens",
+        source_id=source.source_id,
+        source_name=source.name,
+        source_domain=source.domain,
+        published_at=datetime(2026, 7, 25, tzinfo=timezone.utc),
+    )
+    runner._persisted_archive_by_source = {source.source_id: [persisted]}
+
+    coverage, candidates = runner._discover_source_archive(source)
+
+    assert coverage.dated_candidates == 1
+    assert [item.candidate_id for item in candidates] == [persisted.candidate_id]
+
+
 def test_why_line_validation_is_sourced_and_fail_closed():
     valid = _validate_variant(
         {
