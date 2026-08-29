@@ -61,6 +61,20 @@ def test_delivery_deduplicates_recipients_adds_disclosure_and_verifies(tmp_path)
     assert gateway.search_sent_exact(result.subject) == [result.message_id]
 
 
+def test_delivery_can_exclude_authenticated_sender_from_recipients(tmp_path):
+    gateway = FakeGateway("automationinterns@gmail.com")
+    result = ExactlyOnceDelivery(gateway, "automationinterns@gmail.com").deliver(
+        subject="Aether 8/28 [V2]",
+        recipients=["jon@automationinterns.com"],
+        html="<h1>Digest</h1>",
+        manifest_paths=[manifest(tmp_path)],
+        include_sender=False,
+    )
+
+    assert result.recipients == ("jon@automationinterns.com",)
+    assert gateway.bodies[0][1] == ("jon@automationinterns.com",)
+
+
 def test_delivery_blocks_profile_collision_and_nonterminal_artifacts(tmp_path):
     gateway = FakeGateway("other@example.com")
     delivery = ExactlyOnceDelivery(gateway, "jon@example.com")

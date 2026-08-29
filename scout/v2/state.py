@@ -480,8 +480,8 @@ class StateStore:
                     consecutive_failures, last_valid_item_at, last_checked_at,
                     validation_error, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(feed_id) DO UPDATE SET
-                    url=excluded.url, status=excluded.status,
+                ON CONFLICT(url) DO UPDATE SET
+                    status=excluded.status,
                     discovery_method=excluded.discovery_method,
                     redirect_chain_json=excluded.redirect_chain_json,
                     consecutive_failures=excluded.consecutive_failures,

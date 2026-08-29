@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .artifacts import ArtifactStore
 from .contracts import (
@@ -35,7 +43,7 @@ Return strict JSON with these keys:
 qualified, business_name, person, event, date_posted, location, summary, state,
 priority, property_type, service_angle, filter_reason, confidence.
 
-For an explicit non-qualifying article, return qualified=false and a nonempty filter_reason. For a qualifying article, state must be Arizona, priority must be high or medium, and business_name, event, and location must be nonempty. Use empty strings for unknown optional values. Return no prose."""
+For an explicit non-qualifying article, return qualified=false and a nonempty filter_reason. For a qualifying article, state must be Arizona, priority must be high or medium, confidence must be high or low, and business_name, event, and location must be nonempty. Use empty strings for unknown optional values. Return no prose."""
 
 
 class JudgmentPayload(BaseModel):
@@ -54,6 +62,19 @@ class JudgmentPayload(BaseModel):
     service_angle: str = ""
     filter_reason: str = ""
     confidence: str = "high"
+
+    @field_validator("date_posted", mode="before")
+    @classmethod
+    def blank_date_is_unknown(cls, value):
+        return None if value == "" else value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            threshold = 0.5 if 0 <= value <= 1 else 50
+            return "high" if value >= threshold else "low"
+        return value
 
     @model_validator(mode="after")
     def complete_decision(self) -> "JudgmentPayload":
@@ -93,16 +114,19 @@ class QualificationService:
         artifacts: ArtifactStore,
         model: str,
         call_model: ModelCall | None = None,
+        workers: int = 1,
     ):
         self.state = state
         self.artifacts = artifacts
         self.model = model
         self.call_model = call_model or _default_model_call
+        self.workers = max(1, workers)
 
     def qualify(
         self, candidates: list[DiscoveryCandidate], *, retry_review: bool = False
     ) -> QualificationResult:
         result = QualificationResult()
+        eligible = []
         for candidate in candidates:
             if candidate.record_status != RecordStatus.VALID and not (
                 retry_review and candidate.record_status == RecordStatus.REVIEW
@@ -112,20 +136,30 @@ class QualificationService:
                 candidate = candidate.model_copy(
                     update={"record_status": RecordStatus.VALID, "validation_errors": []}
                 )
-            event, person, review, rejected = self._qualify_one(candidate)
-            if event:
-                result.events.append(event)
-            if person:
-                result.people.append(person)
-            if review:
-                result.reviews.append(review)
-            if rejected:
-                result.rejected_candidate_ids.append(candidate.candidate_id)
+            eligible.append(candidate)
+        if self.workers == 1:
+            outcomes = map(self._qualify_one, eligible)
+        else:
+            pool = ThreadPoolExecutor(max_workers=self.workers)
+            outcomes = pool.map(self._qualify_one, eligible)
+        try:
+            for event, person, review, rejected in outcomes:
+                if event:
+                    result.events.append(event)
+                if person:
+                    result.people.append(person)
+                if review:
+                    result.reviews.append(review)
+                if rejected:
+                    result.rejected_candidate_ids.append(rejected)
+        finally:
+            if self.workers != 1:
+                pool.shutdown(wait=True, cancel_futures=True)
         return result
 
     def _qualify_one(
         self, candidate: DiscoveryCandidate
-    ) -> tuple[LeadEvent | None, Person | None, ReviewItem | None, bool]:
+    ) -> tuple[LeadEvent | None, Person | None, ReviewItem | None, str]:
         attempt_id = stable_uuid("attempt", candidate.run_id, "qualify", candidate.candidate_id)
         prompt = QUALIFICATION_PROMPT.format(
             candidate_id=candidate.candidate_id,
@@ -183,7 +217,7 @@ class QualificationService:
         if not payload.qualified:
             rejected = candidate.model_copy(update={"record_status": RecordStatus.REJECTED})
             self.state.save_candidate(rejected)
-            return None, None, None, True
+            return None, None, None, candidate.candidate_id
 
         org_id = organization_id(payload.business_name, "", payload.location)
         support_ids = candidate.metadata.get("exact_duplicate_candidate_ids") or [
@@ -252,7 +286,7 @@ class QualificationService:
                 evidence=evidence,
             )
             self.state.save_person(person)
-        return event, person, None, False
+        return event, person, None, ""
 
     def _quarantine(
         self,
@@ -262,7 +296,7 @@ class QualificationService:
         response_path: str,
         started: str,
         exc: Exception,
-    ) -> tuple[None, None, ReviewItem, bool]:
+    ) -> tuple[None, None, ReviewItem, str]:
         error = f"{type(exc).__name__}:{exc}"
         updated = candidate.model_copy(
             update={
@@ -296,7 +330,7 @@ class QualificationService:
             started_at=started,
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
-        return None, None, review, False
+        return None, None, review, ""
 
 
 def _parse_json(text: str) -> object:

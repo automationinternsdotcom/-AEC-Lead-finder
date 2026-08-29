@@ -127,6 +127,7 @@ class ExactlyOnceDelivery:
         recipients: Sequence[str],
         html: str,
         manifest_paths: Sequence[str | Path],
+        include_sender: bool = True,
     ) -> DeliveryResult:
         sender = self.gateway.authenticated_email().strip().casefold()
         if not sender or sender != self.expected_sender:
@@ -139,7 +140,11 @@ class ExactlyOnceDelivery:
             raise DeliveryCollisionError(
                 f"exact subject already has {len(before)} Sent message(s): {subject}"
             )
-        unique_recipients = _dedupe_recipients([sender, *recipients])
+        unique_recipients = _dedupe_recipients(
+            [sender, *recipients] if include_sender else recipients
+        )
+        if not unique_recipients:
+            raise DeliveryError("delivery requires at least one recipient")
         body = _with_disclosure(html)
         recovered = False
         try:

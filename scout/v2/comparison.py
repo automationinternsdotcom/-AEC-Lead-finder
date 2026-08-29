@@ -168,6 +168,7 @@ class ComparisonHarness:
             # Both frozen runtimes must use the same primary model even when a
             # checkout .env or repository environment specifies another value.
             "GROK_MODEL": COMPARISON_GROK_MODEL,
+            "EXTRACTOR_MODEL": COMPARISON_GROK_MODEL,
         }
 
 

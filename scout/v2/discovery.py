@@ -194,8 +194,15 @@ def load_curated_sources(path: str | Path) -> list[CuratedSource]:
         url = str(row.get("URL") or row.get("url") or "").strip()
         if not url:
             continue
+        if "://" not in url:
+            url = f"https://{url}"
         canonical = canonicalize_url(url)
-        name = str(row.get("Resource Name") or row.get("name") or urlsplit(url).hostname or "").strip()
+        name = str(
+            row.get("Resource Name")
+            or row.get("name")
+            or urlsplit(canonical).hostname
+            or ""
+        ).strip()
         domain = (urlsplit(canonical).hostname or "").lower()
         sources.append(
             CuratedSource(
@@ -347,13 +354,24 @@ class CuratedSiteAdapter:
         self.fetch = fetch or HttpFetcher()
         self.workers = workers
 
-    def discover(self, run_id: str, since: date, max_candidates: int = 0) -> DiscoveryBatch:
+    def discover(
+        self,
+        run_id: str,
+        since: date,
+        max_candidates: int = 0,
+        until: date | None = None,
+    ) -> DiscoveryBatch:
         for source in self.sources:
             self.state.upsert_source(
                 source.source_id, source.name, source.url, source.domain, source.state, source.enabled
             )
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            source_batches = list(pool.map(lambda source: self._discover_source(run_id, since, source), self.sources))
+            source_batches = list(
+                pool.map(
+                    lambda source: self._discover_source(run_id, since, until, source),
+                    self.sources,
+                )
+            )
         batch = DiscoveryBatch()
         by_id: dict[str, DiscoveryCandidate] = {}
         for source_batch in source_batches:
@@ -371,7 +389,13 @@ class CuratedSiteAdapter:
         batch.candidates = candidates
         return batch
 
-    def _discover_source(self, run_id: str, since: date, source: CuratedSource) -> DiscoveryBatch:
+    def _discover_source(
+        self,
+        run_id: str,
+        since: date,
+        until: date | None,
+        source: CuratedSource,
+    ) -> DiscoveryBatch:
         batch = DiscoveryBatch()
         try:
             index = self.fetch(source.url)
@@ -403,7 +427,10 @@ class CuratedSiteAdapter:
                 )
                 artifact = index_artifact
                 errors = [f"article_fetch_failed:{type(error).__name__}"]
-            if published and published.date() < since:
+            if published and (
+                published.date() < since
+                or (until is not None and published.date() > until)
+            ):
                 continue
             if published is None:
                 errors.append("publication_date_missing")
@@ -457,8 +484,9 @@ class FeedRegistry:
         return out
 
     def validate_and_store(self, source: CuratedSource, url: str, method: str) -> tuple[FeedStatus, list[dict]]:
-        feed_id = stable_uuid("feed", source.source_id, url)
-        prior = next((row for row in self.state.feeds() if row["feed_id"] == feed_id), None)
+        url = canonicalize_url(url)
+        prior = next((row for row in self.state.feeds() if row["url"] == url), None)
+        feed_id = prior["feed_id"] if prior else stable_uuid("feed", url)
         failures = int(prior["consecutive_failures"]) if prior else 0
         now = datetime.now(timezone.utc)
         try:
@@ -480,7 +508,7 @@ class FeedRegistry:
                 "discover-rss", f"feed-{stable_hash(url)[:20]}.xml", response.text
             )
             for entry in entries:
-                entry["feed_url"] = canonicalize_url(url)
+                entry["feed_url"] = url
                 entry["raw_artifact_path"] = artifact["path"]
                 entry["raw_artifact_hash"] = artifact["sha256"]
         except Exception as exc:
@@ -494,7 +522,7 @@ class FeedRegistry:
         self.state.upsert_feed(
             feed_id,
             source.source_id,
-            canonicalize_url(url),
+            url,
             status.value,
             method,
             redirect_chain=chain,
@@ -511,11 +539,15 @@ class FeedRegistry:
         source: CuratedSource,
         entries: Iterable[dict],
         since: date,
+        until: date | None = None,
     ) -> DiscoveryBatch:
         batch = DiscoveryBatch()
         for entry in entries:
             published = entry["published_at"]
-            if published and published.date() < since:
+            if published and (
+                published.date() < since
+                or (until is not None and published.date() > until)
+            ):
                 continue
             errors = [] if published else ["publication_date_missing"]
             status = RecordStatus.REVIEW if errors else RecordStatus.VALID

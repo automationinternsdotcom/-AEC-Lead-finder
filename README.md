@@ -54,7 +54,7 @@ Local runs read `.env` from the repository root. Start from `.env.example`:
 CLIPROXY_BASE_URL=http://localhost:8317/v1
 CLIPROXY_API_KEY=your-key-here
 GROK_MODEL=grok-4.3
-EXTRACTOR_MODEL=grok-3-mini
+EXTRACTOR_MODEL=grok-4.3
 DB_PATH=scout.db
 RESULTS_DIR=results
 NEWS_WEBSITES_CSV=news_websites.csv
@@ -88,7 +88,7 @@ Optional repository variables:
 | Variable | Default |
 |---|---|
 | `GROK_MODEL` | `grok-4.3` |
-| `EXTRACTOR_MODEL` | `grok-3-mini` |
+| `EXTRACTOR_MODEL` | `grok-4.3` |
 
 Add the Apollo key in GitHub at:
 

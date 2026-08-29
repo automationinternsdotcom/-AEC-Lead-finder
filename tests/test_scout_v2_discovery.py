@@ -19,6 +19,7 @@ from v2.discovery import (  # noqa: E402
     CuratedSource,
     FeedRegistry,
     feed_status_after_failure,
+    load_curated_sources,
     parse_index,
     publication_date,
 )
@@ -33,6 +34,14 @@ from v2.state import StateStore  # noqa: E402
 
 def response(url: str, text: str) -> FetchResponse:
     return FetchResponse(url=url, content=text.encode())
+
+
+def test_curated_source_loader_normalizes_bare_domains(tmp_path):
+    path = tmp_path / "sources.csv"
+    path.write_text("Resource Name,URL\nAZ Central,azcentral.com\n")
+    source = load_curated_sources(path)[0]
+    assert source.url == "https://azcentral.com/"
+    assert source.domain == "azcentral.com"
 
 
 def test_parse_index_finds_articles_and_same_domain_feed():
@@ -100,6 +109,72 @@ def test_curated_adapter_persists_valid_and_undated_review(tmp_path):
     assert len(store.candidates_for_run("run-1")) == 2
 
 
+def test_curated_adapter_excludes_candidates_after_until_date(tmp_path):
+    source = CuratedSource(
+        source_id="source-1",
+        name="Example News",
+        url="https://example.com",
+        domain="example.com",
+    )
+    pages = {
+        "https://example.com/": """
+            <a href="/2026/08/28/commercial-project-opens-in-phoenix">Commercial project opens in Phoenix today</a>
+            <a href="/2026/08/29/commercial-project-opens-in-tempe">Commercial project opens in Tempe today</a>
+        """,
+        "https://example.com/2026/08/28/commercial-project-opens-in-phoenix": "<html></html>",
+        "https://example.com/2026/08/29/commercial-project-opens-in-tempe": "<html></html>",
+    }
+
+    def fetch(url: str) -> FetchResponse:
+        canonical = url if url != "https://example.com" else "https://example.com/"
+        return response(canonical, pages[canonical])
+
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-1", "2026-08-28", "2026-08-28")
+    artifacts = ArtifactStore(tmp_path / "results", "2026-08-28", "run-1", store)
+    batch = CuratedSiteAdapter([source], store, artifacts, fetch=fetch, workers=1).discover(
+        "run-1", date(2026, 8, 28), until=date(2026, 8, 28)
+    )
+
+    assert [item.published_at.date() for item in batch.candidates] == [date(2026, 8, 28)]
+
+
+def test_feed_candidates_exclude_entries_after_until_date(tmp_path):
+    source = CuratedSource(
+        source_id="source-1",
+        name="Example",
+        url="https://example.com",
+        domain="example.com",
+    )
+    feed = """<rss><channel>
+      <item><guid>yesterday</guid><title>Yesterday</title>
+      <link>https://example.com/yesterday</link>
+      <pubDate>Fri, 28 Aug 2026 10:00:00 GMT</pubDate></item>
+      <item><guid>today</guid><title>Today</title>
+      <link>https://example.com/today</link>
+      <pubDate>Sat, 29 Aug 2026 10:00:00 GMT</pubDate></item>
+    </channel></rss>"""
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-1", "2026-08-28", "2026-08-28")
+    store.upsert_source(source.source_id, source.name, source.url, source.domain)
+    artifacts = ArtifactStore(tmp_path / "results", "2026-08-28", "run-1", store)
+    registry = FeedRegistry(store, artifacts, fetch=lambda url: response(url, feed))
+    _, entries = registry.validate_and_store(
+        source, "https://example.com/feed.xml", "autodiscovery"
+    )
+    batch = registry.candidates(
+        "run-1",
+        source,
+        entries,
+        date(2026, 8, 28),
+        until=date(2026, 8, 28),
+    )
+
+    assert [item.title for item in batch.candidates] == ["Yesterday"]
+
+
 def test_feed_validation_and_health_thresholds(tmp_path):
     source = CuratedSource(
         source_id="source-1",
@@ -124,6 +199,34 @@ def test_feed_validation_and_health_thresholds(tmp_path):
     assert feed_status_after_failure(2, 1) == FeedStatus.PENDING
     assert feed_status_after_failure(3, 1) == FeedStatus.DEGRADED
     assert feed_status_after_failure(7, 1) == FeedStatus.DISABLED
+
+
+def test_same_feed_discovered_by_duplicate_curated_sources_is_idempotent(tmp_path):
+    sources = [
+        CuratedSource(
+            source_id=f"source-{index}",
+            name=f"Example {index}",
+            url=f"https://example.com/news-{index}",
+            domain="example.com",
+        )
+        for index in (1, 2)
+    ]
+    feed = """<rss><channel><item><guid>one</guid><title>Opening</title>
+      <link>https://example.com/opening</link>
+      <pubDate>Fri, 28 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>"""
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    for source in sources:
+        store.upsert_source(source.source_id, source.name, source.url, source.domain)
+    store.create_run("run-1", "2026-08-28", "2026-08-27")
+    registry = FeedRegistry(
+        store,
+        ArtifactStore(tmp_path / "results", "2026-08-28", "run-1", store),
+        fetch=lambda url: response(url, feed),
+    )
+    for source in sources:
+        registry.validate_and_store(source, "https://example.com/feed.xml", "autodiscovery")
+    assert len(store.feeds()) == 1
 
 
 def test_provider_preflight_and_bounded_results():

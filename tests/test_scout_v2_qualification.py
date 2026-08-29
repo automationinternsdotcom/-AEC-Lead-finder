@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +13,7 @@ sys.path.insert(0, str(ROOT / "scout"))
 
 from v2.artifacts import ArtifactStore  # noqa: E402
 from v2.contracts import DiscoveryCandidate, RecordStatus  # noqa: E402
-from v2.qualification import QualificationService  # noqa: E402
+from v2.qualification import JudgmentPayload, QualificationService  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 
 
@@ -56,6 +57,46 @@ def valid_payload():
         "service_angle": "Aether can serve as a strategic partner.",
         "filter_reason": "A new operating property needs facilities support.",
         "confidence": "high",
+    }
+
+
+def test_judgment_normalizes_grok_optional_date_and_numeric_confidence():
+    payload = valid_payload()
+    payload["date_posted"] = ""
+    payload["confidence"] = 85
+
+    judgment = JudgmentPayload.model_validate(payload)
+
+    assert judgment.date_posted is None
+    assert judgment.confidence == "high"
+
+
+def test_qualification_uses_configured_workers(tmp_path):
+    store, artifacts = setup(tmp_path)
+    items = [
+        candidate(f"candidate-{index}", f"https://example.com/{index}")
+        for index in range(3)
+    ]
+    for item in items:
+        store.save_candidate(item)
+    barrier = threading.Barrier(3)
+
+    def concurrent_model_call(model, prompt, tools):
+        barrier.wait(timeout=2)
+        return json.dumps({"qualified": False, "filter_reason": "Not a lead."}), {}
+
+    result = QualificationService(
+        store,
+        artifacts,
+        "grok-4.3",
+        call_model=concurrent_model_call,
+        workers=3,
+    ).qualify(items)
+
+    assert set(result.rejected_candidate_ids) == {
+        "candidate-0",
+        "candidate-1",
+        "candidate-2",
     }
 
 

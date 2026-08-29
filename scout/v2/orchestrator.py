@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -64,7 +65,7 @@ class PipelineOptions:
     newsapi: bool = False
     apify: bool = False
     grok_model: str = "grok-4.3"
-    extractor_model: str = "grok-3-mini"
+    extractor_model: str = "grok-4.3"
 
 
 @dataclass(slots=True)
@@ -135,6 +136,7 @@ class PipelineRunner:
         )
         if options.resume and self.artifacts.manifest_path.exists():
             self.manifest = self.artifacts.load_manifest()
+            self.manifest.configuration = configuration
         else:
             self.manifest = new_manifest(
                 self.run_id, options.stamp, options.since, configuration
@@ -207,7 +209,9 @@ class PipelineRunner:
 
     def _stage(self, name: str, banner: str, function: Callable[[], dict]) -> None:
         completed = self.state.completed_stages(self.run_id)
-        if self.options.resume and name in completed and not self.options.retry_review:
+        if self.options.resume and name in completed and (
+            not self.options.retry_review or name == "discover"
+        ):
             print(f"== {banner} [resume: already completed] ==", file=sys.stderr)
             self._hydrate(name)
             return
@@ -255,6 +259,7 @@ class PipelineRunner:
             self.run_id,
             date.fromisoformat(self.options.since),
             max_candidates=0,
+            until=date.fromisoformat(self.options.stamp),
         )
         batches = [curated, self._discover_rss()]
         if self.options.newsapi:
@@ -332,47 +337,80 @@ class PipelineRunner:
     def _discover_rss(self) -> DiscoveryBatch:
         registry = FeedRegistry(self.state, self.artifacts, fetch=self.fetch)
         batch = DiscoveryBatch()
-        for source in self.sources:
-            existing = [
-                row
-                for row in self.state.feeds(("active", "degraded", "pending"))
-                if row["source_id"] == source.source_id
-            ]
-            feed_targets: list[tuple[str, str]] = [
-                (row["url"], row["discovery_method"]) for row in existing
-            ]
-            if not feed_targets:
-                try:
-                    index = self.fetch(source.url)
-                    parsed = parse_index(index.text, source.url)
-                    alternates = set(parsed.feed_links)
-                    discovered = registry.discover_for_source(source, index.text)
-                    feed_targets = [
-                        (url, "autodiscovery" if url in alternates else "conventional_path")
-                        for url in discovered
-                    ]
-                except Exception as exc:
-                    batch.source_errors.append(
-                        {
-                            "source_id": source.source_id,
-                            "stage": "rss_discovery",
-                            "error": repr(exc),
-                        }
-                    )
-                    continue
-            for url, method in feed_targets:
-                status, entries = registry.validate_and_store(source, url, method)
-                if status.value != "active":
-                    continue
-                feed_batch = registry.candidates(
-                    self.run_id,
-                    source,
-                    entries,
-                    date.fromisoformat(self.options.since),
+        with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
+            discovered = list(
+                pool.map(
+                    lambda source: self._rss_targets_for_source(registry, source),
+                    self.sources,
                 )
-                batch.candidates.extend(feed_batch.candidates)
-                batch.reviews.extend(feed_batch.reviews)
+            )
+        unique_targets = {}
+        for targets, errors in discovered:
+            batch.source_errors.extend(errors)
+            for source, url, method in targets:
+                unique_targets.setdefault(url, (source, url, method))
+
+        def validate(target):
+            source, url, method = target
+            status, entries = registry.validate_and_store(source, url, method)
+            if status.value != "active":
+                return DiscoveryBatch()
+            return registry.candidates(
+                self.run_id,
+                source,
+                entries,
+                date.fromisoformat(self.options.since),
+                until=date.fromisoformat(self.options.stamp),
+            )
+
+        with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
+            feed_batches = list(pool.map(validate, unique_targets.values()))
+        for feed_batch in feed_batches:
+            batch.candidates.extend(feed_batch.candidates)
+            batch.reviews.extend(feed_batch.reviews)
         return batch
+
+    def _rss_targets_for_source(self, registry: FeedRegistry, source):
+        existing = [
+            row
+            for row in self.state.feeds(("active", "degraded", "pending"))
+            if row["source_id"] == source.source_id
+        ]
+        if existing:
+            return (
+                [
+                    (source, row["url"], row["discovery_method"])
+                    for row in existing
+                ],
+                [],
+            )
+        try:
+            index = self.fetch(source.url)
+            parsed = parse_index(index.text, source.url)
+            alternates = set(parsed.feed_links)
+            discovered = registry.discover_for_source(source, index.text)
+            return (
+                [
+                    (
+                        source,
+                        url,
+                        "autodiscovery" if url in alternates else "conventional_path",
+                    )
+                    for url in discovered
+                ],
+                [],
+            )
+        except Exception as exc:
+            return (
+                [],
+                [
+                    {
+                        "source_id": source.source_id,
+                        "stage": "rss_discovery",
+                        "error": repr(exc),
+                    }
+                ],
+            )
 
     def _discover_provider(self, adapter: ProviderAdapter) -> DiscoveryBatch:
         adapter.preflight()
@@ -462,6 +500,12 @@ class PipelineRunner:
                 for item in self.state.eligible_reviews("qualify")
                 if item.record_type == "discovery_candidate"
             }
+            candidates = [
+                item
+                for item in candidates
+                if item.record_status == RecordStatus.VALID
+                or item.candidate_id in review_ids
+            ]
             candidates = list(
                 {item.candidate_id: item for item in [*candidates, *self.state.candidates_by_ids(review_ids)]}.values()
             )
@@ -470,6 +514,7 @@ class PipelineRunner:
             self.artifacts,
             self.options.grok_model,
             call_model=self.model_call,
+            workers=self.options.workers,
         )
         result = service.qualify(candidates, retry_review=self.options.retry_review)
         self.events = self.state.active_events_for_run(self.run_id)
