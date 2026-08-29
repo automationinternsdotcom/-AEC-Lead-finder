@@ -1,4 +1,8 @@
-"""`python -m pipeline.cli.push` (stdin JSON) — create Pipedrive Lead, print result.
+"""Retired legacy CLI: create a Pipedrive Lead, print result.
+
+Production workflows create Pipedrive Deals instead. Use `scout/push_deals.py`
+for daily article leads and `scripts/altavista-leads.js` for AltaVista emails.
+This CLI remains only for historical compatibility tests.
 
 Input:  {
   "article": <ExtractedArticle>,

@@ -1,9 +1,11 @@
-"""Sync one extracted article → Pipedrive Org + Person + Lead (+ note).
+"""Retired legacy sync: one extracted article → Pipedrive Lead.
 
-Pipedrive Leads are the right surface for machine-extracted, unvetted CRE
-inputs: Jordan triages them and converts promising ones to Deals. Pushing
-straight to Deals (earlier design) would have polluted his active pipeline
-with ~50/day of noise and lost the conversion-as-qualification signal.
+Production Pipedrive writes now create Deals, not Pipedrive Leads:
+`scout/push_deals.py` pushes daily article leads to Aether's Pipeline, and
+`scripts/altavista-leads.js` pushes AltaVista emails to Phoenix-BizDev.
+
+This module is retained only for historical tests and compatibility with old
+operator commands. Do not wire it into scheduled workflows.
 
 Reuses: httpx (base_url + querystring api_token does the auth wiring once),
         config.Settings, schema.ExtractedArticle, enrich.Lead.

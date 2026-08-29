@@ -38,7 +38,7 @@ AltaVista mailbox worker pushes forwarded AltaVista opportunities to Phoenix-Biz
 | `scripts/altavista-leads.js` | Standalone AltaVista email-to-deal worker. |
 | `check.sh` | Fast local self-checks for the `scout/` modules. |
 | `run-nightly.sh` | Local LaunchAgent wrapper around `uv run scout/pipeline.py`. |
-| `pipeline/` | Legacy AEC/Pipedrive path kept for compatibility and historical tests. Not the canonical runner. |
+| `pipeline/` | Retired legacy AEC/Pipedrive Lead path kept for historical tests only. Not run by production workflows. |
 
 ## Requirements
 
@@ -176,6 +176,14 @@ artifact, and saves the updated database cache.
 
 The final scout step pushes article leads to pipeline `47` (`Aether's Pipeline`),
 stage `311` (`Qualified Lead`).
+
+Production Pipedrive writes create Deals, not Pipedrive Leads:
+
+- AltaVista email opportunities -> Phoenix-BizDev deals.
+- Daily article leads -> Aether's Pipeline deals.
+
+The older `pipeline/` package remains only as historical compatibility code for
+the previous Pipedrive Lead design and is not called by the scheduled workflows.
 
 ## Local Nightly Run
 
