@@ -13,7 +13,7 @@ RETRY_CODES = {429, 500, 502, 503, 504}
 BACKOFF = (10, 30)
 
 
-def call(model, prompt, tools=(), text_format=None, with_usage=False):
+def call(model, prompt, tools=(), text_format=None, with_usage=False, temperature=None):
     body = {
         "model": model,
         "input": prompt,
@@ -22,6 +22,8 @@ def call(model, prompt, tools=(), text_format=None, with_usage=False):
     }
     if text_format == "json_object":
         body["text"] = {"format": {"type": "json_object"}}
+    if temperature is not None:
+        body["temperature"] = temperature
     headers = {
         "Authorization": f"Bearer {config.API_KEY}",
         "Content-Type": "application/json",
