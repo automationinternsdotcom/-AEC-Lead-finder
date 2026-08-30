@@ -50,6 +50,11 @@ daily V2 run, monitoring, email delivery, or ordinary contact enrichment.
 5. Discovery is followed by offline Arizona/AEC screening, person-free exact-ID batch
    qualification from saved evidence, bounded fuzzy dedup/scoring, and company work.
    Web search is reserved for scoped source fallback and company sourcing.
+   Company work uses one Grok 4.3 request per deduplicated company to return all three
+   why-line alternatives together. Each line must be recipient-facing cold-email copy
+   grounded in a concrete observed detail, not an explanation of service fit or a
+   prediction that the company needs facilities help. Invalid lines fail closed; do
+   not spend a second model call on repair.
 6. Verify the terminal manifest and the files under
    `<output>/<until>/runs/<run_id>/final/`, including `coverage.csv`, `leads.csv`, and
    `companies.csv`.
@@ -57,3 +62,23 @@ daily V2 run, monitoring, email delivery, or ordinary contact enrichment.
 
 The skill produces all three labeled why-line variants for later testing; it does not
 send them or claim experimental results.
+
+## Why-line-only revision
+
+When the user explicitly asks to re-enrich why lines for a completed bulk run, reuse
+the deduplicated company profiles and skip every other stage:
+
+```bash
+uv run python skills/aether-bulk-enrichment/scripts/bulk_enrich.py \
+  --since YYYY-MM-DD --until YYYY-MM-DD \
+  --output results/backfills/YYYY-MM-DD_YYYY-MM-DD \
+  --run-id RUN_ID --resume --refresh-why-lines
+```
+
+The revision is interruption-safe and uses at most one model response per company,
+with A/B/C returned together. It preserves the original final directory and writes
+the revised dataset under `final/recipient-outreach-v1/`.
+
+For a qualitative pilot, add `--why-limit 20`, inspect the cached profile artifacts,
+then rerun the same command without the limit. Pilot responses are reused and do not
+incur another company call.

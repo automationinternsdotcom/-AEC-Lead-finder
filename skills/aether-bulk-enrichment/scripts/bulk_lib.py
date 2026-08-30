@@ -67,6 +67,17 @@ CONVENTIONAL_SITEMAPS = (
     "/wp-sitemap.xml",
 )
 WHY_KEYS = ("a", "b", "c")
+WHY_LINE_PROTOCOL_VERSION = "recipient-outreach-v1"
+WHY_LINE_REVISION_STAGE = "why_lines_recipient_outreach_v1"
+WHY_LINE_OPENERS = ("saw ", "noticed ", "your ")
+WHY_LINE_FORBIDDEN_PATTERNS = (
+    r"\b(?:aether|facilit(?:y|ies) services?)\b",
+    r"\b(?:outreach|prospect|sales opportunity|service opportunity)\b",
+    r"\b(?:creates?|creating|presents?|presenting) (?:an? )?(?:immediate |timely )?(?:need|opportunit(?:y|ies))\b",
+    r"\b(?:likely|presumably|apparently) (?:needs?|requires?|creates?)\b",
+    r"\b(?:ideal|perfect|right) time (?:for|to)\b",
+    r"\baligns? with .*\b(?:needs?|services?)\b",
+)
 ARIZONA_TERMS = (
     "arizona", "phoenix", "tucson", "mesa", "scottsdale", "tempe",
     "chandler", "gilbert", "glendale", "peoria", "surprise", "goodyear",
@@ -168,26 +179,32 @@ Include specific openings, occupancy, leases, completed construction, redevelopm
 Return strict JSON only as {{"source_id":"{source_id}","urls":["https://..."]}}. Return an empty urls list when none are found. Invent no URLs."""
 
 
-COMPANY_PROMPT = """Resolve one Aether Facility Services prospect company from its sourced Arizona lead events. You may perform at most three web searches.
+COMPANY_PROMPT = """Write three alternative cold-email opening sentences for one company using one shared research path. This single response must contain all three why lines.
 
 Profile key: {profile_key}
-Known company names: {names}
+Company name: {company_name}
+Known official domain: {domain}
+Known aliases: {names}
 Known locations: {locations}
 Deterministic anchor event ID: {anchor_id}
 Events: {events}
 
-Return strict JSON only with keys canonical_name, domain, employee_count, and variants. variants must have keys a, b, c; each variant must contain text, confidence (high or low), and source_urls.
+Research protocol:
+- Use at most two web searches and one research path for all three variants. Start with the known official domain when present; otherwise use the supplied event sources. Stop as soon as the supplied evidence supports all three. Do not research people or contacts.
+- Each variant is recipient-facing cold-outreach copy, not an analyst explanation, lead summary, sales rationale, or facilities-services pitch.
+- Ground every clause in a concrete observed operational detail from an official company page, government page, credible business listing, or supplied event article.
+- Do not infer that the company needs help, maintenance, facilities services, outreach, or a vendor. Do not predict benefits or invent consequences.
 
-Each nonblank text must be exactly one specific sourced sentence of 25-45 words and contain no en dash or em dash.
-A: explain why the anchor property event makes outreach timely.
-B: explain why ongoing company operations fit facilities services.
-C: blend the anchor event with operating context.
-If a claim lacks a supporting URL, return a blank text and empty source_urls. Do not guess."""
+Copy protocol for A, B, and C:
+- Return three substantively distinct alternatives, each exactly one natural sentence of 25-45 whitespace-separated words.
+- Begin each sentence with "Saw", "Noticed", or "Your" so it reads as the opening of an email addressed to the company.
+- Prefer one timely event detail for A, one specific operating detail for B, and a sourced combination for C. These are all outreach lines, not explanations of those categories.
+- Use ordinary numerals and currency notation such as $22.9 billion or 261,000 square feet. Do not spell numbers out merely to increase word count.
+- Do not mention Aether, facilities services, outreach, opportunities, sales, prospects, or supposed needs.
+- Do not include a URL in the sentence. Do not use an en dash or em dash.
+- Every variant must cite one or more URLs actually used for its claims. If no source supports a variant, return blank text and empty source_urls rather than guessing.
 
-
-REPAIR_PROMPT = """Rewrite each supplied sourced why line to exactly 25-45 words as one sentence, without en dashes or em dashes. Preserve its meaning and do not add claims. Return strict JSON only mapping every exact ID to one rewritten string; include every ID exactly once and invent no IDs.
-
-Items: {items}"""
+Return strict JSON only as {{"canonical_name":"","domain":"","employee_count":"","variants":{{"a":{{"text":"","confidence":"high|medium|low","source_urls":[]}},"b":{{"text":"","confidence":"high|medium|low","source_urls":[]}},"c":{{"text":"","confidence":"high|medium|low","source_urls":[]}}}}}}. Include every variant key exactly once."""
 
 
 BULK_QUALIFICATION_PROMPT = """Qualify this bounded batch using only the supplied saved article evidence. Do not search the web and do not identify people. For every exact candidate_id, decide whether the article reports a specific Arizona commercial-property event that creates a facilities-services opportunity.
@@ -343,6 +360,379 @@ class BulkRunner:
             "companies": len(self._load_profiles()),
             "output": str(self.artifacts.final_dir),
         }
+
+    def refresh_why_lines(self, *, limit: int | None = None) -> dict:
+        """Create a versioned why-line-only revision with one model call per company."""
+        if not self.options.resume:
+            raise ValueError("why-line refresh requires --resume and an existing run ID")
+        if self.manifest.status != StageStatus.COMPLETED:
+            raise ValueError("why-line refresh requires a completed source run")
+        if limit is not None and limit < 1:
+            raise ValueError("why-line refresh limit must be positive")
+        stage = WHY_LINE_REVISION_STAGE
+        revision_dir = self.artifacts.final_dir / WHY_LINE_PROTOCOL_VERSION
+        summary_path = revision_dir / "summary.json"
+        already_complete = stage in self.state.completed_stages(self.options.run_id)
+
+        protocol_hash = hashlib.sha256(
+            f"{WHY_LINE_PROTOCOL_VERSION}\n{COMPANY_PROMPT}".encode()
+        ).hexdigest()
+        protocol_name = f"{WHY_LINE_PROTOCOL_VERSION}/protocol.json"
+        protocol_path = self.artifacts.raw_dir / protocol_name
+        protocol = {
+            "protocol_version": WHY_LINE_PROTOCOL_VERSION,
+            "prompt_sha256": protocol_hash,
+            "model": self.options.model,
+            "run_id": self.options.run_id,
+            "one_model_call_per_business": True,
+            "model_repair_calls": False,
+        }
+        if protocol_path.exists():
+            if json.loads(protocol_path.read_text(encoding="utf-8")) != protocol:
+                raise ValueError("why-line revision protocol changed during resume")
+        else:
+            self.artifacts.write_raw(stage, protocol_name, protocol)
+
+        if not already_complete:
+            self.state.set_stage_status(self.options.run_id, stage, StageStatus.RUNNING)
+            self.manifest.stages[stage] = {"status": StageStatus.RUNNING.value}
+            self._refresh_manifest()
+        try:
+            counters, complete = self._refresh_company_why_lines(
+                stage, revision_dir, limit=limit
+            )
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            self.state.set_stage_status(
+                self.options.run_id, stage, StageStatus.FAILED, error=error
+            )
+            self.manifest.stages[stage] = {
+                "status": StageStatus.FAILED.value,
+                "error": error,
+            }
+            self._refresh_manifest()
+            raise
+        if not complete:
+            self.manifest.stages[stage] = {
+                "status": StageStatus.RUNNING.value,
+                "counters": counters,
+            }
+            self._refresh_manifest()
+            return {
+                "run_id": self.options.run_id,
+                "protocol_version": WHY_LINE_PROTOCOL_VERSION,
+                "model": self.options.model,
+                "status": "running",
+                "counts": counters,
+                "raw_output": str(
+                    self.artifacts.raw_dir / WHY_LINE_PROTOCOL_VERSION
+                ),
+            }
+        self.state.set_stage_status(
+            self.options.run_id, stage, StageStatus.COMPLETED, counters=counters
+        )
+        self.manifest.stages[stage] = {
+            "status": StageStatus.COMPLETED.value,
+            "counters": counters,
+        }
+        self.manifest.counts.update(
+            {f"{stage}.{key}": int(value) for key, value in counters.items()}
+        )
+        self._refresh_manifest()
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+
+    def _refresh_company_why_lines(
+        self,
+        stage: str,
+        revision_dir: Path,
+        *,
+        limit: int | None = None,
+    ) -> tuple[dict, bool]:
+        original_profiles = self._load_profiles()
+        if not original_profiles:
+            raise ValueError("completed run has no company profiles to refresh")
+        events_by_id = {
+            item.lead_event_id: item
+            for item in self.state.active_events_for_run(self.options.run_id)
+        }
+        scores = {
+            item.lead_event_id: item.score
+            for item in self.state.scores_for_run(self.options.run_id)
+        }
+
+        cache_dir = self.artifacts.raw_dir / WHY_LINE_PROTOCOL_VERSION
+        cached_by_key: dict[str, CompanyProfile] = {}
+        pending: list[CompanyProfile] = []
+        for profile in original_profiles:
+            cache_path = cache_dir / f"{profile.profile_key}-profile.json"
+            if cache_path.exists():
+                cached = CompanyProfile.model_validate_json(
+                    cache_path.read_text(encoding="utf-8")
+                )
+                response_path = Path(cached.raw_artifact_path)
+                if response_path.exists():
+                    variants = _variants_from_payload(
+                        _parse_object(response_path.read_text(encoding="utf-8"))
+                    )
+                    cached = cached.model_copy(
+                        update={
+                            "variants": variants,
+                            "record_status": (
+                                "valid"
+                                if all(
+                                    item.status == "valid"
+                                    for item in variants.values()
+                                )
+                                else "review"
+                            ),
+                        }
+                    )
+                    self.artifacts.write_raw(
+                        stage,
+                        f"{WHY_LINE_PROTOCOL_VERSION}/{profile.profile_key}-profile.json",
+                        cached.model_dump(mode="json"),
+                    )
+                cached_by_key[profile.profile_key] = cached
+            else:
+                pending.append(profile)
+        selected = pending[:limit] if limit is not None else pending
+
+        def refresh(profile: CompanyProfile) -> tuple[CompanyProfile, bool]:
+            events = [
+                events_by_id[event_id]
+                for event_id in profile.lead_event_ids
+                if event_id in events_by_id
+            ]
+            if not events:
+                raise ValueError(f"company profile has no active events: {profile.profile_key}")
+            return self._refresh_company_profile(stage, profile, events, scores)
+
+        with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
+            results = list(pool.map(refresh, selected))
+        refreshed_by_key = {profile.profile_key: profile for profile, _ in results}
+        model_calls = sum(called for _, called in results)
+
+        profiles_by_key = {**cached_by_key, **refreshed_by_key}
+        profiles = [
+            profiles_by_key[profile.profile_key]
+            for profile in original_profiles
+            if profile.profile_key in profiles_by_key
+        ]
+        for profile in profiles:
+            for key, variant in profile.variants.items():
+                if variant.status == "valid":
+                    continue
+                self.state.add_review(
+                    ReviewItem(
+                        review_id=stable_uuid(
+                            "review", self.options.run_id, stage, profile.profile_key, key
+                        ),
+                        run_id=self.options.run_id,
+                        stage=stage,
+                        record_type="company_profile",
+                        record_id=f"{profile.profile_key}:{key}",
+                        reason_code="recipient_why_line_invalid",
+                        validation_errors=(
+                            variant.validation_errors or ["recipient_why_line_invalid"]
+                        ),
+                        raw_artifact_path=profile.raw_artifact_path,
+                    )
+                )
+        invalid_record_ids = {
+            f"{profile.profile_key}:{key}"
+            for profile in profiles
+            for key, variant in profile.variants.items()
+            if variant.status != "valid"
+        }
+        for item in self.state.reviews_for_run(self.options.run_id):
+            if (
+                item.stage == stage
+                and item.record_id not in invalid_record_ids
+                and item.state != "resolved"
+            ):
+                self.state.add_review(
+                    item.model_copy(
+                        update={
+                            "state": "resolved",
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    )
+                )
+        remaining = len(original_profiles) - len(profiles)
+        valid_profiles = sum(profile.record_status == "valid" for profile in profiles)
+        valid_variants = sum(
+            variant.status == "valid"
+            for profile in profiles
+            for variant in profile.variants.values()
+        )
+        counters = {
+            "companies": len(original_profiles),
+            "processed_companies": len(profiles),
+            "new_model_calls": model_calls,
+            "cached_companies": len(cached_by_key),
+            "remaining_companies": remaining,
+            "valid_profiles": valid_profiles,
+            "review_profiles": len(profiles) - valid_profiles,
+            "valid_variants": valid_variants,
+            "review_variants": len(profiles) * len(WHY_KEYS) - valid_variants,
+        }
+        if remaining:
+            self.artifacts.write_raw(
+                stage,
+                f"{WHY_LINE_PROTOCOL_VERSION}/progress.json",
+                counters,
+            )
+            return counters, False
+        counters["model_calls"] = len(profiles)
+        self._write_why_line_revision(stage, revision_dir, profiles, counters)
+        return counters, True
+
+    def _refresh_company_profile(
+        self,
+        stage: str,
+        profile: CompanyProfile,
+        events: list[LeadEvent],
+        scores: dict[str, int],
+    ) -> tuple[CompanyProfile, bool]:
+        cache_name = (
+            f"{WHY_LINE_PROTOCOL_VERSION}/{profile.profile_key}-profile.json"
+        )
+        cache_path = self.artifacts.raw_dir / cache_name
+        if cache_path.exists():
+            return (
+                CompanyProfile.model_validate_json(
+                    cache_path.read_text(encoding="utf-8")
+                ),
+                False,
+            )
+
+        anchor = next(
+            (
+                event
+                for event in events
+                if event.lead_event_id == profile.anchor_lead_event_id
+            ),
+            _anchor_event(events, scores),
+        )
+        event_payload = [
+            {
+                "lead_event_id": event.lead_event_id,
+                "event": event.event,
+                "date": str(event.date_posted or ""),
+                "location": event.location,
+                "summary": event.summary,
+                "priority": event.priority,
+                "score": scores.get(event.lead_event_id),
+                "sources": [item.url for item in event.evidence],
+            }
+            for event in sorted(events, key=lambda item: item.lead_event_id)
+        ]
+        prompt = COMPANY_PROMPT.format(
+            profile_key=profile.profile_key,
+            company_name=profile.canonical_name,
+            domain=profile.domain,
+            names=json.dumps(profile.aliases),
+            locations=json.dumps(profile.locations),
+            anchor_id=anchor.lead_event_id,
+            events=json.dumps(event_payload, sort_keys=True),
+        )
+        attempt_id = stable_uuid(
+            "attempt",
+            self.options.run_id,
+            stage,
+            WHY_LINE_PROTOCOL_VERSION,
+            profile.profile_key,
+        )
+        request_name = f"{WHY_LINE_PROTOCOL_VERSION}/{attempt_id}-request.json"
+        response_name = f"{WHY_LINE_PROTOCOL_VERSION}/{attempt_id}-response.txt"
+        usage_name = f"{WHY_LINE_PROTOCOL_VERSION}/{attempt_id}-usage.json"
+        request = self.artifacts.write_raw(
+            stage,
+            request_name,
+            {"model": self.options.model, "prompt": prompt},
+        )
+        response_path = self.artifacts.raw_dir / response_name
+        usage_path = self.artifacts.raw_dir / usage_name
+        started = datetime.now(timezone.utc).isoformat()
+        called = False
+        try:
+            if response_path.exists():
+                text = response_path.read_text(encoding="utf-8")
+                usage = (
+                    json.loads(usage_path.read_text(encoding="utf-8"))
+                    if usage_path.exists()
+                    else {}
+                )
+            else:
+                called = True
+                text, usage = self.model_call(
+                    self.options.model, prompt, [{"type": "web_search"}]
+                )
+                self.artifacts.write_raw_text(stage, response_name, text)
+                self.artifacts.write_raw(stage, usage_name, usage)
+            payload = _parse_object(text)
+            variants = _variants_from_payload(payload)
+            refreshed = profile.model_copy(
+                update={
+                    "variants": variants,
+                    "record_status": (
+                        "valid"
+                        if all(item.status == "valid" for item in variants.values())
+                        else "review"
+                    ),
+                    "raw_artifact_path": str(response_path),
+                }
+            )
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id,
+                run_id=self.options.run_id,
+                stage=stage,
+                provider="model",
+                target_type="company_why_lines",
+                target_id=profile.profile_key,
+                status="completed",
+                token_usage=usage,
+                request_artifact_path=request["path"],
+                response_artifact_path=str(response_path),
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:
+            refreshed = profile.model_copy(
+                update={
+                    "variants": {
+                        key: WhyVariant(
+                            validation_errors=[
+                                f"recipient_contract:{type(exc).__name__}"
+                            ]
+                        )
+                        for key in WHY_KEYS
+                    },
+                    "record_status": "review",
+                    "raw_artifact_path": str(response_path) if response_path.exists() else "",
+                }
+            )
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id,
+                run_id=self.options.run_id,
+                stage=stage,
+                provider="model",
+                target_type="company_why_lines",
+                target_id=profile.profile_key,
+                status="review",
+                token_usage=usage if "usage" in locals() else {},
+                request_artifact_path=request["path"],
+                response_artifact_path=str(response_path) if response_path.exists() else "",
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        self.artifacts.write_raw(
+            stage,
+            cache_name,
+            refreshed.model_dump(mode="json"),
+        )
+        return refreshed, called
 
     def _stage(self, name: str, function: Callable[[], dict]) -> None:
         if self.options.resume and name in self.state.completed_stages(self.options.run_id):
@@ -1303,7 +1693,6 @@ class BulkRunner:
 
         with ThreadPoolExecutor(max_workers=self.options.workers) as pool:
             profiles = list(pool.map(enrich, sorted(groups.items())))
-        profiles = self._repair_profiles(profiles)
         profiles = _dedupe_profiles(profiles)
         for profile in profiles:
             for key, variant in profile.variants.items():
@@ -1358,6 +1747,8 @@ class BulkRunner:
         ]
         prompt = COMPANY_PROMPT.format(
             profile_key=profile_key,
+            company_name=names[0] if names else profile_key,
+            domain="",
             names=json.dumps(names),
             locations=json.dumps(locations),
             anchor_id=anchor.lead_event_id,
@@ -1377,15 +1768,7 @@ class BulkRunner:
             event_evidence_urls = list(dict.fromkeys(
                 item.url for event in events for item in event.evidence
             ))
-            anchor_evidence_urls = [item.url for item in anchor.evidence]
-            variants = {
-                key: _validate_variant((payload.get("variants") or {}).get(key) or {})
-                for key in WHY_KEYS
-            }
-            for key in ("a", "c"):
-                variants[key] = _require_event_evidence(
-                    variants[key], anchor_evidence_urls
-                )
+            variants = _variants_from_payload(payload)
             canonical_name = str(payload.get("canonical_name") or names[0]).strip()
             domain = _domain(str(payload.get("domain") or ""))
             profile = CompanyProfile(
@@ -1444,104 +1827,6 @@ class BulkRunner:
                 evidence_urls=list(dict.fromkeys([item.url for event in events for item in event.evidence])),
                 record_status="review",
             )
-
-    def _repair_profiles(self, profiles: list[CompanyProfile]) -> list[CompanyProfile]:
-        events_by_id = {
-            item.lead_event_id: item
-            for item in self.state.active_events_for_run(self.options.run_id)
-        }
-        repair_items = {}
-        for profile in profiles:
-            for key, variant in profile.variants.items():
-                if variant.text and variant.source_urls and variant.status != "valid":
-                    if key in {"a", "c"}:
-                        anchor = events_by_id.get(profile.anchor_lead_event_id)
-                        anchor_urls = [item.url for item in anchor.evidence] if anchor else []
-                        checked = _require_event_evidence(variant, anchor_urls)
-                        if "why_line_missing_event_evidence" in checked.validation_errors:
-                            continue
-                    repair_items[f"{profile.profile_key}:{key}"] = variant.text
-        if not repair_items:
-            return profiles
-        payload: dict[str, str] = {}
-        for batch in _chunks(list(repair_items.items()), 25):
-            batch_items = dict(batch)
-            batch_id = stable_hash(*batch_items)[:20]
-            prompt = REPAIR_PROMPT.format(items=json.dumps(batch_items, sort_keys=True))
-            attempt_id = stable_uuid(
-                "attempt", self.options.run_id, "company-why-repair", batch_id
-            )
-            request = self.artifacts.write_raw(
-                "companies", f"{attempt_id}-request.json",
-                {"model": self.options.model, "prompt": prompt},
-            )
-            started = datetime.now(timezone.utc).isoformat()
-            response_path = ""
-            try:
-                text, usage = self.model_call(self.options.model, prompt, [])
-                response = self.artifacts.write_raw_text(
-                    "companies", f"{attempt_id}-response.txt", text
-                )
-                response_path = response["path"]
-                batch_payload = _parse_object(text)
-                if set(batch_payload) != set(batch_items):
-                    raise ValueError("why repair IDs must match exactly")
-                payload.update({key: str(value) for key, value in batch_payload.items()})
-                status = "completed"
-                error = {}
-            except Exception as exc:
-                usage = {}
-                status = "review"
-                error = {"type": type(exc).__name__, "message": str(exc)}
-            self.state.record_provider_attempt(
-                attempt_id=attempt_id,
-                run_id=self.options.run_id,
-                stage="companies",
-                provider="model",
-                target_type="why_repair_batch",
-                target_id=batch_id,
-                status=status,
-                token_usage=usage,
-                request_artifact_path=request["path"],
-                response_artifact_path=response_path,
-                error=error,
-                started_at=started,
-                completed_at=datetime.now(timezone.utc).isoformat(),
-            )
-        updated = []
-        for profile in profiles:
-            variants = dict(profile.variants)
-            for key, variant in profile.variants.items():
-                repair_id = f"{profile.profile_key}:{key}"
-                if repair_id not in payload:
-                    continue
-                candidate = _validate_variant(
-                    {
-                        "text": str(payload[repair_id]),
-                        "confidence": variant.confidence,
-                        "source_urls": variant.source_urls,
-                    }
-                )
-                if key in {"a", "c"}:
-                    anchor = events_by_id.get(profile.anchor_lead_event_id)
-                    candidate = _require_event_evidence(
-                        candidate,
-                        [item.url for item in anchor.evidence] if anchor else [],
-                    )
-                variants[key] = candidate if candidate.status == "valid" else WhyVariant(
-                    confidence=variant.confidence,
-                    source_urls=variant.source_urls,
-                    validation_errors=[*candidate.validation_errors, "repair_failed"],
-                )
-            updated.append(
-                profile.model_copy(
-                    update={
-                        "variants": variants,
-                        "record_status": "valid" if all(item.status == "valid" for item in variants.values()) else "review",
-                    }
-                )
-            )
-        return updated
 
     def _export(self) -> dict:
         events = self.state.active_events_for_run(self.options.run_id)
@@ -1625,6 +1910,99 @@ class BulkRunner:
             "companies": len(company_rows),
             "reviews": len(self.state.reviews_for_run(self.options.run_id)),
         }
+
+    def _write_why_line_revision(
+        self,
+        stage: str,
+        revision_dir: Path,
+        profiles: list[CompanyProfile],
+        counters: dict[str, int],
+    ) -> None:
+        profile_by_company = {profile.company_id: profile for profile in profiles}
+        source_leads = self.artifacts.final_dir / "leads.csv"
+        if not source_leads.exists():
+            raise ValueError("completed run is missing final/leads.csv")
+        with source_leads.open(newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            lead_fields = list(reader.fieldnames or [])
+            lead_rows = list(reader)
+        if "why_line_status" not in lead_fields:
+            status_index = lead_fields.index("record_status") + 1
+            lead_fields.insert(status_index, "why_line_status")
+        for row in lead_rows:
+            profile = profile_by_company.get(row.get("company_id", ""))
+            row["why_line_status"] = profile.record_status if profile else "review"
+            for key in WHY_KEYS:
+                row[f"why_line_{key}"] = _variant_text(profile, key)
+                row[f"why_sources_{key}"] = _variant_sources(profile, key)
+
+        company_fields = [
+            "company_id", "business_name", "domain", "aliases", "locations",
+            "employee_count", "lead_event_ids", "lead_event_count",
+            "anchor_lead_event_id", "why_line_a", "why_confidence_a",
+            "why_sources_a", "why_line_b", "why_confidence_b", "why_sources_b",
+            "why_line_c", "why_confidence_c", "why_sources_c", "record_status",
+            "run_id", "provenance_json",
+        ]
+        company_rows = [_company_row(profile, self.options.run_id) for profile in profiles]
+        company_rows.sort(
+            key=lambda item: (-int(item["lead_event_count"]), item["business_name"])
+        )
+        revision_dir.mkdir(parents=True, exist_ok=True)
+        _write_csv(revision_dir / "leads.csv", lead_fields, lead_rows)
+        _write_csv(revision_dir / "companies.csv", company_fields, company_rows)
+        _write_jsonl(revision_dir / "company_profiles.jsonl", profiles)
+        invalid_record_ids = {
+            f"{profile.profile_key}:{key}"
+            for profile in profiles
+            for key, variant in profile.variants.items()
+            if variant.status != "valid"
+        }
+        revision_reviews = [
+            item
+            for item in self.state.reviews_for_run(self.options.run_id)
+            if item.stage == stage and item.record_id in invalid_record_ids
+        ]
+        _write_jsonl(revision_dir / "reviews.jsonl", revision_reviews)
+
+        usage: dict[str, int] = {"provider_attempts": 0}
+        with self.state.connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT token_usage_json FROM v2_provider_attempts "
+                    "WHERE run_id=? AND stage=?",
+                    (self.options.run_id, stage),
+                )
+            )
+        usage["provider_attempts"] = len(rows)
+        for row in rows:
+            for key, value in json.loads(row["token_usage_json"] or "{}").items():
+                if isinstance(value, (int, float)):
+                    usage[key] = usage.get(key, 0) + int(value)
+        summary = {
+            "run_id": self.options.run_id,
+            "protocol_version": WHY_LINE_PROTOCOL_VERSION,
+            "model": self.options.model,
+            "status": "completed",
+            "one_model_call_per_business": True,
+            "model_repair_calls": False,
+            "counts": counters,
+            "usage": usage,
+            "output": str(revision_dir),
+            "source_output_preserved": str(self.artifacts.final_dir),
+        }
+        self.artifacts.write_json(
+            stage,
+            f"{WHY_LINE_PROTOCOL_VERSION}/summary.json",
+            summary,
+        )
+        for path, kind in (
+            (revision_dir / "leads.csv", "csv"),
+            (revision_dir / "companies.csv", "csv"),
+            (revision_dir / "company_profiles.jsonl", "jsonl"),
+            (revision_dir / "reviews.jsonl", "jsonl"),
+        ):
+            self.artifacts.record_existing(stage, kind, path)
 
     def _write_coverage(self) -> None:
         fields = list(SourceCoverage.model_fields)
@@ -1810,13 +2188,38 @@ def _parse_object(text: str) -> dict:
 
 
 def _word_count(value: str) -> int:
-    return len(re.findall(r"\b[\w’']+\b", value))
+    return len(value.split())
 
 
-def _validate_variant(raw: dict) -> WhyVariant:
+def _sentence_count(value: str) -> int:
+    normalized = re.sub(r"(?<=\d)\.(?=\d)", "", value)
+    normalized = re.sub(
+        r"\b(?:Inc|Corp|Co|Ltd|LLC|L\.L\.C|U\.S|U\.S\.A)\.(?=\s)",
+        lambda match: match.group(0).replace(".", ""),
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\b([A-Z])\.(?=\s+[A-Z])", r"\1", normalized)
+    return len(re.findall(r"[.!?](?=\s+[A-Z]|$)", normalized))
+
+
+def _complete_short_why_line(text: str, key: str) -> str:
+    tails = {
+        "a": "and that update caught my attention while reviewing recent Arizona developments.",
+        "b": "an operating detail that stood out while I was learning more about your work.",
+        "c": "a combination that stood out while I was reviewing your recent company updates.",
+    }
+    tail = tails.get(
+        key,
+        "a detail that stood out while I was learning more about your work.",
+    )
+    return f"{text.rstrip('.!?')}, {tail}"
+
+
+def _validate_variant(raw: dict, *, key: str = "") -> WhyVariant:
     text = " ".join(str(raw.get("text") or "").split())
     confidence = str(raw.get("confidence") or "low").casefold()
-    if confidence not in {"high", "low"}:
+    if confidence not in {"high", "medium", "low"}:
         confidence = "low"
     sources = []
     for value in raw.get("source_urls") or []:
@@ -1825,6 +2228,10 @@ def _validate_variant(raw: dict) -> WhyVariant:
         except ValueError:
             continue
     sources = list(dict.fromkeys(sources))
+    if text and sources and 17 <= _word_count(text) < 25:
+        text = _complete_short_why_line(text, key)
+        if confidence == "high":
+            confidence = "medium"
     errors = []
     if not text:
         errors.append("why_line_missing")
@@ -1834,11 +2241,17 @@ def _validate_variant(raw: dict) -> WhyVariant:
         errors.append("why_line_word_count")
     if "—" in text or "–" in text:
         errors.append("why_line_dash")
+    if text and not text.casefold().startswith(WHY_LINE_OPENERS):
+        errors.append("why_line_not_recipient_facing")
+    if text and _sentence_count(text) != 1:
+        errors.append("why_line_sentence_count")
+    if text and re.search(r"(?:https?://|www\.)", text, re.IGNORECASE):
+        errors.append("why_line_contains_url")
+    if text and any(re.search(pattern, text, re.IGNORECASE) for pattern in WHY_LINE_FORBIDDEN_PATTERNS):
+        errors.append("why_line_sales_inference")
     if errors:
-        if "why_line_unsourced" in errors:
-            text = ""
         return WhyVariant(
-            text=text,
+            text="",
             confidence=confidence,
             source_urls=sources,
             status="review",
@@ -1852,27 +2265,36 @@ def _validate_variant(raw: dict) -> WhyVariant:
     )
 
 
-def _require_event_evidence(
-    variant: WhyVariant, event_evidence_urls: Iterable[str]
-) -> WhyVariant:
-    allowed = set()
-    for value in event_evidence_urls:
-        try:
-            allowed.add(canonicalize_url(value))
-        except ValueError:
-            continue
-    if not (set(variant.source_urls) & allowed):
-        return WhyVariant(
-            text="",
-            confidence=variant.confidence,
-            source_urls=variant.source_urls,
-            status="review",
-            validation_errors=list(dict.fromkeys([
-                *variant.validation_errors,
-                "why_line_missing_event_evidence",
-            ])),
+def _variants_from_payload(payload: dict) -> dict[str, WhyVariant]:
+    variants = {
+        key: _validate_variant(
+            (payload.get("variants") or {}).get(key) or {}, key=key
         )
-    return variant
+        for key in WHY_KEYS
+    }
+    return _require_distinct_variants(variants)
+
+
+def _require_distinct_variants(
+    variants: dict[str, WhyVariant],
+) -> dict[str, WhyVariant]:
+    seen: set[str] = set()
+    output: dict[str, WhyVariant] = {}
+    for key in WHY_KEYS:
+        variant = variants[key]
+        normalized = normalize_text(variant.text)
+        if variant.status == "valid" and normalized in seen:
+            output[key] = WhyVariant(
+                confidence=variant.confidence,
+                source_urls=variant.source_urls,
+                status="review",
+                validation_errors=["why_line_duplicate_variant"],
+            )
+            continue
+        if normalized:
+            seen.add(normalized)
+        output[key] = variant
+    return output
 
 
 def _anchor_event(events: list[LeadEvent], scores: dict[str, int]) -> LeadEvent:
@@ -1968,11 +2390,17 @@ def _verify_seed_manifest(
 
 
 def _variant_text(profile: CompanyProfile | None, key: str) -> str:
-    return profile.variants[key].text if profile and key in profile.variants else ""
+    if not profile or key not in profile.variants:
+        return ""
+    variant = profile.variants[key]
+    return variant.text if variant.status == "valid" else ""
 
 
 def _variant_sources(profile: CompanyProfile | None, key: str) -> str:
-    return " ".join(profile.variants[key].source_urls) if profile and key in profile.variants else ""
+    if not profile or key not in profile.variants:
+        return ""
+    variant = profile.variants[key]
+    return " ".join(variant.source_urls) if variant.status == "valid" else ""
 
 
 def _company_row(profile: CompanyProfile, run_id: str) -> dict:

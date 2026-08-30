@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import csv
 import json
 import sys
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from bulk_lib import (  # noqa: E402
     WhyVariant,
     _archive_url_in_scope,
     _offline_screen,
-    _require_event_evidence,
+    _require_distinct_variants,
     _validate_variant,
 )
 from v2.contracts import (  # noqa: E402
@@ -258,14 +259,14 @@ def test_legacy_interrupted_run_reuses_saved_corpus_without_fetching(tmp_path):
 def test_why_line_validation_is_sourced_and_fail_closed():
     valid = _validate_variant(
         {
-            "text": "Acme opened a new Phoenix marketplace, creating an immediate need for reliable facilities support that protects the asset as tenants and customers begin using the property.",
+            "text": "Saw your team opened the new Phoenix marketplace on July 25, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone.",
             "confidence": "high",
             "source_urls": ["https://example.com/story"],
         }
     )
     unsupported = _validate_variant(
         {
-            "text": "Acme has a facilities opportunity that should be pursued immediately because the company operates many properties and appears ready for a new strategic service partner today.",
+            "text": "Saw your team opened a new Phoenix marketplace and appears ready for a strategic service partner because this creates an immediate facilities opportunity for Acme.",
             "confidence": "high",
             "source_urls": [],
         }
@@ -273,14 +274,52 @@ def test_why_line_validation_is_sourced_and_fail_closed():
 
     assert valid.status == "valid"
     assert unsupported.status == "review" and unsupported.text == ""
-    wrong_event_source = _require_event_evidence(
-        valid, ["https://example.com/different-event"]
+
+
+def test_why_line_validation_rejects_analyst_copy_and_duplicate_variants():
+    analyst = _validate_variant(
+        {
+            "text": "The company opened a Phoenix warehouse in August, creating an immediate need for facilities services and making this an ideal time for outreach to its operating team.",
+            "confidence": "high",
+            "source_urls": ["https://example.com/story"],
+        }
     )
-    assert wrong_event_source.status == "review"
-    assert wrong_event_source.text == ""
-    assert wrong_event_source.validation_errors == [
-        "why_line_missing_event_evidence"
-    ]
+    valid_text = "Saw your team opened the new Phoenix warehouse on August 1, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone."
+    variants = _require_distinct_variants(
+        {
+            key: _validate_variant(
+                {
+                    "text": valid_text,
+                    "confidence": "high",
+                    "source_urls": ["https://example.com/story"],
+                }
+            )
+            for key in ("a", "b", "c")
+        }
+    )
+
+    assert analyst.status == "review" and analyst.text == ""
+    assert "why_line_not_recipient_facing" in analyst.validation_errors
+    assert "why_line_sales_inference" in analyst.validation_errors
+    assert variants["a"].status == "valid"
+    assert variants["b"].validation_errors == ["why_line_duplicate_variant"]
+    assert variants["c"].validation_errors == ["why_line_duplicate_variant"]
+
+
+def test_short_sourced_why_line_gets_deterministic_fact_free_completion():
+    variant = _validate_variant(
+        {
+            "text": "Noticed Vestar owns the 1.2 million square foot Desert Ridge Marketplace regional entertainment lifestyle and power center in northeast Phoenix Arizona.",
+            "confidence": "high",
+            "source_urls": ["https://vestar.com/"],
+        },
+        key="b",
+    )
+
+    assert variant.status == "valid"
+    assert 25 <= len(variant.text.split()) <= 45
+    assert variant.confidence == "medium"
+    assert variant.text.endswith("learning more about your work.")
 
 
 def test_offline_screen_treats_missing_or_ambiguous_geography_conservatively(tmp_path):
@@ -363,7 +402,8 @@ def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
         "rejected": 13,
         "reviews": 0,
     }
-    assert calls == [(5, []), (5, []), (3, [])]
+    assert sorted(size for size, _ in calls) == [3, 5, 5]
+    assert all(tools == [] for _, tools in calls)
     with runner.state.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
 
@@ -440,13 +480,18 @@ def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_p
     }
 
 
-def test_why_repair_cannot_bypass_anchor_event_evidence(tmp_path):
-    runner = BulkRunner(
+def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
+    initial = BulkRunner(
         options(tmp_path),
         fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
-        model_call=lambda *args: (_ for _ in ()).throw(
-            AssertionError("wrong-source why line must not be repaired")
-        ),
+        model_call=lambda *args: ("{}", {}),
+    )
+    initial.manifest.status = StageStatus.COMPLETED
+    initial._refresh_manifest()
+    runner = BulkRunner(
+        options(tmp_path, resume=True),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
     )
     runner.state.upsert_source(
         "source-1", "Example", "https://example.com/", "example.com"
@@ -483,29 +528,82 @@ def test_why_repair_cannot_bypass_anchor_event_evidence(tmp_path):
             evidence=[Evidence(url=article, supports="Reports the opening")],
         )
     )
-    wrong_source = WhyVariant(
-        text="This deliberately malformed sourced sentence is too short for the format contract but still should never be repaired using an unrelated source URL.",
-        confidence="high",
-        source_urls=["https://unrelated.example/context"],
-        status="review",
-        validation_errors=["why_line_word_count"],
-    )
     profile = CompanyProfile(
         profile_key="profile-anchor",
+        company_id="company-anchor",
         canonical_name="Anchor Co",
+        domain="anchor.example",
         organization_ids=["org-anchor"],
         lead_event_ids=["event-anchor"],
         anchor_lead_event_id="event-anchor",
-        variants={
-            "a": wrong_source,
-            "b": WhyVariant(),
-            "c": WhyVariant(),
-        },
+        variants={key: WhyVariant() for key in ("a", "b", "c")},
     )
+    initial.artifacts.final_dir.mkdir(parents=True, exist_ok=True)
+    (initial.artifacts.final_dir / "company_profiles.jsonl").write_text(
+        profile.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    with (initial.artifacts.final_dir / "leads.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "lead_event_id", "company_id", "why_line_a", "why_line_b",
+                "why_line_c", "why_sources_a", "why_sources_b", "why_sources_c",
+                "record_status",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "lead_event_id": "event-anchor",
+                "company_id": "company-anchor",
+                "record_status": "valid",
+            }
+        )
 
-    repaired = runner._repair_profiles([profile])
+    calls = []
+    official = "https://anchor.example/operations"
+    lines = {
+        "a": "Saw your team opened the new Phoenix warehouse on August 1, adding a customer-facing commercial property to Anchor Co's local operating footprint after the announced development milestone.",
+        "b": "Your official site highlights Anchor Co's Phoenix warehouse operation, including receiving areas, customer pickup space, and scheduled inventory handling within one managed commercial location serving regional clients.",
+        "c": "Noticed Anchor Co paired its August warehouse opening with a regional inventory model, bringing receiving, storage, and customer pickup operations together at the new Phoenix commercial property.",
+    }
 
-    assert repaired[0].variants["a"] == wrong_source
+    def model_call(model, prompt, tools):
+        calls.append((model, tools, prompt))
+        return json.dumps(
+            {
+                "variants": {
+                    "a": {"text": lines["a"], "confidence": "high", "source_urls": [article]},
+                    "b": {"text": lines["b"], "confidence": "high", "source_urls": [official]},
+                    "c": {"text": lines["c"], "confidence": "high", "source_urls": [article, official]},
+                }
+            }
+        ), {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+
+    runner.model_call = model_call
+
+    first = runner.refresh_why_lines()
+    second = runner.refresh_why_lines()
+
+    assert len(calls) == 1
+    assert calls[0][0] == "grok-4.3"
+    assert calls[0][1] == [{"type": "web_search"}]
+    assert first["counts"]["companies"] == 1
+    assert first["counts"]["model_calls"] == 1
+    assert first["counts"]["valid_profiles"] == 1
+    assert second["counts"]["model_calls"] == 1
+    assert second["counts"]["new_model_calls"] == 0
+    assert second["counts"]["cached_companies"] == 1
+    revised = Path(first["output"])
+    with (revised / "leads.csv").open(newline="", encoding="utf-8") as file:
+        row = next(csv.DictReader(file))
+    assert row["why_line_status"] == "valid"
+    assert [row[f"why_line_{key}"] for key in ("a", "b", "c")] == [
+        lines[key] for key in ("a", "b", "c")
+    ]
 
 
 def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
@@ -600,9 +698,9 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
             raise RuntimeError("not found")
         return response(url, pages[url])
 
-    why_a = "Acme opened a new Phoenix marketplace, creating an immediate need for reliable facilities support that protects the asset as tenants and customers begin using the property."
-    why_b = "Acme operates a customer-facing commercial marketplace where consistent maintenance, presentation, and facility reliability directly support tenant satisfaction, asset value, and dependable daily business operations."
-    why_c = "The new Phoenix marketplace expands Acme's operating footprint, making timely facilities support valuable for opening stability while establishing a scalable asset-preservation standard across future company locations."
+    why_a = "Saw your team opened the new Phoenix marketplace on July 25, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone."
+    why_b = "Your official site highlights Acme's Phoenix marketplace format, combining local vendors, shared customer areas, and recurring community programming within one managed commercial destination serving neighborhood shoppers."
+    why_c = "Noticed Acme paired its July marketplace opening with a vendor-focused operating model, bringing local merchants and shared public areas together at the new Phoenix commercial property."
 
     def model_call(model, prompt, tools):
         if "bounded batch" in prompt:
@@ -633,7 +731,7 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
             assert '"contacts"' not in prompt
             event_id = runner.state.active_events_for_run("bulk-run")[0].lead_event_id
             return json.dumps({event_id: 88}), {}
-        if "Resolve one Aether" in prompt:
+        if "Write three alternative cold-email" in prompt:
             return json.dumps(
                 {
                     "canonical_name": "Acme Marketplace",

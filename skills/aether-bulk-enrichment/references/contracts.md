@@ -39,12 +39,20 @@
 - Select the anchor event by score, then priority (`high`, `medium`, `low`), newest
   event date, and stable event ID.
 - One Grok 4.3 company request returns all variants:
-  - `a`: why the anchor property event makes outreach timely.
-  - `b`: why ongoing company operations fit Aether facilities services.
-  - `c`: a specific blend of the anchor event and operating context.
-- Each nonblank line is one sourced sentence of 25–45 words with no en/em dash.
-  Unsupported lines are blank and enter review. Sourced format failures receive one
-  bounded zero-search repair batches with exact ID coverage.
+  - `a`: recipient-facing copy using a timely sourced property event.
+  - `b`: recipient-facing copy using a specific sourced operating detail.
+  - `c`: a distinct recipient-facing combination of event and operating context.
+- A/B/C are alternative cold-email opening sentences, not analyst explanations of
+  timeliness, service fit, or supposed company needs. Each begins with `Saw`,
+  `Noticed`, or `Your`, contains 25–45 whitespace-separated words, cites its evidence,
+  contains no URL or en/em dash, and makes no facilities-services or sales inference.
+- One model response must return all three variants for the company. Unsupported or
+  invalid lines are blank and enter review. A sourced 17–24 word line may receive one
+  deterministic, fact-free conversational completion before revalidation. There is
+  no model repair call.
+- A why-line-only refresh of a completed run uses its already deduplicated companies,
+  preserves the source outputs, and writes a versioned revision with a separate
+  `why_line_status` on lead rows.
 
 ## Outputs
 

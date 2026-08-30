@@ -35,6 +35,19 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--run-id", default="")
     value.add_argument("--resume", action="store_true")
     value.add_argument(
+        "--refresh-why-lines",
+        action="store_true",
+        help=(
+            "create a versioned recipient-facing A/B/C why-line revision using "
+            "one Grok call per existing deduplicated company"
+        ),
+    )
+    value.add_argument(
+        "--why-limit",
+        type=int,
+        help="optional pilot size for --refresh-why-lines; resume without it to finish",
+    )
+    value.add_argument(
         "--reuse-discovery-corpus",
         action="store_true",
         help="resume from already persisted discovery pages without crawling sites again",
@@ -54,6 +67,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.resume and not args.run_id:
         print("ERROR: --resume requires --run-id", file=sys.stderr)
+        return 2
+    if args.refresh_why_lines and not args.resume:
+        print("ERROR: --refresh-why-lines requires --resume", file=sys.stderr)
+        return 2
+    if args.why_limit is not None and not args.refresh_why_lines:
+        print("ERROR: --why-limit requires --refresh-why-lines", file=sys.stderr)
+        return 2
+    if args.why_limit is not None and args.why_limit < 1:
+        print("ERROR: --why-limit must be positive", file=sys.stderr)
         return 2
     if bool(args.seed_db) != bool(args.seed_run_id):
         print("ERROR: --seed-db and --seed-run-id must be supplied together", file=sys.stderr)
@@ -75,7 +97,12 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=max(1, min(args.batch_size, 25)),
     )
     try:
-        result = BulkRunner(options).run()
+        runner = BulkRunner(options)
+        result = (
+            runner.refresh_why_lines(limit=args.why_limit)
+            if args.refresh_why_lines
+            else runner.run()
+        )
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
