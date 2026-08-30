@@ -32,34 +32,80 @@
 - If seed integrity fails, stop. The operator may omit the seed and cover that date in
   archive discovery instead.
 
-## Company profile and why lines
+## Company profile and why line
 
 - Resolve preliminary organizations to final companies by canonical website host,
   falling back to normalized company name.
 - Select the anchor event by score, then priority (`high`, `medium`, `low`), newest
   event date, and stable event ID.
-- One Grok 4.3 company request returns all variants:
-  - `a`: recipient-facing copy using a timely sourced property event.
-  - `b`: recipient-facing copy using a specific sourced operating detail.
-  - `c`: a distinct recipient-facing combination of event and operating context.
-- A/B/C are alternative cold-email opening sentences, not analyst explanations of
-  timeliness, service fit, or supposed company needs. Each begins with `Saw`,
-  `Noticed`, or `Your`, contains 25–45 whitespace-separated words, cites its evidence,
-  contains no URL or en/em dash, and makes no facilities-services or sales inference.
-- One model response must return all three variants for the company. Unsupported or
-  invalid lines are blank and enter review. A sourced 17–24 word line may receive one
-  deterministic, fact-free conversational completion before revalidation. There is
-  no model repair call.
+- One Grok 4.3 company request selects exactly one approved event-stage template,
+  one supporting lead event, short insertion slots, confidence, and source URLs.
+- The approved sendable templates cover acquisition by a verified new owner, opening,
+  proposed development, approval, construction start, lease/relocation, site
+  acquisition, expansion, facility-tied funding, renovation/conversion, construction
+  progress, and completion.
+- Seller/broker/listing signals route to `route_new_owner`; closures, bankruptcy,
+  lawsuits, stalled or abandoned projects route to `skip_negative`; general market or
+  portfolio signals without a property trigger route to `skip_general`.
+- The model never writes the final sentence. Deterministic code renders the approved
+  `Hi [first name] just wanted to reach out since I saw on the news that ...` wording
+  from the returned slots, followed by one approved question. All templates use the
+  future-needs question except renovation/conversion, which uses the review question,
+  and expansion, which uses the additional-space question. Validation requires one sourced event
+  ID, exact slot coverage, short URL-free values, exactly two sentences, and a 20–55
+  word final line. Non-company slots are lowercase. Uppercase letters are allowed only
+  at sentence starts, in the standalone pronoun `I`, and within a company reference
+  whose casing was resolved from the canonical company name or a known alias.
+- `company`, `project`, and `project_or_expansion` references
+  are hard-capped at three words. Prefer a supplied, recognizable abbreviation or
+  casual short name when it can stand alone without confusing the recipient; never
+  invent an obscure acronym. A company reference must match a contiguous phrase from
+  a supplied canonical name or alias; deterministic code restores its verified brand
+  capitalization. Unknown and overlong references fail closed without a repair call.
+- A `location` slot contains exactly one smallest useful locality or neighborhood and
+  no more than three words. Deterministic normalization keeps only the first leaf
+  place, removes state suffixes and road-detail clauses, and rejects commas, counties,
+  regions, multiple cities, and broad state-only values. For example, `tempe, arizona`
+  becomes `tempe`, `deer valley, north phoenix` becomes `deer valley`, and `tucson and
+  gilbert` becomes `tucson`. A location that cannot be reduced safely fails closed.
+- Unsupported or invalid selections are blank and enter review. Intentional routing
+  outcomes are blank with `why_line_status=skip`; they are not validation failures.
+  There is no model repair call.
 - A why-line-only refresh of a completed run uses its already deduplicated companies,
   preserves the source outputs, and writes a versioned revision with a separate
-  `why_line_status` on lead rows.
+  `why_line_status` on lead rows. A deterministic contract-only revision may migrate
+  and rerender compatible cached responses without another model call.
 
 ## Outputs
 
 - All exports are isolated under `<output>/<until>/runs/<run_id>/final/`.
 - `leads.csv`: one row per final lead event, including `company_id`, score, evidence,
-  and projected A/B/C why lines.
+  and the projected `why_line`, `why_template_key`, confidence, sources, and status.
 - `companies.csv`: one row per final company with domain, locations, event IDs/count,
-  anchor event, employee count, A/B/C lines, confidence, sources, and provenance.
+  anchor event, employee count, one why line, template key, confidence, sources,
+  status, and provenance.
 - JSONL equivalents, `reviews.jsonl`, `coverage.csv`, and a terminal manifest are
-  required. No email/HTML/contact/Apollo artifact is part of this skill.
+  required. No email/HTML/contact/Apollo artifact is part of the base bulk run.
+
+## Explicit recipient add-on
+
+- Recipient enrichment is a separate, explicit-only resume mode over the completed
+  `recipient-outreach-v4` company revision. Only companies with a valid why line enter
+  the recipient stage.
+- Research up to three sourced current decision makers per company with one Grok 4.3
+  request per company, then make one public-contact request per identified person.
+  Persist stable `Person` and `ContactCandidate` records so resume does not repeat
+  completed provider attempts.
+- Emit one `recipients.csv` row per person. Derive `first_name` from the sourced full
+  name, ignoring common honorifics, and replace the exact `Hi [first name]` prefix
+  deterministically. Never leave an unresolved placeholder.
+- Apollo requires its own explicit authorization and is used only for people without a
+  non-rejected public email or phone. Phone reveal is disabled. Enforce the supplied
+  hard cap across resumes, count only new API requests against it, and preserve cached
+  null results.
+- Apollo request and local billable flags are auditable upper-bound accounting; exact
+  credits and dollar charges remain provider-ledger facts. Recipient enrichment never
+  generates or sends an email.
+- Write `recipients.csv`, recipient-level `companies.csv`, `people.jsonl`,
+  `contacts.jsonl`, `reviews.jsonl`, and `summary.json` under
+  `final/recipient-outreach-v4/recipients-v1/` without changing the v4 source files.

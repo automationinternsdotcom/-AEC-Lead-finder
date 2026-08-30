@@ -38,9 +38,28 @@ def parser() -> argparse.ArgumentParser:
         "--refresh-why-lines",
         action="store_true",
         help=(
-            "create a versioned recipient-facing A/B/C why-line revision using "
-            "one Grok call per existing deduplicated company"
+            "create a versioned single template-rendered why-line revision using "
+            "at most one Grok call per existing deduplicated company"
         ),
+    )
+    value.add_argument(
+        "--enrich-recipients",
+        action="store_true",
+        help=(
+            "research up to three current decision makers per sendable company, "
+            "then public contact details and optional Apollo fallback"
+        ),
+    )
+    value.add_argument(
+        "--apollo-go",
+        action="store_true",
+        help="authorize email-only Apollo fallback for people with no public email or phone",
+    )
+    value.add_argument(
+        "--apollo-cap",
+        type=int,
+        default=444,
+        help="hard ceiling on new Apollo person-match requests (default: 444)",
     )
     value.add_argument(
         "--why-limit",
@@ -71,6 +90,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.refresh_why_lines and not args.resume:
         print("ERROR: --refresh-why-lines requires --resume", file=sys.stderr)
         return 2
+    if args.enrich_recipients and not args.resume:
+        print("ERROR: --enrich-recipients requires --resume", file=sys.stderr)
+        return 2
+    if args.refresh_why_lines and args.enrich_recipients:
+        print(
+            "ERROR: --refresh-why-lines and --enrich-recipients are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if args.apollo_go and not args.enrich_recipients:
+        print("ERROR: --apollo-go requires --enrich-recipients", file=sys.stderr)
+        return 2
+    if args.apollo_cap < 0:
+        print("ERROR: --apollo-cap cannot be negative", file=sys.stderr)
+        return 2
     if args.why_limit is not None and not args.refresh_why_lines:
         print("ERROR: --why-limit requires --refresh-why-lines", file=sys.stderr)
         return 2
@@ -98,11 +132,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         runner = BulkRunner(options)
-        result = (
-            runner.refresh_why_lines(limit=args.why_limit)
-            if args.refresh_why_lines
-            else runner.run()
-        )
+        if args.refresh_why_lines:
+            result = runner.refresh_why_lines(limit=args.why_limit)
+        elif args.enrich_recipients:
+            result = runner.enrich_recipients(
+                apollo_go=args.apollo_go,
+                apollo_cap=args.apollo_cap,
+            )
+        else:
+            result = runner.run()
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

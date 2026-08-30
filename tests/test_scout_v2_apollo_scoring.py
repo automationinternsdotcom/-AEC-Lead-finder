@@ -107,6 +107,38 @@ def test_apollo_transient_failure_is_not_cached(tmp_path):
     assert len(calls) == 2
 
 
+def test_apollo_rate_limit_is_transient_and_not_cached(tmp_path, monkeypatch):
+    store, _, _ = setup(tmp_path)
+    calls = []
+
+    class RateLimitedResponse:
+        status_code = 429
+        text = "50 requests per minute"
+
+    class RateLimitedClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return RateLimitedResponse()
+
+    monkeypatch.setattr("v2.apollo.httpx.Client", RateLimitedClient)
+    resolver = ApolloResolver(store, api_key="key")
+
+    for _ in range(2):
+        with pytest.raises(ApolloTransientError, match="HTTP 429"):
+            resolver.resolve("Jane", "Acme", spend=True)
+
+    assert len(calls) == 2
+
+
 def test_scoring_retries_incomplete_batch_and_preserves_zero(tmp_path):
     store, artifacts, event = setup(tmp_path)
     responses = iter([json.dumps({}), json.dumps({"event-1": 0})])

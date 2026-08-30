@@ -8,10 +8,11 @@ import html
 import json
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -20,15 +21,19 @@ from urllib.parse import urljoin, urlsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 from v2.artifacts import ArtifactStore, new_manifest
+from v2.apollo import ApolloFatalError, ApolloResolver, ApolloTransientError
 from v2.contracts import (
+    ContactCandidate,
     DiscoveryCandidate,
     Evidence,
     LeadEvent,
     LeadScore,
     Organization,
+    Person,
     RecordStatus,
     ReviewItem,
     StageStatus,
+    VerificationStatus,
 )
 from v2.dedup import FUZZY_PROMPT, dedupe_candidates_exact, validate_fuzzy_groups
 from v2.discovery import (
@@ -52,8 +57,10 @@ from v2.ids import (
     stable_uuid,
 )
 from v2.qualification import JudgmentPayload
+from v2.research import ContactResearchService, DecisionMakerService
 from v2.scoring import parse_scores
 from v2.state import SCHEMA_VERSION, StateStore
+from v2.verification import ContactVerifier, select_best
 
 
 ModelCall = Callable[[str, str, list[dict]], tuple[str, dict]]
@@ -66,18 +73,102 @@ CONVENTIONAL_SITEMAPS = (
     "/sitemap-index.xml",
     "/wp-sitemap.xml",
 )
-WHY_KEYS = ("a", "b", "c")
-WHY_LINE_PROTOCOL_VERSION = "recipient-outreach-v1"
-WHY_LINE_REVISION_STAGE = "why_lines_recipient_outreach_v1"
-WHY_LINE_OPENERS = ("saw ", "noticed ", "your ")
-WHY_LINE_FORBIDDEN_PATTERNS = (
-    r"\b(?:aether|facilit(?:y|ies) services?)\b",
-    r"\b(?:outreach|prospect|sales opportunity|service opportunity)\b",
-    r"\b(?:creates?|creating|presents?|presenting) (?:an? )?(?:immediate |timely )?(?:need|opportunit(?:y|ies))\b",
-    r"\b(?:likely|presumably|apparently) (?:needs?|requires?|creates?)\b",
-    r"\b(?:ideal|perfect|right) time (?:for|to)\b",
-    r"\baligns? with .*\b(?:needs?|services?)\b",
-)
+WHY_LINE_PROTOCOL_VERSION = "recipient-outreach-v4"
+WHY_LINE_REVISION_STAGE = "why_lines_recipient_outreach_v4"
+WHY_LINE_MIGRATION_PROTOCOLS = ("recipient-outreach-v3",)
+RECIPIENT_PROTOCOL_VERSION = "recipients-v1"
+RECIPIENT_STAGE = "bulk_recipient_enrichment_v1"
+RECIPIENT_DECISION_STAGE = "decision-makers"
+RECIPIENT_CONTACT_STAGE = "contacts"
+RECIPIENT_APOLLO_STAGE = "apollo"
+MAX_PEOPLE_PER_COMPANY = 3
+APOLLO_MIN_REQUEST_INTERVAL_SECONDS = 1.25
+WHY_QUESTION_FUTURE = " Is there any chance we could stay in touch regarding your future janitorial needs?"
+WHY_QUESTION_REVIEW = " Is there any chance you'll be reviewing your janitorial needs?"
+WHY_QUESTION_ADDITIONAL_SPACE = " Is there any chance you'll be reviewing your janitorial needs, with the additional space?"
+WHY_SHORT_REFERENCE_SLOTS = {
+    "company", "project", "project_or_expansion",
+}
+WHY_TEMPLATES = {
+    "acquisition": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} took ownership of {property} in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("company", "property", "location"),
+        "sendable": True,
+    },
+    "opening": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is opening in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("property", "location"),
+        "sendable": True,
+    },
+    "planned_development": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that plans are moving forward for {project} in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("project", "location"),
+        "sendable": True,
+    },
+    "approval": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} received {approval}." + WHY_QUESTION_FUTURE,
+        "slots": ("project", "approval"),
+        "sendable": True,
+    },
+    "construction_start": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that construction started on {project} in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("project", "location"),
+        "sendable": True,
+    },
+    "lease_relocation": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is preparing to occupy {property} in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("company", "property", "location"),
+        "sendable": True,
+    },
+    "site_acquisition": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} acquired {site} in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("company", "site", "location"),
+        "sendable": True,
+    },
+    "expansion": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is expanding in {location}." + WHY_QUESTION_ADDITIONAL_SPACE,
+        "slots": ("company", "location"),
+        "sendable": True,
+    },
+    "funded_facility": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {funding} is supporting {project_or_expansion}." + WHY_QUESTION_FUTURE,
+        "slots": ("funding", "project_or_expansion"),
+        "sendable": True,
+    },
+    "renovation_conversion": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is being renovated into {new_use}." + WHY_QUESTION_REVIEW,
+        "slots": ("property", "new_use"),
+        "sendable": True,
+    },
+    "construction_progress": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} reached {milestone}." + WHY_QUESTION_FUTURE,
+        "slots": ("project", "milestone"),
+        "sendable": True,
+    },
+    "completion": {
+        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} was completed in {location}." + WHY_QUESTION_FUTURE,
+        "slots": ("project", "location"),
+        "sendable": True,
+    },
+    "route_new_owner": {"text": "", "slots": (), "sendable": False},
+    "skip_negative": {"text": "", "slots": (), "sendable": False},
+    "skip_general": {"text": "", "slots": (), "sendable": False},
+}
+
+
+def _template_catalog() -> str:
+    rows = []
+    for key, template in WHY_TEMPLATES.items():
+        if template["sendable"]:
+            rows.append(f'- {key}: {template["text"]}')
+    rows.extend(
+        (
+            "- route_new_owner: seller, broker, listing, auction, or unverified ownership transition; do not produce copy.",
+            "- skip_negative: closure, bankruptcy, lawsuit, stalled, or abandoned project without a verified reopening or reuse; do not produce copy.",
+            "- skip_general: market report, portfolio statistic, vendor article, or other signal without a specific property-level trigger; do not produce copy.",
+        )
+    )
+    return "\n".join(rows)
 ARIZONA_TERMS = (
     "arizona", "phoenix", "tucson", "mesa", "scottsdale", "tempe",
     "chandler", "gilbert", "glendale", "peoria", "surprise", "goodyear",
@@ -143,6 +234,9 @@ class WhyVariant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = ""
+    template_key: str = ""
+    lead_event_id: str = ""
+    slots: dict[str, str] = Field(default_factory=dict)
     confidence: str = "low"
     source_urls: list[str] = Field(default_factory=list)
     status: str = "review"
@@ -179,7 +273,7 @@ Include specific openings, occupancy, leases, completed construction, redevelopm
 Return strict JSON only as {{"source_id":"{source_id}","urls":["https://..."]}}. Return an empty urls list when none are found. Invent no URLs."""
 
 
-COMPANY_PROMPT = """Write three alternative cold-email opening sentences for one company using one shared research path. This single response must contain all three why lines.
+COMPANY_PROMPT = """Select one approved Aether cold-email opening template for one company and return only the sourced insertion values. This single response produces the company's one why line.
 
 Profile key: {profile_key}
 Company name: {company_name}
@@ -190,21 +284,22 @@ Deterministic anchor event ID: {anchor_id}
 Events: {events}
 
 Research protocol:
-- Use at most two web searches and one research path for all three variants. Start with the known official domain when present; otherwise use the supplied event sources. Stop as soon as the supplied evidence supports all three. Do not research people or contacts.
-- Each variant is recipient-facing cold-outreach copy, not an analyst explanation, lead summary, sales rationale, or facilities-services pitch.
-- Ground every clause in a concrete observed operational detail from an official company page, government page, credible business listing, or supplied event article.
-- Do not infer that the company needs help, maintenance, facilities services, outreach, or a vendor. Do not predict benefits or invent consequences.
+- Use at most two web searches and one research path. Start with the supplied event sources and use the known official domain only when needed to verify the company, property, or ownership role. Do not research people or contacts.
+- Choose the strongest specific property event the named company directly controls. The selected lead_event_id must be one of the supplied event IDs.
+- Ground every insertion in an official company page, government page, credible business listing, or supplied event article. Keep each insertion short, natural, and free of URLs. Use lowercase for every non-company slot.
+- The company slot must be an exact, recognizable one-to-three-word name or abbreviation derived from the supplied company name or aliases. Use its natural brand capitalization when known (for example, TSMC, JLL, or Raytheon); deterministic code resolves casing against the supplied names and rejects unknown forms.
+- The project and project_or_expansion slots may contain no more than three whitespace-separated words. Prefer a familiar shortened name that would be clear as a standalone reference in casual conversation, such as formation park 10 or nexus commerce center. Never invent an obscure abbreviation merely to satisfy the limit.
+- The location slot must contain exactly one smallest useful locality or neighborhood, in no more than three words. Never include a comma, state, county, metro/region label, parent city, multiple cities, or street detail. Return tempe rather than tempe, arizona; deer valley rather than deer valley, north phoenix; and tucson rather than tucson and gilbert. Deterministic code normalizes the value and rejects broad or unusable locations.
+- For acquisition, verify the named company is the buyer or new owner. Use route_new_owner for a seller, broker, listing, auction, or unclear ownership role.
+- Use funded_facility only when the funding, contract, grant, or financing is explicitly tied to a physical project or facility expansion.
+- Use skip_negative for a closure, bankruptcy, lawsuit, stalled project, or abandoned project unless the evidence establishes a specific reopening, conversion, or reuse.
+- Use skip_general when there is no specific property-level trigger. Never force a sendable template onto weak evidence.
+- Do not rewrite the approved wording and do not return a final sentence. Return only the template key and insertion slots; deterministic code renders the line.
 
-Copy protocol for A, B, and C:
-- Return three substantively distinct alternatives, each exactly one natural sentence of 25-45 whitespace-separated words.
-- Begin each sentence with "Saw", "Noticed", or "Your" so it reads as the opening of an email addressed to the company.
-- Prefer one timely event detail for A, one specific operating detail for B, and a sourced combination for C. These are all outreach lines, not explanations of those categories.
-- Use ordinary numerals and currency notation such as $22.9 billion or 261,000 square feet. Do not spell numbers out merely to increase word count.
-- Do not mention Aether, facilities services, outreach, opportunities, sales, prospects, or supposed needs.
-- Do not include a URL in the sentence. Do not use an en dash or em dash.
-- Every variant must cite one or more URLs actually used for its claims. If no source supports a variant, return blank text and empty source_urls rather than guessing.
+Approved templates and routing outcomes:
+{template_catalog}
 
-Return strict JSON only as {{"canonical_name":"","domain":"","employee_count":"","variants":{{"a":{{"text":"","confidence":"high|medium|low","source_urls":[]}},"b":{{"text":"","confidence":"high|medium|low","source_urls":[]}},"c":{{"text":"","confidence":"high|medium|low","source_urls":[]}}}}}}. Include every variant key exactly once."""
+Return strict JSON only as {{"canonical_name":"","domain":"","employee_count":"","selection":{{"template_key":"","lead_event_id":"","slots":{{}},"confidence":"high|medium|low","source_urls":[]}}}}. Use exactly one listed template_key. For a routing outcome, return an empty slots object but still cite the evidence supporting the routing decision."""
 
 
 BULK_QUALIFICATION_PROMPT = """Qualify this bounded batch using only the supplied saved article evidence. Do not search the web and do not identify people. For every exact candidate_id, decide whether the article reports a specific Arizona commercial-property event that creates a facilities-services opportunity.
@@ -441,6 +536,731 @@ class BulkRunner:
         self._refresh_manifest()
         return json.loads(summary_path.read_text(encoding="utf-8"))
 
+    def enrich_recipients(self, *, apollo_go: bool = False, apollo_cap: int = 444) -> dict:
+        """Add GPS-style person/contact rows to the completed company revision."""
+        if not self.options.resume:
+            raise ValueError("recipient enrichment requires --resume and an existing run ID")
+        if self.manifest.status != StageStatus.COMPLETED:
+            raise ValueError("recipient enrichment requires a completed source run")
+        if apollo_cap < 0:
+            raise ValueError("Apollo cap cannot be negative")
+
+        source_dir = self.artifacts.final_dir / WHY_LINE_PROTOCOL_VERSION
+        profiles_path = source_dir / "company_profiles.jsonl"
+        if not profiles_path.exists():
+            raise ValueError(
+                f"recipient enrichment requires the completed {WHY_LINE_PROTOCOL_VERSION} revision"
+            )
+        profiles = [
+            CompanyProfile.model_validate_json(line)
+            for line in profiles_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        profiles = sorted(
+            (profile for profile in profiles if _profile_why_line(profile).status == "valid"),
+            key=lambda profile: profile.company_id,
+        )
+        if not profiles:
+            raise ValueError("why-line revision has no sendable companies")
+
+        output_dir = source_dir / RECIPIENT_PROTOCOL_VERSION
+        summary_path = output_dir / "summary.json"
+        protocol = {
+            "protocol_version": RECIPIENT_PROTOCOL_VERSION,
+            "model": self.options.model,
+            "run_id": self.options.run_id,
+            "source_protocol": WHY_LINE_PROTOCOL_VERSION,
+            "sendable_companies_only": True,
+            "max_people_per_company": MAX_PEOPLE_PER_COMPANY,
+            "decision_maker_attempts": 1,
+            "public_contact_attempts": 1,
+            "apollo_authorized": bool(apollo_go),
+            "apollo_new_request_cap": apollo_cap,
+            "apollo_trigger": "no_nonrejected_public_email_or_phone",
+            "apollo_reveal_phone": False,
+            "email_delivery": False,
+        }
+        protocol_path = self.artifacts.raw_dir / RECIPIENT_PROTOCOL_VERSION / "protocol.json"
+        if protocol_path.exists():
+            if json.loads(protocol_path.read_text(encoding="utf-8")) != protocol:
+                raise ValueError("recipient enrichment protocol changed during resume")
+        else:
+            self.artifacts.write_raw(
+                RECIPIENT_STAGE, f"{RECIPIENT_PROTOCOL_VERSION}/protocol.json", protocol
+            )
+        if (
+            RECIPIENT_STAGE in self.state.completed_stages(self.options.run_id)
+            and summary_path.exists()
+        ):
+            return json.loads(summary_path.read_text(encoding="utf-8"))
+
+        self.state.set_stage_status(
+            self.options.run_id, RECIPIENT_STAGE, StageStatus.RUNNING
+        )
+        self.manifest.stages[RECIPIENT_STAGE] = {
+            "status": StageStatus.RUNNING.value,
+        }
+        self._refresh_manifest()
+        try:
+            events_by_id = {
+                event.lead_event_id: event
+                for event in self.state.active_events_for_run(self.options.run_id)
+            }
+            organizations = self._recipient_organizations(profiles)
+            organizations_by_id = {
+                organization.organization_id: organization
+                for organization in organizations
+            }
+            anchors: dict[str, LeadEvent] = {}
+            for profile in profiles:
+                event = events_by_id.get(profile.anchor_lead_event_id)
+                if not event:
+                    raise ValueError(
+                        f"recipient company {profile.company_id} has no anchor event"
+                    )
+                anchors[profile.company_id] = event.model_copy(
+                    update={"organization_id": profile.company_id}
+                )
+
+            decision_attempted = self._provider_target_ids(RECIPIENT_DECISION_STAGE)
+            decision_pending = [
+                organization
+                for organization in organizations
+                if organization.organization_id not in decision_attempted
+            ]
+            if decision_pending:
+                with ThreadPoolExecutor(max_workers=self.options.workers) as executor:
+                    futures = {
+                        executor.submit(self._research_recipient_company, organization): organization
+                        for organization in decision_pending
+                    }
+                    for future in as_completed(futures):
+                        future.result()
+
+            organization_ids = set(organizations_by_id)
+            people = sorted(
+                (
+                    person
+                    for person in self.state.people()
+                    if person.organization_id in organization_ids
+                ),
+                key=lambda person: (person.organization_id, person.person_id),
+            )
+            # The decision-maker contract itself caps each response at three. This
+            # second deterministic cap protects exports if state was populated manually.
+            people = _cap_people_by_company(people, MAX_PEOPLE_PER_COMPANY)
+
+            contact_attempted = self._provider_target_ids(RECIPIENT_CONTACT_STAGE)
+            contact_pending = [
+                person for person in people if person.person_id not in contact_attempted
+            ]
+            if contact_pending:
+                with ThreadPoolExecutor(max_workers=self.options.workers) as executor:
+                    futures = {
+                        executor.submit(
+                            self._research_recipient_contact,
+                            person,
+                            organizations_by_id[person.organization_id],
+                            anchors[person.organization_id],
+                        ): person
+                        for person in contact_pending
+                    }
+                    for future in as_completed(futures):
+                        future.result()
+
+            apollo_counts = self._recipient_apollo(
+                people=people,
+                organizations=organizations_by_id,
+                anchors=anchors,
+                authorized=apollo_go,
+                new_request_cap=apollo_cap,
+            )
+            summary = self._write_recipient_exports(
+                output_dir=output_dir,
+                profiles=profiles,
+                people=people,
+                organizations=organizations_by_id,
+                anchors=anchors,
+                protocol=protocol,
+                apollo_counts=apollo_counts,
+            )
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            self.state.set_stage_status(
+                self.options.run_id, RECIPIENT_STAGE, StageStatus.FAILED, error=error
+            )
+            self.manifest.stages[RECIPIENT_STAGE] = {
+                "status": StageStatus.FAILED.value,
+                "error": error,
+            }
+            self._refresh_manifest()
+            raise
+
+        counters = summary["counts"]
+        if apollo_counts.get("key_missing"):
+            self.state.set_stage_status(
+                self.options.run_id,
+                RECIPIENT_STAGE,
+                StageStatus.RUNNING,
+                counters={key: int(value) for key, value in counters.items()},
+            )
+            self.manifest.stages[RECIPIENT_STAGE] = {
+                "status": StageStatus.RUNNING.value,
+                "counters": counters,
+                "waiting_for": "APOLLO_API_KEY",
+            }
+            self._refresh_manifest()
+            return summary
+        self.state.set_stage_status(
+            self.options.run_id,
+            RECIPIENT_STAGE,
+            StageStatus.COMPLETED,
+            counters={key: int(value) for key, value in counters.items()},
+        )
+        self.manifest.stages[RECIPIENT_STAGE] = {
+            "status": StageStatus.COMPLETED.value,
+            "counters": counters,
+        }
+        self.manifest.counts.update(
+            {f"{RECIPIENT_STAGE}.{key}": int(value) for key, value in counters.items()}
+        )
+        self._refresh_manifest()
+        return summary
+
+    def _recipient_organizations(
+        self, profiles: list[CompanyProfile]
+    ) -> list[Organization]:
+        organizations: list[Organization] = []
+        for profile in profiles:
+            evidence = []
+            for url in dict.fromkeys(
+                [*profile.evidence_urls, *_profile_why_line(profile).source_urls]
+            ):
+                try:
+                    evidence.append(
+                        Evidence(
+                            url=url,
+                            supports=f"Supports the company profile for {profile.canonical_name}.",
+                            provider="web",
+                        )
+                    )
+                except Exception:
+                    continue
+            why_line = _profile_why_line(profile)
+            location = why_line.slots.get("location") or next(
+                iter(profile.locations), "Arizona"
+            )
+            organization = Organization(
+                organization_id=profile.company_id,
+                canonical_name=profile.canonical_name,
+                domain=profile.domain,
+                location=location,
+                aliases=profile.aliases,
+                evidence=evidence,
+            )
+            self.state.save_organization(organization)
+            organizations.append(organization)
+        return organizations
+
+    def _research_recipient_company(self, organization: Organization) -> None:
+        service = DecisionMakerService(
+            self.state,
+            self.artifacts,
+            self.options.model,
+            call_model=self.model_call,
+        )
+        service.research([organization], attempts=1)
+
+    def _research_recipient_contact(
+        self,
+        person: Person,
+        organization: Organization,
+        anchor: LeadEvent,
+    ) -> None:
+        service = ContactResearchService(
+            self.state,
+            self.artifacts,
+            self.options.model,
+            ContactVerifier(self.state),
+            call_model=self.model_call,
+        )
+        service.research([person], [organization], [anchor], attempts=1)
+
+    def _provider_target_ids(self, stage: str) -> set[str]:
+        with self.state.connect() as conn:
+            return {
+                str(row["target_id"])
+                for row in conn.execute(
+                    "SELECT target_id FROM v2_provider_attempts WHERE run_id=? AND stage=?",
+                    (self.options.run_id, stage),
+                )
+            }
+
+    def _recipient_apollo(
+        self,
+        *,
+        people: list[Person],
+        organizations: dict[str, Organization],
+        anchors: dict[str, LeadEvent],
+        authorized: bool,
+        new_request_cap: int,
+    ) -> dict[str, int]:
+        contacts = self.state.contacts_for_run(self.options.run_id)
+        person_ids = {person.person_id for person in people}
+        contacts = [contact for contact in contacts if contact.person_id in person_ids]
+        publicly_reachable = {
+            contact.person_id
+            for contact in contacts
+            if contact.selected
+            and contact.provider == "model"
+            and contact.verification_status != VerificationStatus.REJECTED
+            and (contact.email or contact.phone)
+        }
+        missing = [person for person in people if person.person_id not in publicly_reachable]
+        with self.state.connect() as conn:
+            prior_rows = list(
+                conn.execute(
+                    "SELECT target_id, status, error_json FROM v2_provider_attempts "
+                    "WHERE run_id=? AND stage=?",
+                    (self.options.run_id, RECIPIENT_APOLLO_STAGE),
+                )
+            )
+        prior_targets = {
+            str(row["target_id"])
+            for row in prior_rows
+            if not (
+                row["status"] == "fatal"
+                and "HTTP 429" in str(row["error_json"] or "")
+            )
+        }
+        with self.state.connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT token_usage_json, billable FROM v2_provider_attempts "
+                    "WHERE run_id=? AND stage=? AND provider='apollo'",
+                    (self.options.run_id, RECIPIENT_APOLLO_STAGE),
+                )
+            )
+        new_requests = sum(
+            int(json.loads(row["token_usage_json"] or "{}").get("api_requests", 0))
+            for row in rows
+        )
+        billable_flags = sum(int(row["billable"]) for row in rows)
+        created: list[ContactCandidate] = []
+        transient_reviews = 0
+        capped = 0
+        if not authorized:
+            return {
+                "eligible": len(missing),
+                "new_requests": new_requests,
+                "billable_flags": billable_flags,
+                "created": 0,
+                "transient_reviews": 0,
+                "capped": 0,
+                "key_missing": 0,
+            }
+
+        import config as scout_config
+
+        api_key = scout_config._get("APOLLO_API_KEY")
+        if missing and not api_key:
+            return {
+                "eligible": len(missing),
+                "new_requests": new_requests,
+                "billable_flags": billable_flags,
+                "created": 0,
+                "transient_reviews": 0,
+                "capped": 0,
+                "key_missing": 1,
+            }
+        resolver = ApolloResolver(
+            self.state,
+            api_key=api_key,
+        )
+        verifier = ContactVerifier(self.state)
+        next_apollo_request_at = 0.0
+        for person in missing:
+            if person.person_id in prior_targets:
+                continue
+            organization = organizations[person.organization_id]
+            cache_key = stable_hash(
+                "apollo", normalize_text(person.name), normalize_text(organization.canonical_name)
+            )
+            cached_row = self.state.get_apollo_cache(cache_key)
+            if (
+                cached_row is not None
+                and cached_row["status"] == "fatal"
+                and "HTTP 429" in str(cached_row["error_json"] or "")
+            ):
+                with self.state.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM v2_apollo_cache WHERE cache_key=?",
+                        (cache_key,),
+                    )
+                cached_row = None
+            cached_before = cached_row is not None
+            if not cached_before and new_requests >= new_request_cap:
+                capped += 1
+                continue
+            attempt_id = stable_uuid(
+                "attempt", self.options.run_id, RECIPIENT_APOLLO_STAGE, person.person_id
+            )
+            request = self.artifacts.write_raw(
+                RECIPIENT_APOLLO_STAGE,
+                f"{RECIPIENT_PROTOCOL_VERSION}/apollo/{attempt_id}-request.json",
+                {
+                    "person_id": person.person_id,
+                    "person": person.name,
+                    "organization": organization.canonical_name,
+                    "reveal_personal_emails": True,
+                    "reveal_phone_number": False,
+                },
+            )
+            started = datetime.now(timezone.utc).isoformat()
+            if not cached_before:
+                new_requests += 1
+            try:
+                if not cached_before:
+                    wait_seconds = next_apollo_request_at - time.monotonic()
+                    if wait_seconds > 0:
+                        time.sleep(wait_seconds)
+                    next_apollo_request_at = (
+                        time.monotonic() + APOLLO_MIN_REQUEST_INTERVAL_SECONDS
+                    )
+                found = resolver.resolve(
+                    person.name,
+                    organization.canonical_name,
+                    spend=True,
+                    reveal_phone=False,
+                )
+                if found.status == "fatal":
+                    raise ApolloFatalError(found.error or "cached fatal Apollo result")
+            except ApolloTransientError as exc:
+                review = ReviewItem(
+                    review_id=stable_uuid(
+                        "review", self.options.run_id, RECIPIENT_APOLLO_STAGE, person.person_id
+                    ),
+                    run_id=self.options.run_id,
+                    stage=RECIPIENT_APOLLO_STAGE,
+                    record_type="person",
+                    record_id=person.person_id,
+                    reason_code="apollo_transient_failure",
+                    validation_errors=[str(exc)],
+                )
+                self.state.add_review(review)
+                self.state.record_provider_attempt(
+                    attempt_id=attempt_id,
+                    run_id=self.options.run_id,
+                    stage=RECIPIENT_APOLLO_STAGE,
+                    provider="apollo",
+                    target_type="person",
+                    target_id=person.person_id,
+                    status="review",
+                    token_usage={"api_requests": int(not cached_before)},
+                    request_artifact_path=request["path"],
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                    started_at=started,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                transient_reviews += 1
+                continue
+            except ApolloFatalError as exc:
+                self.state.record_provider_attempt(
+                    attempt_id=attempt_id,
+                    run_id=self.options.run_id,
+                    stage=RECIPIENT_APOLLO_STAGE,
+                    provider="apollo",
+                    target_type="person",
+                    target_id=person.person_id,
+                    status="fatal",
+                    token_usage={"api_requests": int(not cached_before)},
+                    request_artifact_path=request["path"],
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                    started_at=started,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                raise
+            response = self.artifacts.write_raw(
+                RECIPIENT_APOLLO_STAGE,
+                f"{RECIPIENT_PROTOCOL_VERSION}/apollo/{attempt_id}-response.json",
+                asdict(found),
+            )
+            billable = bool(found.billable and not found.cached)
+            billable_flags += int(billable)
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id,
+                run_id=self.options.run_id,
+                stage=RECIPIENT_APOLLO_STAGE,
+                provider="apollo",
+                target_type="person",
+                target_id=person.person_id,
+                status=found.status,
+                billable=billable,
+                token_usage={"api_requests": int(not found.cached)},
+                request_artifact_path=request["path"],
+                response_artifact_path=response["path"],
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if found.status != "found" or not any(
+                (found.email, found.phone, found.linkedin)
+            ):
+                continue
+            verification = verifier.verify(
+                email=found.email,
+                phone=found.phone,
+                linkedin=found.linkedin,
+                organization_domain=organization.domain,
+            )
+            created.append(
+                ContactCandidate(
+                    contact_candidate_id=stable_uuid(
+                        "contact-candidate",
+                        anchors[person.organization_id].lead_event_id,
+                        person.person_id,
+                        "apollo",
+                    ),
+                    run_id=self.options.run_id,
+                    lead_event_id=anchors[person.organization_id].lead_event_id,
+                    organization_id=person.organization_id,
+                    person_id=person.person_id,
+                    person_name=person.name,
+                    title=person.title,
+                    email=verification.email,
+                    phone=verification.phone,
+                    linkedin=verification.linkedin,
+                    provider="apollo",
+                    verification_status=verification.status,
+                    verification_reason=verification.reason,
+                    evidence=[
+                        Evidence(
+                            url="https://app.apollo.io/",
+                            supports=(
+                                f"Apollo match for {person.name} at "
+                                f"{organization.canonical_name}."
+                            ),
+                            provider="apollo",
+                        )
+                    ],
+                )
+            )
+
+        contacts = select_best([*contacts, *created])
+        for contact in contacts:
+            self.state.save_contact(contact)
+        return {
+            "eligible": len(missing),
+            "new_requests": new_requests,
+            "billable_flags": billable_flags,
+            "created": len(created),
+            "transient_reviews": transient_reviews,
+            "capped": capped,
+            "key_missing": 0,
+        }
+
+    def _write_recipient_exports(
+        self,
+        *,
+        output_dir: Path,
+        profiles: list[CompanyProfile],
+        people: list[Person],
+        organizations: dict[str, Organization],
+        anchors: dict[str, LeadEvent],
+        protocol: dict,
+        apollo_counts: dict[str, int],
+    ) -> dict:
+        profile_by_id = {profile.company_id: profile for profile in profiles}
+        people_by_company: dict[str, list[Person]] = defaultdict(list)
+        for person in people:
+            people_by_company[person.organization_id].append(person)
+        contacts = [
+            contact
+            for contact in self.state.contacts_for_run(self.options.run_id)
+            if contact.person_id in {person.person_id for person in people}
+            and contact.selected
+            and contact.verification_status != VerificationStatus.REJECTED
+        ]
+        contacts_by_person = {contact.person_id: contact for contact in contacts}
+        recipient_rows = []
+        for person in people:
+            profile = profile_by_id[person.organization_id]
+            why_line = _profile_why_line(profile)
+            contact = contacts_by_person.get(person.person_id)
+            first_name = _first_name(person.name)
+            personalized = _personalize_why_line(why_line.text, first_name)
+            recipient_rows.append(
+                {
+                    "company_id": profile.company_id,
+                    "business_name": profile.canonical_name,
+                    "first_name": first_name,
+                    "full_name": person.name,
+                    "title": person.title,
+                    "scope": person.scope,
+                    "email": contact.email if contact else "",
+                    "phone": contact.phone if contact else "",
+                    "linkedin": contact.linkedin if contact else "",
+                    "contact_provider": contact.provider if contact else "",
+                    "verification_status": (
+                        contact.verification_status.value if contact else "missing"
+                    ),
+                    "verification_reason": contact.verification_reason if contact else "",
+                    "recipient_status": _recipient_status(contact),
+                    "anchor_lead_event_id": anchors[profile.company_id].lead_event_id,
+                    "lead_event_ids": ",".join(profile.lead_event_ids),
+                    "why_line": personalized,
+                    "why_template_key": why_line.template_key,
+                    "why_sources": "; ".join(why_line.source_urls),
+                    "person_sources": "; ".join(
+                        evidence.url for evidence in person.evidence
+                    ),
+                    "contact_sources": "; ".join(
+                        evidence.url for evidence in (contact.evidence if contact else [])
+                    ),
+                    "run_id": self.options.run_id,
+                }
+            )
+        recipient_rows.sort(
+            key=lambda row: (row["business_name"].casefold(), row["full_name"].casefold())
+        )
+        company_rows = []
+        for profile in profiles:
+            company_people = people_by_company.get(profile.company_id, [])
+            statuses = [
+                _recipient_status(contacts_by_person.get(person.person_id))
+                for person in company_people
+            ]
+            company_rows.append(
+                {
+                    "company_id": profile.company_id,
+                    "business_name": profile.canonical_name,
+                    "recipient_count": len(company_people),
+                    "email_count": statuses.count("email"),
+                    "phone_only_count": statuses.count("phone_only"),
+                    "linkedin_only_count": statuses.count("linkedin_only"),
+                    "no_contact_count": statuses.count("no_contact"),
+                    "recipient_status": (
+                        "email"
+                        if "email" in statuses
+                        else "phone_only"
+                        if "phone_only" in statuses
+                        else "linkedin_only"
+                        if "linkedin_only" in statuses
+                        else "no_contact"
+                        if company_people
+                        else "no_person"
+                    ),
+                    "why_line": _profile_why_line(profile).text,
+                    "run_id": self.options.run_id,
+                }
+            )
+        company_rows.sort(key=lambda row: row["business_name"].casefold())
+
+        recipient_fields = [
+            "company_id", "business_name", "first_name", "full_name", "title",
+            "scope", "email", "phone", "linkedin", "contact_provider",
+            "verification_status", "verification_reason", "recipient_status",
+            "anchor_lead_event_id", "lead_event_ids", "why_line",
+            "why_template_key", "why_sources", "person_sources", "contact_sources",
+            "run_id",
+        ]
+        company_fields = [
+            "company_id", "business_name", "recipient_count", "email_count",
+            "phone_only_count", "linkedin_only_count", "no_contact_count",
+            "recipient_status", "why_line", "run_id",
+        ]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_csv(output_dir / "recipients.csv", recipient_fields, recipient_rows)
+        _write_csv(output_dir / "companies.csv", company_fields, company_rows)
+        _write_jsonl(output_dir / "people.jsonl", people)
+        _write_jsonl(output_dir / "contacts.jsonl", contacts)
+        recipient_reviews = [
+            review
+            for review in self.state.reviews_for_run(self.options.run_id)
+            if review.stage
+            in {
+                RECIPIENT_DECISION_STAGE,
+                RECIPIENT_CONTACT_STAGE,
+                RECIPIENT_APOLLO_STAGE,
+            }
+        ]
+        _write_jsonl(output_dir / "reviews.jsonl", recipient_reviews)
+
+        usage: dict[str, int] = {"provider_attempts": 0}
+        with self.state.connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT token_usage_json, billable FROM v2_provider_attempts "
+                    "WHERE run_id=? AND stage IN (?, ?, ?)",
+                    (
+                        self.options.run_id,
+                        RECIPIENT_DECISION_STAGE,
+                        RECIPIENT_CONTACT_STAGE,
+                        RECIPIENT_APOLLO_STAGE,
+                    ),
+                )
+            )
+        usage["provider_attempts"] = len(rows)
+        usage["billable_attempts"] = sum(int(row["billable"]) for row in rows)
+        for row in rows:
+            for key, value in json.loads(row["token_usage_json"] or "{}").items():
+                if isinstance(value, (int, float)):
+                    usage[key] = usage.get(key, 0) + int(value)
+        counts = {
+            "eligible_companies": len(profiles),
+            "companies_with_people": sum(bool(people_by_company.get(profile.company_id)) for profile in profiles),
+            "companies_without_people": sum(not people_by_company.get(profile.company_id) for profile in profiles),
+            "people": len(people),
+            "recipients_with_email": sum(row["recipient_status"] == "email" for row in recipient_rows),
+            "recipients_phone_only": sum(row["recipient_status"] == "phone_only" for row in recipient_rows),
+            "recipients_linkedin_only": sum(row["recipient_status"] == "linkedin_only" for row in recipient_rows),
+            "recipients_without_contact": sum(row["recipient_status"] == "no_contact" for row in recipient_rows),
+            "reviews": len(recipient_reviews),
+            "apollo_eligible": apollo_counts["eligible"],
+            "apollo_new_requests": apollo_counts["new_requests"],
+            "apollo_billable_flags": apollo_counts["billable_flags"],
+            "apollo_contacts_created": apollo_counts["created"],
+            "apollo_capped": apollo_counts["capped"],
+            "apollo_key_missing": apollo_counts["key_missing"],
+        }
+        summary = {
+            "run_id": self.options.run_id,
+            "protocol_version": RECIPIENT_PROTOCOL_VERSION,
+            "status": (
+                "awaiting_apollo_key"
+                if apollo_counts["key_missing"]
+                else "completed"
+            ),
+            "model": self.options.model,
+            "counts": counts,
+            "usage": usage,
+            "apollo": {
+                "authorized": protocol["apollo_authorized"],
+                "new_request_cap": protocol["apollo_new_request_cap"],
+                "phone_reveal": False,
+                "provider_credit_note": (
+                    "Billable flags are local upper-bound accounting; exact provider "
+                    "credits and dollar cost require the Apollo account usage ledger."
+                ),
+            },
+            "email_delivery": False,
+            "output": str(output_dir),
+            "source_output_preserved": str(output_dir.parent),
+        }
+        self.artifacts.write_json(
+            RECIPIENT_STAGE,
+            f"{WHY_LINE_PROTOCOL_VERSION}/{RECIPIENT_PROTOCOL_VERSION}/summary.json",
+            summary,
+        )
+        for path, kind in (
+            (output_dir / "recipients.csv", "csv"),
+            (output_dir / "companies.csv", "csv"),
+            (output_dir / "people.jsonl", "jsonl"),
+            (output_dir / "contacts.jsonl", "jsonl"),
+            (output_dir / "reviews.jsonl", "jsonl"),
+        ):
+            self.artifacts.record_existing(RECIPIENT_STAGE, kind, path)
+        return summary
+
     def _refresh_company_why_lines(
         self,
         stage: str,
@@ -463,28 +1283,26 @@ class BulkRunner:
         cache_dir = self.artifacts.raw_dir / WHY_LINE_PROTOCOL_VERSION
         cached_by_key: dict[str, CompanyProfile] = {}
         pending: list[CompanyProfile] = []
+        current_cached_count = 0
+        migrated_count = 0
         for profile in original_profiles:
             cache_path = cache_dir / f"{profile.profile_key}-profile.json"
             if cache_path.exists():
+                current_cached_count += 1
                 cached = CompanyProfile.model_validate_json(
                     cache_path.read_text(encoding="utf-8")
                 )
                 response_path = Path(cached.raw_artifact_path)
                 if response_path.exists():
-                    variants = _variants_from_payload(
-                        _parse_object(response_path.read_text(encoding="utf-8"))
+                    why_line = _why_line_from_payload(
+                        _parse_object(response_path.read_text(encoding="utf-8")),
+                        allowed_event_ids=set(profile.lead_event_ids),
+                        known_company_names=[profile.canonical_name, *profile.aliases],
                     )
                     cached = cached.model_copy(
                         update={
-                            "variants": variants,
-                            "record_status": (
-                                "valid"
-                                if all(
-                                    item.status == "valid"
-                                    for item in variants.values()
-                                )
-                                else "review"
-                            ),
+                            "variants": {"primary": why_line},
+                            "record_status": _profile_record_status(why_line),
                         }
                     )
                     self.artifacts.write_raw(
@@ -494,7 +1312,43 @@ class BulkRunner:
                     )
                 cached_by_key[profile.profile_key] = cached
             else:
-                pending.append(profile)
+                migrated = None
+                for prior_protocol in WHY_LINE_MIGRATION_PROTOCOLS:
+                    prior_path = (
+                        self.artifacts.raw_dir
+                        / prior_protocol
+                        / f"{profile.profile_key}-profile.json"
+                    )
+                    if not prior_path.exists():
+                        continue
+                    prior = CompanyProfile.model_validate_json(
+                        prior_path.read_text(encoding="utf-8")
+                    )
+                    response_path = Path(prior.raw_artifact_path)
+                    if not response_path.exists():
+                        continue
+                    why_line = _why_line_from_payload(
+                        _parse_object(response_path.read_text(encoding="utf-8")),
+                        allowed_event_ids=set(profile.lead_event_ids),
+                        known_company_names=[profile.canonical_name, *profile.aliases],
+                    )
+                    migrated = prior.model_copy(
+                        update={
+                            "variants": {"primary": why_line},
+                            "record_status": _profile_record_status(why_line),
+                        }
+                    )
+                    self.artifacts.write_raw(
+                        stage,
+                        f"{WHY_LINE_PROTOCOL_VERSION}/{profile.profile_key}-profile.json",
+                        migrated.model_dump(mode="json"),
+                    )
+                    break
+                if migrated is not None:
+                    migrated_count += 1
+                    cached_by_key[profile.profile_key] = migrated
+                else:
+                    pending.append(profile)
         selected = pending[:limit] if limit is not None else pending
 
         def refresh(profile: CompanyProfile) -> tuple[CompanyProfile, bool]:
@@ -519,30 +1373,29 @@ class BulkRunner:
             if profile.profile_key in profiles_by_key
         ]
         for profile in profiles:
-            for key, variant in profile.variants.items():
-                if variant.status == "valid":
-                    continue
-                self.state.add_review(
-                    ReviewItem(
-                        review_id=stable_uuid(
-                            "review", self.options.run_id, stage, profile.profile_key, key
-                        ),
-                        run_id=self.options.run_id,
-                        stage=stage,
-                        record_type="company_profile",
-                        record_id=f"{profile.profile_key}:{key}",
-                        reason_code="recipient_why_line_invalid",
-                        validation_errors=(
-                            variant.validation_errors or ["recipient_why_line_invalid"]
-                        ),
-                        raw_artifact_path=profile.raw_artifact_path,
-                    )
+            why_line = _profile_why_line(profile)
+            if why_line.status != "review":
+                continue
+            self.state.add_review(
+                ReviewItem(
+                    review_id=stable_uuid(
+                        "review", self.options.run_id, stage, profile.profile_key
+                    ),
+                    run_id=self.options.run_id,
+                    stage=stage,
+                    record_type="company_profile",
+                    record_id=profile.profile_key,
+                    reason_code="recipient_why_line_invalid",
+                    validation_errors=(
+                        why_line.validation_errors or ["recipient_why_line_invalid"]
+                    ),
+                    raw_artifact_path=profile.raw_artifact_path,
                 )
+            )
         invalid_record_ids = {
-            f"{profile.profile_key}:{key}"
+            profile.profile_key
             for profile in profiles
-            for key, variant in profile.variants.items()
-            if variant.status != "valid"
+            if _profile_why_line(profile).status == "review"
         }
         for item in self.state.reviews_for_run(self.options.run_id):
             if (
@@ -560,21 +1413,24 @@ class BulkRunner:
                 )
         remaining = len(original_profiles) - len(profiles)
         valid_profiles = sum(profile.record_status == "valid" for profile in profiles)
-        valid_variants = sum(
-            variant.status == "valid"
-            for profile in profiles
-            for variant in profile.variants.values()
+        valid_lines = sum(
+            _profile_why_line(profile).status == "valid" for profile in profiles
+        )
+        skipped_lines = sum(
+            _profile_why_line(profile).status == "skip" for profile in profiles
         )
         counters = {
             "companies": len(original_profiles),
             "processed_companies": len(profiles),
             "new_model_calls": model_calls,
-            "cached_companies": len(cached_by_key),
+            "cached_companies": current_cached_count,
+            "migrated_companies": migrated_count,
             "remaining_companies": remaining,
             "valid_profiles": valid_profiles,
             "review_profiles": len(profiles) - valid_profiles,
-            "valid_variants": valid_variants,
-            "review_variants": len(profiles) * len(WHY_KEYS) - valid_variants,
+            "valid_lines": valid_lines,
+            "skipped_lines": skipped_lines,
+            "review_lines": len(profiles) - valid_lines - skipped_lines,
         }
         if remaining:
             self.artifacts.write_raw(
@@ -583,7 +1439,13 @@ class BulkRunner:
                 counters,
             )
             return counters, False
-        counters["model_calls"] = len(profiles)
+        with self.state.connect() as conn:
+            counters["model_calls"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM v2_provider_attempts WHERE run_id=? AND stage=?",
+                    (self.options.run_id, stage),
+                ).fetchone()[0]
+            )
         self._write_why_line_revision(stage, revision_dir, profiles, counters)
         return counters, True
 
@@ -628,6 +1490,7 @@ class BulkRunner:
             for event in sorted(events, key=lambda item: item.lead_event_id)
         ]
         prompt = COMPANY_PROMPT.format(
+            template_catalog=_template_catalog(),
             profile_key=profile.profile_key,
             company_name=profile.canonical_name,
             domain=profile.domain,
@@ -671,15 +1534,15 @@ class BulkRunner:
                 self.artifacts.write_raw_text(stage, response_name, text)
                 self.artifacts.write_raw(stage, usage_name, usage)
             payload = _parse_object(text)
-            variants = _variants_from_payload(payload)
+            why_line = _why_line_from_payload(
+                payload,
+                allowed_event_ids={event.lead_event_id for event in events},
+                known_company_names=[profile.canonical_name, *profile.aliases],
+            )
             refreshed = profile.model_copy(
                 update={
-                    "variants": variants,
-                    "record_status": (
-                        "valid"
-                        if all(item.status == "valid" for item in variants.values())
-                        else "review"
-                    ),
+                    "variants": {"primary": why_line},
+                    "record_status": _profile_record_status(why_line),
                     "raw_artifact_path": str(response_path),
                 }
             )
@@ -700,14 +1563,11 @@ class BulkRunner:
         except Exception as exc:
             refreshed = profile.model_copy(
                 update={
-                    "variants": {
-                        key: WhyVariant(
-                            validation_errors=[
-                                f"recipient_contract:{type(exc).__name__}"
-                            ]
-                        )
-                        for key in WHY_KEYS
-                    },
+                    "variants": {"primary": WhyVariant(
+                        validation_errors=[
+                            f"recipient_contract:{type(exc).__name__}"
+                        ]
+                    )},
                     "record_status": "review",
                     "raw_artifact_path": str(response_path) if response_path.exists() else "",
                 }
@@ -1686,7 +2546,9 @@ class BulkRunner:
             profile_key = stable_uuid("bulk-company-profile", key)
             path = raw_dir / f"{profile_key}.json"
             if self.options.resume and path.exists():
-                return CompanyProfile.model_validate_json(path.read_text(encoding="utf-8"))
+                cached = CompanyProfile.model_validate_json(path.read_text(encoding="utf-8"))
+                if "primary" in cached.variants:
+                    return cached
             profile = self._enrich_company(profile_key, group_events, organizations, scores)
             path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
             return profile
@@ -1695,23 +2557,23 @@ class BulkRunner:
             profiles = list(pool.map(enrich, sorted(groups.items())))
         profiles = _dedupe_profiles(profiles)
         for profile in profiles:
-            for key, variant in profile.variants.items():
-                if variant.status == "valid":
-                    continue
-                self.state.add_review(
-                    ReviewItem(
-                        review_id=stable_uuid(
-                            "review", self.options.run_id, "company-why", profile.profile_key, key
-                        ),
-                        run_id=self.options.run_id,
-                        stage="companies",
-                        record_type="company_profile",
-                        record_id=f"{profile.profile_key}:{key}",
-                        reason_code="company_why_line_invalid",
-                        validation_errors=variant.validation_errors or ["company_why_line_invalid"],
-                        raw_artifact_path=profile.raw_artifact_path,
-                    )
+            why_line = _profile_why_line(profile)
+            if why_line.status != "review":
+                continue
+            self.state.add_review(
+                ReviewItem(
+                    review_id=stable_uuid(
+                        "review", self.options.run_id, "company-why", profile.profile_key
+                    ),
+                    run_id=self.options.run_id,
+                    stage="companies",
+                    record_type="company_profile",
+                    record_id=profile.profile_key,
+                    reason_code="company_why_line_invalid",
+                    validation_errors=why_line.validation_errors or ["company_why_line_invalid"],
+                    raw_artifact_path=profile.raw_artifact_path,
                 )
+            )
         self.profiles = profiles
         self._write_profiles(profiles)
         return {
@@ -1746,6 +2608,7 @@ class BulkRunner:
             for event in events
         ]
         prompt = COMPANY_PROMPT.format(
+            template_catalog=_template_catalog(),
             profile_key=profile_key,
             company_name=names[0] if names else profile_key,
             domain="",
@@ -1768,22 +2631,30 @@ class BulkRunner:
             event_evidence_urls = list(dict.fromkeys(
                 item.url for event in events for item in event.evidence
             ))
-            variants = _variants_from_payload(payload)
             canonical_name = str(payload.get("canonical_name") or names[0]).strip()
+            aliases = list(dict.fromkeys([
+                *names,
+                *(alias for org in orgs for alias in org.aliases),
+            ]))
+            why_line = _why_line_from_payload(
+                payload,
+                allowed_event_ids={event.lead_event_id for event in events},
+                known_company_names=[canonical_name, *aliases],
+            )
             domain = _domain(str(payload.get("domain") or ""))
             profile = CompanyProfile(
                 profile_key=profile_key,
                 canonical_name=canonical_name,
                 domain=domain,
-                aliases=list(dict.fromkeys([*names, *(alias for org in orgs for alias in org.aliases)])),
+                aliases=aliases,
                 locations=[item for item in locations if item],
                 employee_count=str(payload.get("employee_count") or ""),
                 organization_ids=sorted({event.organization_id for event in events}),
                 lead_event_ids=sorted(event.lead_event_id for event in events),
                 anchor_lead_event_id=anchor.lead_event_id,
-                variants=variants,
+                variants={"primary": why_line},
                 evidence_urls=event_evidence_urls,
-                record_status="valid" if all(item.status == "valid" for item in variants.values()) else "review",
+                record_status=_profile_record_status(why_line),
                 raw_artifact_path=response["path"],
             )
             self.state.record_provider_attempt(
@@ -1823,7 +2694,7 @@ class BulkRunner:
                 organization_ids=sorted({event.organization_id for event in events}),
                 lead_event_ids=sorted(event.lead_event_id for event in events),
                 anchor_lead_event_id=anchor.lead_event_id,
-                variants={key: WhyVariant(validation_errors=[f"company_contract:{type(exc).__name__}"]) for key in WHY_KEYS},
+                variants={"primary": WhyVariant(validation_errors=[f"company_contract:{type(exc).__name__}"])},
                 evidence_urls=list(dict.fromkeys([item.url for event in events for item in event.evidence])),
                 record_status="review",
             )
@@ -1842,8 +2713,8 @@ class BulkRunner:
         lead_fields = [
             "lead_event_id", "company_id", "business_name", "event", "date_posted",
             "location", "priority", "score", "property_type", "service_angle", "summary",
-            "article_url", "why_line_a", "why_line_b", "why_line_c", "why_sources_a",
-            "why_sources_b", "why_sources_c", "supporting_candidate_ids", "run_id",
+            "article_url", "why_line", "why_template_key", "why_confidence",
+            "why_sources", "why_line_status", "supporting_candidate_ids", "run_id",
             "record_status", "provenance_json",
         ]
         lead_rows = []
@@ -1865,12 +2736,11 @@ class BulkRunner:
                     "service_angle": event.service_angle,
                     "summary": event.summary,
                     "article_url": primary.canonical_url if primary else (event.evidence[0].url if event.evidence else ""),
-                    "why_line_a": _variant_text(profile, "a"),
-                    "why_line_b": _variant_text(profile, "b"),
-                    "why_line_c": _variant_text(profile, "c"),
-                    "why_sources_a": _variant_sources(profile, "a"),
-                    "why_sources_b": _variant_sources(profile, "b"),
-                    "why_sources_c": _variant_sources(profile, "c"),
+                    "why_line": _why_line_text(profile),
+                    "why_template_key": _profile_why_line(profile).template_key,
+                    "why_confidence": _profile_why_line(profile).confidence,
+                    "why_sources": _why_line_sources(profile),
+                    "why_line_status": _profile_why_line(profile).status,
                     "supporting_candidate_ids": ",".join(event.supporting_candidate_ids),
                     "run_id": self.options.run_id,
                     "record_status": event.record_status.value,
@@ -1880,9 +2750,8 @@ class BulkRunner:
         lead_rows.sort(key=lambda item: (-int(item["score"] or -1), item["lead_event_id"]))
         company_fields = [
             "company_id", "business_name", "domain", "aliases", "locations", "employee_count",
-            "lead_event_ids", "lead_event_count", "anchor_lead_event_id", "why_line_a",
-            "why_confidence_a", "why_sources_a", "why_line_b", "why_confidence_b",
-            "why_sources_b", "why_line_c", "why_confidence_c", "why_sources_c",
+            "lead_event_ids", "lead_event_count", "anchor_lead_event_id", "why_line",
+            "why_template_key", "why_confidence", "why_sources", "why_line_status",
             "record_status", "run_id", "provenance_json",
         ]
         company_rows = [_company_row(item, self.options.run_id) for item in profiles]
@@ -1926,22 +2795,34 @@ class BulkRunner:
             reader = csv.DictReader(file)
             lead_fields = list(reader.fieldnames or [])
             lead_rows = list(reader)
-        if "why_line_status" not in lead_fields:
-            status_index = lead_fields.index("record_status") + 1
-            lead_fields.insert(status_index, "why_line_status")
+        legacy_fields = {
+            "why_line_a", "why_line_b", "why_line_c",
+            "why_sources_a", "why_sources_b", "why_sources_c",
+        }
+        lead_fields = [field for field in lead_fields if field not in legacy_fields]
+        why_fields = (
+            "why_line", "why_template_key", "why_confidence",
+            "why_sources", "why_line_status",
+        )
+        for field in why_fields:
+            if field in lead_fields:
+                lead_fields.remove(field)
+        insert_at = lead_fields.index("article_url") + 1 if "article_url" in lead_fields else 0
+        lead_fields[insert_at:insert_at] = list(why_fields)
         for row in lead_rows:
             profile = profile_by_company.get(row.get("company_id", ""))
-            row["why_line_status"] = profile.record_status if profile else "review"
-            for key in WHY_KEYS:
-                row[f"why_line_{key}"] = _variant_text(profile, key)
-                row[f"why_sources_{key}"] = _variant_sources(profile, key)
+            why_line = _profile_why_line(profile)
+            row["why_line"] = _why_line_text(profile)
+            row["why_template_key"] = why_line.template_key
+            row["why_confidence"] = why_line.confidence
+            row["why_sources"] = _why_line_sources(profile)
+            row["why_line_status"] = why_line.status
 
         company_fields = [
             "company_id", "business_name", "domain", "aliases", "locations",
             "employee_count", "lead_event_ids", "lead_event_count",
-            "anchor_lead_event_id", "why_line_a", "why_confidence_a",
-            "why_sources_a", "why_line_b", "why_confidence_b", "why_sources_b",
-            "why_line_c", "why_confidence_c", "why_sources_c", "record_status",
+            "anchor_lead_event_id", "why_line", "why_template_key",
+            "why_confidence", "why_sources", "why_line_status", "record_status",
             "run_id", "provenance_json",
         ]
         company_rows = [_company_row(profile, self.options.run_id) for profile in profiles]
@@ -1953,10 +2834,9 @@ class BulkRunner:
         _write_csv(revision_dir / "companies.csv", company_fields, company_rows)
         _write_jsonl(revision_dir / "company_profiles.jsonl", profiles)
         invalid_record_ids = {
-            f"{profile.profile_key}:{key}"
+            profile.profile_key
             for profile in profiles
-            for key, variant in profile.variants.items()
-            if variant.status != "valid"
+            if _profile_why_line(profile).status == "review"
         }
         revision_reviews = [
             item
@@ -2203,21 +3083,114 @@ def _sentence_count(value: str) -> int:
     return len(re.findall(r"[.!?](?=\s+[A-Z]|$)", normalized))
 
 
-def _complete_short_why_line(text: str, key: str) -> str:
-    tails = {
-        "a": "and that update caught my attention while reviewing recent Arizona developments.",
-        "b": "an operating detail that stood out while I was learning more about your work.",
-        "c": "a combination that stood out while I was reviewing your recent company updates.",
+def _clean_slot(value: object, *, lowercase: bool = True) -> str:
+    cleaned = " ".join(str(value or "").split()).strip(" ,.;:!?")
+    return cleaned.lower() if lowercase else cleaned
+
+
+def _locality_reference(value: object) -> str:
+    """Return one leaf locality without a state, parent place, or road detail."""
+    locality = _clean_slot(value)
+    if not locality:
+        return ""
+    locality = locality.split(",", 1)[0].strip()
+    locality = re.split(r"\s+(?:and|/)\s+", locality, maxsplit=1)[0].strip()
+    locality = re.split(r"\s+near\s+", locality, maxsplit=1)[0].strip()
+    locality = re.sub(r"\s+(?:az|arizona)$", "", locality).strip()
+    locality = re.sub(r"\s+(?:area|region|outskirts)$", "", locality).strip()
+    locality = {
+        "phoenix deer valley": "deer valley",
+    }.get(locality, locality)
+    broad_locations = {
+        "arizona",
+        "arizona cities",
+        "east valley",
+        "maricopa county",
+        "metro phoenix",
+        "phoenix metro",
+        "pinal county",
+        "west valley",
     }
-    tail = tails.get(
-        key,
-        "a detail that stood out while I was learning more about your work.",
+    if (
+        not locality
+        or locality in broad_locations
+        or locality.endswith(" county")
+        or locality.endswith(" cities")
+        or "," in locality
+        or _word_count(locality) > 3
+    ):
+        return ""
+    return locality
+
+
+def _known_company_reference(
+    value: object,
+    known_company_names: Iterable[str],
+) -> str:
+    """Resolve a short company reference to casing supplied by a known name."""
+    requested = _clean_slot(value, lowercase=False)
+    requested_key = normalize_text(requested)
+    if not requested_key or _word_count(requested) > 3:
+        return ""
+    candidates: list[str] = []
+    for known_name in known_company_names:
+        name = _clean_slot(known_name, lowercase=False)
+        words = list(re.finditer(r"[A-Za-z0-9]+(?:[&'’.-][A-Za-z0-9]+)*", name))
+        for start in range(len(words)):
+            for width in range(1, min(3, len(words) - start) + 1):
+                phrase = name[words[start].start():words[start + width - 1].end()]
+                if normalize_text(phrase) == requested_key:
+                    candidates.append(phrase)
+    if not candidates:
+        return ""
+    return max(
+        candidates,
+        key=lambda candidate: (
+            sum(character.isupper() for character in candidate),
+            sum(
+                character.isupper()
+                for index, character in enumerate(candidate)
+                if index > 0
+            ),
+        ),
     )
-    return f"{text.rstrip('.!?')}, {tail}"
 
 
-def _validate_variant(raw: dict, *, key: str = "") -> WhyVariant:
-    text = " ".join(str(raw.get("text") or "").split())
+def _uses_sentence_case_only(
+    value: str,
+    *,
+    company_references: Iterable[str] = (),
+) -> bool:
+    allowed_uppercase = {0}
+    allowed_uppercase.update(
+        match.start(1)
+        for match in re.finditer(r"[.!?]\s+([a-z])", value, re.IGNORECASE)
+    )
+    allowed_uppercase.update(
+        match.start()
+        for match in re.finditer(r"\bI\b", value)
+    )
+    for reference in company_references:
+        allowed_uppercase.update(
+            index
+            for match in re.finditer(re.escape(reference), value)
+            for index in range(match.start(), match.end())
+        )
+    return all(
+        not character.isupper() or index in allowed_uppercase
+        for index, character in enumerate(value)
+    )
+
+
+def _why_line_from_payload(
+    payload: dict,
+    *,
+    allowed_event_ids: set[str],
+    known_company_names: Iterable[str] = (),
+) -> WhyVariant:
+    raw = payload.get("selection") or {}
+    template_key = str(raw.get("template_key") or "").strip()
+    lead_event_id = str(raw.get("lead_event_id") or "").strip()
     confidence = str(raw.get("confidence") or "low").casefold()
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
@@ -2228,30 +3201,85 @@ def _validate_variant(raw: dict, *, key: str = "") -> WhyVariant:
         except ValueError:
             continue
     sources = list(dict.fromkeys(sources))
-    if text and sources and 17 <= _word_count(text) < 25:
-        text = _complete_short_why_line(text, key)
-        if confidence == "high":
-            confidence = "medium"
-    errors = []
-    if not text:
-        errors.append("why_line_missing")
+    template = WHY_TEMPLATES.get(template_key)
+    slots_raw = raw.get("slots") or {}
+    errors: list[str] = []
+    slots: dict[str, str] = {}
+    if isinstance(slots_raw, dict):
+        for key, value in slots_raw.items():
+            slot_key = str(key)
+            if slot_key == "company":
+                if _word_count(_clean_slot(value, lowercase=False)) > 3:
+                    errors.append("why_line_reference_length")
+                resolved = _known_company_reference(value, known_company_names)
+                slots[slot_key] = resolved
+                if not resolved:
+                    errors.append("why_line_company_reference")
+            elif slot_key == "location":
+                resolved = _locality_reference(value)
+                slots[slot_key] = resolved
+                if not resolved:
+                    errors.append("why_line_location")
+            else:
+                slots[slot_key] = _clean_slot(value)
+    if not template:
+        errors.append("why_template_unknown")
+    if not lead_event_id or lead_event_id not in allowed_event_ids:
+        errors.append("why_line_event_id")
     if not sources:
         errors.append("why_line_unsourced")
-    if text and not 25 <= _word_count(text) <= 45:
-        errors.append("why_line_word_count")
-    if "—" in text or "–" in text:
-        errors.append("why_line_dash")
-    if text and not text.casefold().startswith(WHY_LINE_OPENERS):
-        errors.append("why_line_not_recipient_facing")
-    if text and _sentence_count(text) != 1:
-        errors.append("why_line_sentence_count")
-    if text and re.search(r"(?:https?://|www\.)", text, re.IGNORECASE):
-        errors.append("why_line_contains_url")
-    if text and any(re.search(pattern, text, re.IGNORECASE) for pattern in WHY_LINE_FORBIDDEN_PATTERNS):
-        errors.append("why_line_sales_inference")
+    text = ""
+    status = "review"
+    if template:
+        required = set(template["slots"])
+        supplied = set(slots)
+        if supplied != required:
+            errors.append("why_line_slots")
+        if any(not slots.get(key) for key in required):
+            errors.append("why_line_slot_missing")
+        if any(
+            _word_count(value) > 3
+            for key, value in slots.items()
+            if key in WHY_SHORT_REFERENCE_SLOTS
+        ):
+            errors.append("why_line_reference_length")
+        if any(
+            _word_count(value) > 16
+            for key, value in slots.items()
+            if key not in WHY_SHORT_REFERENCE_SLOTS
+        ):
+            errors.append("why_line_slot_length")
+        if any(re.search(r"(?:https?://|www\.)", value, re.IGNORECASE) for value in slots.values()):
+            errors.append("why_line_slot_url")
+        if template["sendable"] and not errors:
+            text = str(template["text"]).format(**slots)
+            if not 20 <= _word_count(text) <= 55:
+                errors.append("why_line_word_count")
+            if "—" in text or "–" in text:
+                errors.append("why_line_dash")
+            if _sentence_count(text) != 2 or not text.endswith("?"):
+                errors.append("why_line_sentence_count")
+            expected_prefix = (
+                "Hi [first name] just wanted to reach out since I saw on the news that "
+            )
+            if not text.startswith(expected_prefix):
+                errors.append("why_line_opener")
+            company_references = [slots["company"]] if slots.get("company") else []
+            if not _uses_sentence_case_only(
+                text,
+                company_references=company_references,
+            ):
+                errors.append("why_line_case")
+            if not errors:
+                status = "valid"
+        elif not template["sendable"] and not errors:
+            status = "skip"
     if errors:
         return WhyVariant(
             text="",
+            template_key=template_key,
+            lead_event_id=lead_event_id,
+            slots=slots,
             confidence=confidence,
             source_urls=sources,
             status="review",
@@ -2259,42 +3287,69 @@ def _validate_variant(raw: dict, *, key: str = "") -> WhyVariant:
         )
     return WhyVariant(
         text=text,
+        template_key=template_key,
+        lead_event_id=lead_event_id,
+        slots=slots,
         confidence=confidence,
         source_urls=sources,
-        status="valid",
+        status=status,
     )
 
 
-def _variants_from_payload(payload: dict) -> dict[str, WhyVariant]:
-    variants = {
-        key: _validate_variant(
-            (payload.get("variants") or {}).get(key) or {}, key=key
-        )
-        for key in WHY_KEYS
-    }
-    return _require_distinct_variants(variants)
+def _profile_why_line(profile: CompanyProfile | None) -> WhyVariant:
+    if not profile:
+        return WhyVariant(validation_errors=["company_profile_missing"])
+    return profile.variants.get(
+        "primary", WhyVariant(validation_errors=["why_line_missing"])
+    )
 
 
-def _require_distinct_variants(
-    variants: dict[str, WhyVariant],
-) -> dict[str, WhyVariant]:
-    seen: set[str] = set()
-    output: dict[str, WhyVariant] = {}
-    for key in WHY_KEYS:
-        variant = variants[key]
-        normalized = normalize_text(variant.text)
-        if variant.status == "valid" and normalized in seen:
-            output[key] = WhyVariant(
-                confidence=variant.confidence,
-                source_urls=variant.source_urls,
-                status="review",
-                validation_errors=["why_line_duplicate_variant"],
-            )
+def _cap_people_by_company(people: list[Person], limit: int) -> list[Person]:
+    counts: dict[str, int] = defaultdict(int)
+    kept = []
+    for person in people:
+        if counts[person.organization_id] >= limit:
             continue
-        if normalized:
-            seen.add(normalized)
-        output[key] = variant
-    return output
+        counts[person.organization_id] += 1
+        kept.append(person)
+    return kept
+
+
+def _first_name(full_name: str) -> str:
+    parts = [part for part in re.split(r"\s+", full_name.strip()) if part]
+    while parts and parts[0].casefold().rstrip(".") in {
+        "dr", "mr", "mrs", "ms", "miss", "prof",
+    }:
+        parts.pop(0)
+    if not parts:
+        return ""
+    return parts[0].strip(" ,")
+
+
+def _personalize_why_line(text: str, first_name: str) -> str:
+    if not first_name:
+        raise ValueError("recipient has no usable first name")
+    placeholder = "Hi [first name]"
+    if not text.startswith(placeholder):
+        raise ValueError("why line is missing the first-name placeholder")
+    personalized = f"Hi {first_name}{text[len(placeholder):]}"
+    if "[first name]" in personalized:
+        raise ValueError("why line contains an unresolved first-name placeholder")
+    return personalized
+
+
+def _recipient_status(contact: ContactCandidate | None) -> str:
+    if contact and contact.email:
+        return "email"
+    if contact and contact.phone:
+        return "phone_only"
+    if contact and contact.linkedin:
+        return "linkedin_only"
+    return "no_contact"
+
+
+def _profile_record_status(why_line: WhyVariant) -> str:
+    return "valid" if why_line.status in {"valid", "skip"} else "review"
 
 
 def _anchor_event(events: list[LeadEvent], scores: dict[str, int]) -> LeadEvent:
@@ -2329,9 +3384,11 @@ def _dedupe_profiles(profiles: list[CompanyProfile]) -> list[CompanyProfile]:
         winner = sorted(
             rows,
             key=lambda item: (
-                -sum(value.status == "valid" for value in item.variants.values()),
+                -{"valid": 2, "skip": 1, "review": 0}.get(
+                    _profile_why_line(item).status, 0
+                ),
                 -bool(item.employee_count),
-                -sum(len(value.source_urls) for value in item.variants.values()),
+                -len(_profile_why_line(item).source_urls),
                 item.profile_key,
             ),
         )[0]
@@ -2389,18 +3446,14 @@ def _verify_seed_manifest(
             raise ValueError(f"seed artifact hash mismatch: {path}")
 
 
-def _variant_text(profile: CompanyProfile | None, key: str) -> str:
-    if not profile or key not in profile.variants:
-        return ""
-    variant = profile.variants[key]
-    return variant.text if variant.status == "valid" else ""
+def _why_line_text(profile: CompanyProfile | None) -> str:
+    why_line = _profile_why_line(profile)
+    return why_line.text if why_line.status == "valid" else ""
 
 
-def _variant_sources(profile: CompanyProfile | None, key: str) -> str:
-    if not profile or key not in profile.variants:
-        return ""
-    variant = profile.variants[key]
-    return " ".join(variant.source_urls) if variant.status == "valid" else ""
+def _why_line_sources(profile: CompanyProfile | None) -> str:
+    why_line = _profile_why_line(profile)
+    return " ".join(why_line.source_urls) if why_line.status in {"valid", "skip"} else ""
 
 
 def _company_row(profile: CompanyProfile, run_id: str) -> dict:
@@ -2421,11 +3474,12 @@ def _company_row(profile: CompanyProfile, run_id: str) -> dict:
             sort_keys=True,
         ),
     }
-    for key in WHY_KEYS:
-        variant = profile.variants[key]
-        row[f"why_line_{key}"] = variant.text
-        row[f"why_confidence_{key}"] = variant.confidence
-        row[f"why_sources_{key}"] = " ".join(variant.source_urls)
+    why_line = _profile_why_line(profile)
+    row["why_line"] = _why_line_text(profile)
+    row["why_template_key"] = why_line.template_key
+    row["why_confidence"] = why_line.confidence
+    row["why_sources"] = _why_line_sources(profile)
+    row["why_line_status"] = why_line.status
     return row
 
 

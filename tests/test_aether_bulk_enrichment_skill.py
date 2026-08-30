@@ -16,15 +16,19 @@ SCRIPT_DIR = ROOT / "skills" / "aether-bulk-enrichment" / "scripts"
 sys.path.insert(0, str(ROOT / "scout"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import bulk_lib  # noqa: E402
 from bulk_lib import (  # noqa: E402
     BulkOptions,
     BulkRunner,
     CompanyProfile,
     WhyVariant,
     _archive_url_in_scope,
+    _first_name,
     _offline_screen,
-    _require_distinct_variants,
-    _validate_variant,
+    _personalize_why_line,
+    _template_catalog,
+    _uses_sentence_case_only,
+    _why_line_from_payload,
 )
 from v2.contracts import (  # noqa: E402
     DiscoveryCandidate,
@@ -36,6 +40,7 @@ from v2.contracts import (  # noqa: E402
 from v2.http import FetchResponse  # noqa: E402
 from v2.discovery import load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
+from v2.verification import ContactVerifier as RealContactVerifier  # noqa: E402
 
 
 def response(url: str, text: str | bytes) -> FetchResponse:
@@ -67,6 +72,15 @@ def options(tmp_path: Path, **changes) -> BulkOptions:
 def test_skill_is_explicit_only():
     metadata = (ROOT / "skills/aether-bulk-enrichment/agents/openai.yaml").read_text()
     assert "allow_implicit_invocation: false" in metadata
+
+
+def test_recipient_first_name_personalization_strips_honorifics():
+    line = "Hi [first name] just wanted to reach out. Is there any chance?"
+
+    assert _first_name("Dr. Michael Hudson") == "Michael"
+    assert _first_name("Ana Garcia") == "Ana"
+    assert _personalize_why_line(line, "Michael").startswith("Hi Michael ")
+    assert "[first name]" not in _personalize_why_line(line, "Michael")
 
 
 def test_resume_rejects_changed_source_snapshot(tmp_path):
@@ -256,70 +270,256 @@ def test_legacy_interrupted_run_reuses_saved_corpus_without_fetching(tmp_path):
     assert counters["distinct_urls"] == 1
 
 
-def test_why_line_validation_is_sourced_and_fail_closed():
-    valid = _validate_variant(
+def test_why_line_selection_renders_approved_template_and_fails_closed():
+    valid = _why_line_from_payload(
         {
-            "text": "Saw your team opened the new Phoenix marketplace on July 25, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone.",
-            "confidence": "high",
-            "source_urls": ["https://example.com/story"],
-        }
+            "selection": {
+                "template_key": "opening",
+                "lead_event_id": "event-1",
+                "slots": {
+                    "property": "the new Phoenix marketplace",
+                    "location": "Phoenix",
+                },
+                "confidence": "high",
+                "source_urls": ["https://example.com/story"],
+            }
+        },
+        allowed_event_ids={"event-1"},
     )
-    unsupported = _validate_variant(
+    unsupported = _why_line_from_payload(
         {
-            "text": "Saw your team opened a new Phoenix marketplace and appears ready for a strategic service partner because this creates an immediate facilities opportunity for Acme.",
-            "confidence": "high",
-            "source_urls": [],
-        }
+            "selection": {
+                "template_key": "opening",
+                "lead_event_id": "event-1",
+                "slots": {
+                    "property": "the new Phoenix marketplace",
+                    "location": "Phoenix",
+                },
+                "confidence": "high",
+                "source_urls": [],
+            }
+        },
+        allowed_event_ids={"event-1"},
     )
 
     assert valid.status == "valid"
-    assert unsupported.status == "review" and unsupported.text == ""
-
-
-def test_why_line_validation_rejects_analyst_copy_and_duplicate_variants():
-    analyst = _validate_variant(
-        {
-            "text": "The company opened a Phoenix warehouse in August, creating an immediate need for facilities services and making this an ideal time for outreach to its operating team.",
-            "confidence": "high",
-            "source_urls": ["https://example.com/story"],
-        }
+    assert valid.text == (
+        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "the new phoenix marketplace is opening in phoenix. "
+        "Is there any chance we could stay in touch regarding your future janitorial needs?"
     )
-    valid_text = "Saw your team opened the new Phoenix warehouse on August 1, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone."
-    variants = _require_distinct_variants(
+    assert unsupported.status == "review" and unsupported.text == ""
+    assert "why_line_unsourced" in unsupported.validation_errors
+
+
+@pytest.mark.parametrize(
+    ("raw_location", "expected"),
+    [
+        ("Tempe, Arizona", "tempe"),
+        ("Deer Valley, North Phoenix", "deer valley"),
+        ("Tucson and Gilbert", "tucson"),
+        ("Southeast Mesa near Ray and Sossaman Roads, AZ", "southeast mesa"),
+        ("Buckeye Arizona", "buckeye"),
+        ("Phoenix Deer Valley AZ", "deer valley"),
+    ],
+)
+def test_why_line_location_is_reduced_to_one_leaf_locality(raw_location, expected):
+    why_line = _why_line_from_payload(
         {
-            key: _validate_variant(
-                {
-                    "text": valid_text,
+            "selection": {
+                "template_key": "opening",
+                "lead_event_id": "event-1",
+                "slots": {"property": "the new marketplace", "location": raw_location},
+                "confidence": "high",
+                "source_urls": ["https://example.com/story"],
+            }
+        },
+        allowed_event_ids={"event-1"},
+    )
+
+    assert why_line.status == "valid"
+    assert why_line.slots["location"] == expected
+    assert "," not in why_line.slots["location"]
+
+
+@pytest.mark.parametrize("raw_location", ["Arizona", "Pinal County, Arizona", "West Valley Arizona"])
+def test_why_line_location_rejects_broad_parent_geography(raw_location):
+    why_line = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "opening",
+                "lead_event_id": "event-1",
+                "slots": {"property": "the new marketplace", "location": raw_location},
+                "confidence": "high",
+                "source_urls": ["https://example.com/story"],
+            }
+        },
+        allowed_event_ids={"event-1"},
+    )
+
+    assert why_line.status == "review"
+    assert why_line.text == ""
+    assert "why_line_location" in why_line.validation_errors
+
+
+def test_why_line_selection_routes_non_actionable_signals_and_rejects_bad_slots():
+    routed = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "route_new_owner",
+                "lead_event_id": "event-sale",
+                "slots": {},
+                "confidence": "high",
+                "source_urls": ["https://example.com/sale"],
+            }
+        },
+        allowed_event_ids={"event-sale"},
+    )
+    bad_slots = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "acquisition",
+                "lead_event_id": "event-sale",
+                "slots": {"company": "Buyer Co", "property": "the warehouse"},
+                "confidence": "high",
+                "source_urls": ["https://example.com/sale"],
+            }
+        },
+        allowed_event_ids={"event-sale"},
+    )
+    overlong_company = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "acquisition",
+                "lead_event_id": "event-sale",
+                "slots": {
+                    "company": "JLL Income Property Trust",
+                    "property": "the warehouse",
+                    "location": "Surprise",
+                },
+                "confidence": "high",
+                "source_urls": ["https://example.com/sale"],
+            }
+        },
+        allowed_event_ids={"event-sale"},
+        known_company_names=["JLL Income Property Trust"],
+    )
+    shortened_company = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "acquisition",
+                "lead_event_id": "event-sale",
+                "slots": {
+                    "company": "jll",
+                    "property": "the warehouse",
+                    "location": "Surprise",
+                },
+                "confidence": "high",
+                "source_urls": ["https://example.com/sale"],
+            }
+        },
+        allowed_event_ids={"event-sale"},
+        known_company_names=["JLL Income Property Trust"],
+    )
+    unknown_company = _why_line_from_payload(
+        {
+            "selection": {
+                "template_key": "acquisition",
+                "lead_event_id": "event-sale",
+                "slots": {
+                    "company": "invented buyer",
+                    "property": "the warehouse",
+                    "location": "Surprise",
+                },
+                "confidence": "high",
+                "source_urls": ["https://example.com/sale"],
+            }
+        },
+        allowed_event_ids={"event-sale"},
+        known_company_names=["JLL Income Property Trust"],
+    )
+
+    assert routed.status == "skip" and routed.text == ""
+    assert bad_slots.status == "review" and bad_slots.text == ""
+    assert "why_line_slots" in bad_slots.validation_errors
+    assert overlong_company.status == "review"
+    assert "why_line_reference_length" in overlong_company.validation_errors
+    assert shortened_company.status == "valid"
+    assert shortened_company.slots["company"] == "JLL"
+    assert "JLL took ownership" in shortened_company.text
+    assert unknown_company.status == "review"
+    assert "why_line_company_reference" in unknown_company.validation_errors
+    assert "route_new_owner" in _template_catalog()
+
+
+def test_every_approved_template_renders_brief_copy_or_an_intentional_skip():
+    samples = {
+        "acquisition": {"company": "Acme", "property": "the Mesa warehouse", "location": "Mesa"},
+        "opening": {"property": "the new Phoenix marketplace", "location": "Phoenix"},
+        "planned_development": {"project": "west valley center", "location": "Goodyear"},
+        "approval": {"project": "belmont energy center", "approval": "its rezoning approval"},
+        "construction_start": {"project": "employee development campus", "location": "Phoenix"},
+        "lease_relocation": {"company": "Acme", "property": "the Deer Valley warehouse", "location": "Phoenix"},
+        "site_acquisition": {"company": "Acme", "site": "the Vistancia health club site", "location": "Peoria"},
+        "expansion": {"company": "tsmc", "location": "Tucson"},
+        "funded_facility": {"funding": "the newly awarded federal grant", "project_or_expansion": "arizona tradeport expansion"},
+        "renovation_conversion": {"property": "the downtown office tower", "new_use": "a hotel"},
+        "construction_progress": {"project": "tempe residential community", "milestone": "its topping-out milestone"},
+        "completion": {"project": "Nexus Commerce Center", "location": "Phoenix"},
+    }
+
+    for key in (
+        *samples,
+        "route_new_owner",
+        "skip_negative",
+        "skip_general",
+    ):
+        why_line = _why_line_from_payload(
+            {
+                "selection": {
+                    "template_key": key,
+                    "lead_event_id": "event-1",
+                    "slots": samples.get(key, {}),
                     "confidence": "high",
                     "source_urls": ["https://example.com/story"],
                 }
+            },
+            allowed_event_ids={"event-1"},
+            known_company_names=["Acme", "TSMC Arizona Corporation"],
+        )
+        if key in samples:
+            assert why_line.status == "valid"
+            assert why_line.text.endswith("?")
+            assert why_line.text.startswith("Hi [first name] just wanted to reach out")
+            assert _uses_sentence_case_only(
+                why_line.text,
+                company_references=[why_line.slots["company"]]
+                if why_line.slots.get("company")
+                else [],
             )
-            for key in ("a", "b", "c")
-        }
-    )
-
-    assert analyst.status == "review" and analyst.text == ""
-    assert "why_line_not_recipient_facing" in analyst.validation_errors
-    assert "why_line_sales_inference" in analyst.validation_errors
-    assert variants["a"].status == "valid"
-    assert variants["b"].validation_errors == ["why_line_duplicate_variant"]
-    assert variants["c"].validation_errors == ["why_line_duplicate_variant"]
-
-
-def test_short_sourced_why_line_gets_deterministic_fact_free_completion():
-    variant = _validate_variant(
-        {
-            "text": "Noticed Vestar owns the 1.2 million square foot Desert Ridge Marketplace regional entertainment lifestyle and power center in northeast Phoenix Arizona.",
-            "confidence": "high",
-            "source_urls": ["https://vestar.com/"],
-        },
-        key="b",
-    )
-
-    assert variant.status == "valid"
-    assert 25 <= len(variant.text.split()) <= 45
-    assert variant.confidence == "medium"
-    assert variant.text.endswith("learning more about your work.")
+            assert 20 <= len(why_line.text.split()) <= 55
+            if why_line.slots.get("location"):
+                assert "," not in why_line.slots["location"]
+                assert why_line.slots["location"].split()[-1] not in {"az", "arizona"}
+            if key == "expansion":
+                assert why_line.text.endswith(
+                    "Is there any chance you'll be reviewing your janitorial needs, with the additional space?"
+                )
+            elif key in {
+                "acquisition", "opening", "planned_development", "approval",
+                "construction_start", "lease_relocation", "site_acquisition",
+                "funded_facility", "construction_progress", "completion",
+            }:
+                assert why_line.text.endswith(
+                    "Is there any chance we could stay in touch regarding your future janitorial needs?"
+                )
+            else:
+                assert why_line.text.endswith(
+                    "Is there any chance you'll be reviewing your janitorial needs?"
+                )
+        else:
+            assert why_line.status == "skip"
+            assert why_line.text == ""
 
 
 def test_offline_screen_treats_missing_or_ambiguous_geography_conservatively(tmp_path):
@@ -536,7 +736,7 @@ def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
         organization_ids=["org-anchor"],
         lead_event_ids=["event-anchor"],
         anchor_lead_event_id="event-anchor",
-        variants={key: WhyVariant() for key in ("a", "b", "c")},
+        variants={"a": WhyVariant()},
     )
     initial.artifacts.final_dir.mkdir(parents=True, exist_ok=True)
     (initial.artifacts.final_dir / "company_profiles.jsonl").write_text(
@@ -564,21 +764,22 @@ def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
         )
 
     calls = []
-    official = "https://anchor.example/operations"
-    lines = {
-        "a": "Saw your team opened the new Phoenix warehouse on August 1, adding a customer-facing commercial property to Anchor Co's local operating footprint after the announced development milestone.",
-        "b": "Your official site highlights Anchor Co's Phoenix warehouse operation, including receiving areas, customer pickup space, and scheduled inventory handling within one managed commercial location serving regional clients.",
-        "c": "Noticed Anchor Co paired its August warehouse opening with a regional inventory model, bringing receiving, storage, and customer pickup operations together at the new Phoenix commercial property.",
-    }
+    line = (
+        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "the new warehouse is opening in phoenix. "
+        "Is there any chance we could stay in touch regarding your future janitorial needs?"
+    )
 
     def model_call(model, prompt, tools):
         calls.append((model, tools, prompt))
         return json.dumps(
             {
-                "variants": {
-                    "a": {"text": lines["a"], "confidence": "high", "source_urls": [article]},
-                    "b": {"text": lines["b"], "confidence": "high", "source_urls": [official]},
-                    "c": {"text": lines["c"], "confidence": "high", "source_urls": [article, official]},
+                "selection": {
+                    "template_key": "opening",
+                    "lead_event_id": "event-anchor",
+                    "slots": {"property": "the new warehouse", "location": "Phoenix"},
+                    "confidence": "high",
+                    "source_urls": [article],
                 }
             }
         ), {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
@@ -594,16 +795,160 @@ def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
     assert first["counts"]["companies"] == 1
     assert first["counts"]["model_calls"] == 1
     assert first["counts"]["valid_profiles"] == 1
+    assert first["counts"]["valid_lines"] == 1
     assert second["counts"]["model_calls"] == 1
     assert second["counts"]["new_model_calls"] == 0
     assert second["counts"]["cached_companies"] == 1
     revised = Path(first["output"])
     with (revised / "leads.csv").open(newline="", encoding="utf-8") as file:
-        row = next(csv.DictReader(file))
+        reader = csv.DictReader(file)
+        row = next(reader)
     assert row["why_line_status"] == "valid"
-    assert [row[f"why_line_{key}"] for key in ("a", "b", "c")] == [
-        lines[key] for key in ("a", "b", "c")
-    ]
+    assert row["why_template_key"] == "opening"
+    assert row["why_line"] == line
+    assert "why_line_a" not in reader.fieldnames
+
+
+def test_recipient_enrichment_adds_real_names_and_resumes_without_repeat_calls(
+    tmp_path, monkeypatch
+):
+    initial = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    initial.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    article = "https://example.com/anchor"
+    initial.state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-anchor",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=article,
+            resolved_url=article,
+            canonical_url=article,
+            title="Acme opens in Phoenix",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+            published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+    )
+    initial.state.save_organization(
+        Organization(organization_id="org-anchor", canonical_name="Acme")
+    )
+    initial.state.save_lead_event(
+        LeadEvent(
+            lead_event_id="event-anchor",
+            run_id="bulk-run",
+            organization_id="org-anchor",
+            primary_candidate_id="candidate-anchor",
+            supporting_candidate_ids=["candidate-anchor"],
+            event="Opened a warehouse",
+            location="Phoenix, Arizona",
+            priority="high",
+            evidence=[Evidence(url=article, supports="Reports the opening")],
+        )
+    )
+    line = (
+        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "the warehouse is opening in phoenix. Is there any chance we could stay "
+        "in touch regarding your future janitorial needs?"
+    )
+    profile = CompanyProfile(
+        profile_key="profile-anchor",
+        company_id="company-anchor",
+        canonical_name="Acme",
+        domain="acme.com",
+        organization_ids=["org-anchor"],
+        lead_event_ids=["event-anchor"],
+        anchor_lead_event_id="event-anchor",
+        evidence_urls=[article],
+        variants={
+            "primary": WhyVariant(
+                text=line,
+                template_key="opening",
+                lead_event_id="event-anchor",
+                slots={"property": "the warehouse", "location": "phoenix"},
+                confidence="high",
+                source_urls=[article],
+                status="valid",
+            )
+        },
+    )
+    revision = initial.artifacts.final_dir / "recipient-outreach-v4"
+    revision.mkdir(parents=True)
+    (revision / "company_profiles.jsonl").write_text(
+        profile.model_dump_json() + "\n", encoding="utf-8"
+    )
+    initial.manifest.status = StageStatus.COMPLETED
+    initial._refresh_manifest()
+
+    calls = []
+
+    def model_call(model, prompt, tools):
+        calls.append(prompt)
+        if "up to three current decision makers" in prompt:
+            return json.dumps(
+                {
+                    "decision_makers": [
+                        {
+                            "name": "Dr. Michael Hudson",
+                            "title": "Facilities Director",
+                            "scope": "Phoenix",
+                        }
+                    ],
+                    "employee_count": None,
+                    "sources": [
+                        {"url": "https://acme.com/team", "supports": "Lists Michael."}
+                    ],
+                }
+            ), {"total_tokens": 40}
+        if "Use web search to research this exact person" in prompt:
+            return json.dumps(
+                {
+                    "name": "Dr. Michael Hudson",
+                    "organization": "Acme",
+                    "email": "michael@acme.com",
+                    "phone": "",
+                    "linkedin": "https://linkedin.com/in/michael-hudson",
+                    "sources": [
+                        {"url": "https://acme.com/team", "supports": "Lists contact."}
+                    ],
+                }
+            ), {"total_tokens": 30}
+        raise AssertionError(prompt[:100])
+
+    monkeypatch.setattr(
+        bulk_lib,
+        "ContactVerifier",
+        lambda state: RealContactVerifier(state, mx_lookup=lambda domain: True),
+    )
+    runner = BulkRunner(
+        options(tmp_path, resume=True),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+
+    first = runner.enrich_recipients(apollo_go=False)
+    second = runner.enrich_recipients(apollo_go=False)
+
+    assert len(calls) == 2
+    assert first == second
+    assert first["counts"]["people"] == 1
+    assert first["counts"]["recipients_with_email"] == 1
+    assert first["counts"]["apollo_new_requests"] == 0
+    assert first["email_delivery"] is False
+    with (Path(first["output"]) / "recipients.csv").open(
+        newline="", encoding="utf-8"
+    ) as file:
+        row = next(csv.DictReader(file))
+    assert row["first_name"] == "Michael"
+    assert row["full_name"] == "Dr. Michael Hudson"
+    assert row["why_line"].startswith("Hi Michael ")
+    assert "[first name]" not in row["why_line"]
 
 
 def test_seed_import_clones_completed_run_into_bulk_state(tmp_path):
@@ -698,9 +1043,11 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
             raise RuntimeError("not found")
         return response(url, pages[url])
 
-    why_a = "Saw your team opened the new Phoenix marketplace on July 25, adding a customer-facing commercial property to Acme's local operating footprint after the announced development milestone."
-    why_b = "Your official site highlights Acme's Phoenix marketplace format, combining local vendors, shared customer areas, and recurring community programming within one managed commercial destination serving neighborhood shoppers."
-    why_c = "Noticed Acme paired its July marketplace opening with a vendor-focused operating model, bringing local merchants and shared public areas together at the new Phoenix commercial property."
+    why_line = (
+        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "the new commercial marketplace is opening in phoenix. "
+        "Is there any chance we could stay in touch regarding your future janitorial needs?"
+    )
 
     def model_call(model, prompt, tools):
         if "bounded batch" in prompt:
@@ -731,16 +1078,21 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
             assert '"contacts"' not in prompt
             event_id = runner.state.active_events_for_run("bulk-run")[0].lead_event_id
             return json.dumps({event_id: 88}), {}
-        if "Write three alternative cold-email" in prompt:
+        if "Select one approved Aether cold-email" in prompt:
             return json.dumps(
                 {
                     "canonical_name": "Acme Marketplace",
                     "domain": "acme.example",
                     "employee_count": "100-250",
-                    "variants": {
-                        "a": {"text": why_a, "confidence": "high", "source_urls": [article]},
-                        "b": {"text": why_b, "confidence": "high", "source_urls": [article]},
-                        "c": {"text": why_c, "confidence": "high", "source_urls": [article]},
+                    "selection": {
+                        "template_key": "opening",
+                        "lead_event_id": runner.state.active_events_for_run("bulk-run")[0].lead_event_id,
+                        "slots": {
+                            "property": "the new commercial marketplace",
+                            "location": "Phoenix",
+                        },
+                        "confidence": "high",
+                        "source_urls": [article],
                     },
                 }
             ), {}
@@ -755,5 +1107,9 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
     assert (final_dir / "companies.csv").exists()
     assert not (tmp_path / "output/leads.csv").exists()
     assert not list((tmp_path / "output").glob("*.html"))
+    with (final_dir / "leads.csv").open(newline="", encoding="utf-8") as file:
+        row = next(csv.DictReader(file))
+    assert row["why_line"] == why_line
+    assert row["why_template_key"] == "opening"
     with runner.state.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0

@@ -14,7 +14,7 @@ from .state import StateStore
 
 
 MATCH_URL = "https://api.apollo.io/api/v1/people/match"
-FATAL_STATUS_CODES = {400, 401, 402, 403, 422, 429}
+FATAL_STATUS_CODES = {400, 401, 402, 403, 422}
 
 
 class ApolloFatalError(RuntimeError):
@@ -139,6 +139,10 @@ class ApolloResolver:
                         "x-api-key": api_key,
                     },
                 )
+                if response.status_code == 429:
+                    raise ApolloTransientError(
+                        f"Apollo HTTP {response.status_code}: {response.text[:200]}"
+                    )
                 if response.status_code in FATAL_STATUS_CODES:
                     raise ApolloFatalError(
                         f"Apollo HTTP {response.status_code}: {response.text[:200]}"
