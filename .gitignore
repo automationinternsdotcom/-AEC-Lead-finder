@@ -21,6 +21,7 @@ logs/
 scout/logs/
 results/*
 !results/.gitkeep
+comparison/
 
 # Credentials (never commit)
 .env
