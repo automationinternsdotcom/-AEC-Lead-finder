@@ -52,6 +52,7 @@ class WarmyClient:
         path: str,
         *,
         payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         idempotency_key: str = "",
         write: bool = False,
     ) -> dict[str, Any]:
@@ -59,7 +60,11 @@ class WarmyClient:
             self.settings.require_provider_writes()
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         response = self.http.request(
-            method, path.lstrip("/"), json=payload, headers=headers
+            method,
+            path.lstrip("/"),
+            json=payload,
+            params=params,
+            headers=headers,
         )
         body = response.json() if response.content else {}
         if not 200 <= response.status_code < 300:
@@ -73,6 +78,7 @@ class WarmyClient:
         return body
 
     def create_prospect(self, contact: dict[str, Any], operation_key: str) -> dict:
+        custom_fields = self._prospect_custom_fields(contact)
         payload = {
             "email": contact["email"],
             "firstName": contact.get("first_name", ""),
@@ -82,15 +88,7 @@ class WarmyClient:
             "phone": contact.get("phone", ""),
             "linkedinUrl": contact.get("linkedin", ""),
             "enroll": False,
-            "customFields": {
-                "aetherLeadEventId": contact.get("lead_event_id", ""),
-                "aetherOutreachId": contact.get("outreach_id", ""),
-                "aetherContactCandidateId": contact.get(
-                    "source_contact_candidate_id", ""
-                ),
-                "sourceArticle": contact.get("article_url", ""),
-                "unsubscribeUrl": contact.get("unsubscribe_url", ""),
-            },
+            "customFields": custom_fields,
         }
         payload = {
             key: value for key, value in payload.items() if value not in ("", None)
@@ -98,6 +96,71 @@ class WarmyClient:
         return self._request(
             "POST",
             "prospects",
+            payload=payload,
+            idempotency_key=operation_key,
+            write=True,
+        )
+
+    def find_prospect_by_email(self, email: str) -> dict[str, Any] | None:
+        normalized = email.strip().casefold()
+        response = self._request(
+            "GET", "prospects", params={"email": normalized}
+        )
+        data = response.get("data") if isinstance(response, dict) else response
+        if isinstance(data, dict):
+            rows = next(
+                (
+                    data[key]
+                    for key in ("prospects", "items", "results")
+                    if isinstance(data.get(key), list)
+                ),
+                [],
+            )
+        else:
+            rows = data if isinstance(data, list) else []
+        return next(
+            (
+                row
+                for row in rows
+                if str(row.get("email") or "").strip().casefold() == normalized
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _prospect_custom_fields(contact: dict[str, Any]) -> dict[str, Any]:
+        values = {
+            "aetherLeadEventId": contact.get("lead_event_id", ""),
+            "aetherOutreachId": contact.get("outreach_id", ""),
+            "aetherContactCandidateId": contact.get(
+                "source_contact_candidate_id", ""
+            ),
+            "sourceArticle": contact.get("article_url", ""),
+            "unsubscribeUrl": contact.get("unsubscribe_url", ""),
+            "whyLine": contact.get("why_line", ""),
+        }
+        return {key: value for key, value in values.items() if value not in ("", None)}
+
+    def update_prospect(
+        self, prospect_id: str, contact: dict[str, Any], operation_key: str
+    ) -> dict:
+        payload = {
+            "firstName": contact.get("first_name", ""),
+            "lastName": contact.get("last_name", ""),
+            "company": contact.get("organization_name", ""),
+            "role": contact.get("title", ""),
+            "phone": contact.get("phone", ""),
+            "linkedinUrl": contact.get("linkedin") or None,
+            "customFields": self._prospect_custom_fields(contact),
+        }
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if value not in ("", None)
+        }
+        return self._request(
+            "PATCH",
+            f"prospects/{prospect_id}",
             payload=payload,
             idempotency_key=operation_key,
             write=True,
@@ -322,18 +385,19 @@ class PipedriveClient:
     def create_lead(
         self,
         title: str,
-        person_id: int,
+        person_id: int | None,
         organization_id: int,
         owner_id: int,
         custom_fields: dict[str, Any],
     ) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "title": title[:255],
-            "person_id": person_id,
             "organization_id": organization_id,
             "owner_id": owner_id,
             **custom_fields,
         }
+        if person_id is not None:
+            payload["person_id"] = person_id
         data = self._request("POST", "v1/leads", payload=payload, write=True)
         return str(data["id"])
 
@@ -350,6 +414,9 @@ class PipedriveClient:
         )
         value = self._search_id(data)
         return str(value) if value is not None else None
+
+    def find_lead_by_event_id(self, lead_event_id: str) -> str | None:
+        return self.find_lead_by_outreach_id(lead_event_id)
 
     def update_lead(self, lead_id: str, fields: dict[str, Any]) -> dict:
         return self._request("PATCH", f"v1/leads/{lead_id}", payload=fields, write=True)
@@ -408,6 +475,20 @@ class PipedriveClient:
 
     def update_deal(self, deal_id: int, fields: dict[str, Any]) -> dict:
         return self._request("PATCH", f"v2/deals/{deal_id}", payload=fields, write=True)
+
+    def find_deal_by_sequence_id(self, sequence_id: str) -> int | None:
+        data = self._request(
+            "GET",
+            "v2/deals/search",
+            params={
+                "term": sequence_id,
+                "fields": "custom_fields",
+                "exact_match": "true",
+                "limit": 1,
+            },
+        )
+        value = self._search_id(data)
+        return int(value) if value is not None else None
 
     def create_webhook(
         self,
@@ -510,6 +591,7 @@ class GmailClient:
         )
         forward.set_content(
             "Forwarded automatically by the Aether sales integration for Jordan's review.\n"
+            "Sent by Codex on Jon Schack's behalf.\n"
             "The original reply is attached."
         )
         forward.add_attachment(

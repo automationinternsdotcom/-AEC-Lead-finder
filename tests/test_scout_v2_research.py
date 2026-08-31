@@ -50,7 +50,8 @@ def test_verifier_rejects_disposable_and_caches_mx(tmp_path):
     assert rejected.reason == "email_domain_disposable"
     first = verifier.verify(email="Person@Acme.com", organization_domain="acme.com")
     second = verifier.verify(email="person@acme.com", organization_domain="acme.com")
-    assert first.status == second.status == VerificationStatus.VERIFIED
+    assert first.status == second.status == VerificationStatus.UNKNOWN
+    assert first.reason == second.reason == "domain_mx_valid_mailbox_unverified"
     assert calls == ["acme.com"]
 
 
@@ -72,6 +73,120 @@ def test_decision_makers_require_sources_and_persist_people(tmp_path):
     assert not reviews
     assert people[0].name == "Jane Manager"
     assert store.people("org-1")[0].title == "General Manager"
+
+
+def test_valid_empty_decision_maker_result_is_terminal(tmp_path):
+    store, artifacts, organization, _ = setup(tmp_path)
+    calls = []
+    payload = {
+        "decision_makers": [],
+        "employee_count": None,
+        "sources": [],
+    }
+    service = DecisionMakerService(
+        store,
+        artifacts,
+        "grok-4.3",
+        call_model=lambda model, prompt, tools: calls.append(prompt)
+        or (json.dumps(payload), {}),
+    )
+
+    people, reviews = service.research([organization], attempts=2)
+
+    assert not people
+    assert not reviews
+    assert len(calls) == 1
+
+
+def test_company_dossier_projects_contacts_and_skips_person_fallback(tmp_path):
+    store, artifacts, organization, evidence = setup(tmp_path)
+    event = LeadEvent(
+        lead_event_id="event-1",
+        run_id="run-1",
+        organization_id="org-1",
+        primary_candidate_id="candidate-1",
+        supporting_candidate_ids=["candidate-1"],
+        event="Acme opened a Phoenix facility",
+        location="Phoenix, Arizona",
+        date_posted=date(2026, 8, 28),
+        priority="high",
+        evidence=evidence,
+    )
+    with store.connect() as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            """INSERT INTO v2_lead_events(
+                lead_event_id, run_id, organization_id, primary_candidate_id,
+                record_status, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'valid', ?, 'now', 'now')""",
+            (
+                event.lead_event_id,
+                event.run_id,
+                event.organization_id,
+                event.primary_candidate_id,
+                event.model_dump_json(),
+            ),
+        )
+        conn.commit()
+    payload = {
+        "canonical_domain": "acme.com",
+        "decision_makers": [
+            {
+                "name": "Jane Manager",
+                "title": "General Manager",
+                "scope": "Phoenix",
+                "email": "jane@acme.com",
+                "phone": "",
+                "linkedin": "https://linkedin.com/in/jane-manager",
+                "sources": [
+                    {
+                        "url": "https://acme.com/team",
+                        "supports": "Lists Jane's current role and contact details.",
+                    }
+                ],
+            }
+        ],
+        "employee_count": None,
+        "sources": [
+            {"url": "https://acme.com/team", "supports": "Acme team page."}
+        ],
+    }
+    verifier = ContactVerifier(store, mx_lookup=lambda domain: True)
+    service = DecisionMakerService(
+        store,
+        artifacts,
+        "grok-4.3",
+        call_model=lambda model, prompt, tools: (json.dumps(payload), {}),
+        verifier=verifier,
+        events=[event],
+    )
+
+    people, reviews = service.research([organization])
+
+    assert not reviews
+    assert [person.name for person in people] == ["Jane Manager"]
+    contacts = store.contacts_for_run("run-1")
+    assert len(contacts) == 1
+    assert contacts[0].provider == "model-dossier"
+    assert contacts[0].selected
+    assert contacts[0].email == "jane@acme.com"
+
+    fallback_calls = []
+    contact_service = ContactResearchService(
+        store,
+        artifacts,
+        "grok-4.3",
+        verifier,
+        call_model=lambda model, prompt, tools: fallback_calls.append(prompt)
+        or ("{}", {}),
+    )
+    selected, contact_reviews = contact_service.research(
+        people, [organization], [event], attempts=2
+    )
+
+    assert not contact_reviews
+    assert not fallback_calls
+    assert len(selected) == 1 and selected[0].selected
 
 
 def test_contact_research_runs_once_per_person_and_projects_to_events(tmp_path):
@@ -132,7 +247,11 @@ def test_contact_research_runs_once_per_person_and_projects_to_events(tmp_path):
     assert not reviews and len(calls) == 1
     assert len(contacts) == 2
     assert {item.lead_event_id for item in contacts} == {"event-1", "event-2"}
-    assert all(item.selected and item.verification_status == VerificationStatus.VERIFIED for item in contacts)
+    assert all(item.selected and item.verification_status == VerificationStatus.UNKNOWN for item in contacts)
+    assert all(
+        item.verification_reason == "domain_mx_valid_mailbox_unverified"
+        for item in contacts
+    )
 
 
 def test_mismatched_contact_identity_enters_review(tmp_path):
@@ -157,3 +276,38 @@ def test_mismatched_contact_identity_enters_review(tmp_path):
 
     assert not contacts
     assert reviews[0].reason_code == "model_contract_invalid"
+
+
+def test_valid_empty_contact_result_is_terminal(tmp_path):
+    store, artifacts, organization, evidence = setup(tmp_path)
+    person = Person(
+        person_id="person-1",
+        organization_id="org-1",
+        name="Jane Manager",
+        evidence=evidence,
+    )
+    calls = []
+    payload = {
+        "name": "Jane Manager",
+        "organization": "Acme Marketplace",
+        "email": "",
+        "phone": "",
+        "linkedin": "",
+        "sources": [],
+    }
+    service = ContactResearchService(
+        store,
+        artifacts,
+        "grok-4.3",
+        ContactVerifier(store, mx_lookup=lambda domain: True),
+        call_model=lambda model, prompt, tools: calls.append(prompt)
+        or (json.dumps(payload), {}),
+    )
+
+    contacts, reviews = service.research(
+        [person], [organization], [], attempts=2
+    )
+
+    assert not contacts
+    assert not reviews
+    assert len(calls) == 1

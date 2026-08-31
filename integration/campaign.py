@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
+import json
+import re
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -103,7 +106,70 @@ def load_campaign(path: str | Path, settings: Settings) -> CampaignManifest:
             raise ActivationBlocked(
                 f"step {step.stepIndex} is missing the unsubscribe link"
             )
+        variables = set(
+            re.findall(r"\{\{\s*([A-Za-z][A-Za-z0-9]*)\s*\}\}", step.bodyHtml + step.bodyText)
+        )
+        unsupported = variables - {"firstName", "company", "whyLine", "unsubscribeUrl"}
+        if unsupported:
+            raise ActivationBlocked(
+                f"step {step.stepIndex} has unsupported merge variables: {sorted(unsupported)}"
+            )
     return manifest
+
+
+def campaign_manifest_hash(value: CampaignManifest | dict[str, Any]) -> str:
+    raw = value.model_dump(mode="json") if isinstance(value, CampaignManifest) else value
+    if isinstance(raw.get("data"), dict):
+        raw = raw["data"]
+    normalized = {
+        key: raw.get(key)
+        for key in (
+            "name",
+            "description",
+            "channel",
+            "timezone",
+            "dailySendLimit",
+            "sendingWindowStart",
+            "sendingWindowEnd",
+            "scheduleDays",
+            "stopOnReply",
+            "stopOnBounce",
+            "stopOnUnsubscribe",
+            "trackOpens",
+            "trackClicks",
+            "mailboxIds",
+            "steps",
+        )
+    }
+    normalized["mailboxIds"] = sorted(
+        str(item.get("id") if isinstance(item, dict) else item)
+        for item in normalized.get("mailboxIds") or []
+    )
+    step_keys = (
+        "stepIndex",
+        "type",
+        "subject",
+        "bodyHtml",
+        "bodyText",
+        "delayDays",
+        "delayHours",
+        "isActive",
+    )
+    normalized["steps"] = sorted(
+        [
+            {key: item.get(key) for key in step_keys}
+            for item in normalized.get("steps") or []
+        ],
+        key=lambda item: int(item.get("stepIndex", 0)),
+    )
+    return hashlib.sha256(
+        json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _replace(value: Any, old: str, new: str) -> Any:

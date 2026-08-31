@@ -7,9 +7,18 @@ from datetime import date, datetime, timezone
 from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from outreach_contract import normalized_domain
 
 from .artifacts import ArtifactStore
-from .contracts import ContactCandidate, Evidence, LeadEvent, Organization, Person, ReviewItem
+from .contracts import (
+    ContactCandidate,
+    Evidence,
+    LeadEvent,
+    Organization,
+    Person,
+    ReviewItem,
+    VerificationStatus,
+)
 from .ids import normalize_text, person_id, stable_hash, stable_uuid
 from .state import StateStore
 from .verification import ContactVerifier, select_best
@@ -28,6 +37,8 @@ class DecisionMakerPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
     decision_makers: list[dict] = Field(default_factory=list)
     employee_count: dict | None = None
+    canonical_domain: str = ""
+    aliases: list[str] = Field(default_factory=list)
     sources: list[EvidencePayload] = Field(default_factory=list)
 
 
@@ -41,14 +52,15 @@ class ContactPayload(BaseModel):
     sources: list[EvidencePayload | str] = Field(default_factory=list)
 
 
-DECISION_PROMPT = """Search the web for up to three current decision makers for this Arizona commercial-property organization.
+DECISION_PROMPT = """Build one bounded web-research dossier for up to three current decision makers for this Arizona commercial-property organization.
 Organization ID: {organization_id}
 Organization: {name}
+Known aliases: {aliases}
 Location: {location}
 Date: {today}
 
-Prefer local or regional authority over facilities, property/asset management, development, leasing, ownership, or operations. Verify the current role and never guess. Return strict JSON:
-{{"decision_makers":[{{"name":"","title":"","scope":""}}],"employee_count":{{"value":"","scope":"company|location","as_of":"","confidence":"high|medium|low"}},"sources":[{{"url":"","supports":""}}]}}
+Use one research path. Prefer local or regional authority over facilities, property/asset management, development, leasing, ownership, or operations. For each verified person, also return any public professional LinkedIn, email, and phone details found during the same research. Never guess. Each person's sources must support the current role and any returned contact fields. Return strict JSON:
+{{"canonical_domain":"","aliases":[],"decision_makers":[{{"name":"","title":"","scope":"","linkedin":"","email":"","phone":"","sources":[{{"url":"","supports":""}}]}}],"employee_count":{{"value":"","scope":"company|location","as_of":"","confidence":"high|medium|low"}},"sources":[{{"url":"","supports":""}}]}}
 Use an empty decision_makers list and null employee_count when nothing is verified."""
 
 
@@ -70,36 +82,62 @@ class DecisionMakerService:
         artifacts: ArtifactStore,
         model: str,
         call_model: ModelCall | None = None,
+        verifier: ContactVerifier | None = None,
+        events: list[LeadEvent] | None = None,
     ):
         self.state = state
         self.artifacts = artifacts
         self.model = model
         self.call_model = call_model or _default_model_call
+        self.verifier = verifier
+        self.events_by_org: dict[str, list[LeadEvent]] = {}
+        for event in events or []:
+            self.events_by_org.setdefault(event.organization_id, []).append(event)
 
     def research(self, organizations: list[Organization], attempts: int = 2) -> tuple[list[Person], list[ReviewItem]]:
-        people: dict[str, Person] = {person.person_id: person for person in self.state.people()}
+        organization_ids = {item.organization_id for item in organizations}
+        people: dict[str, Person] = {
+            person.person_id: person
+            for person in self.state.people()
+            if person.organization_id in organization_ids
+        }
         reviews: list[ReviewItem] = []
         for organization in organizations:
-            if any(person.organization_id == organization.organization_id for person in people.values()):
+            if any(
+                person.organization_id == organization.organization_id
+                and not person.inferred_identity
+                and bool(person.title)
+                for person in people.values()
+            ):
                 continue
             last_review = None
             for attempt in range(1, attempts + 1):
                 found, last_review = self._research_one(organization, attempt)
-                if found:
+                if last_review is None:
                     people.update({person.person_id: person for person in found})
-                    last_review = None
                     break
             if last_review:
                 reviews.append(last_review)
         return list(people.values()), reviews
 
     def _research_one(self, organization: Organization, attempt_number: int) -> tuple[list[Person], ReviewItem | None]:
+        attempt_number = self.state.next_provider_attempt_number(
+            self.artifacts.run_id,
+            "decision-makers",
+            "organization",
+            organization.organization_id,
+        )
         attempt_id = stable_uuid(
-            "attempt", organization.organization_id, "decision-maker", attempt_number
+            "attempt",
+            self.artifacts.run_id,
+            organization.organization_id,
+            "decision-maker",
+            attempt_number,
         )
         prompt = DECISION_PROMPT.format(
             organization_id=organization.organization_id,
             name=organization.canonical_name,
+            aliases=json.dumps(organization.aliases),
             location=organization.location,
             today=date.today().isoformat(),
         )
@@ -114,14 +152,40 @@ class DecisionMakerService:
             )
             payload = DecisionMakerPayload.model_validate(_parse_json(text))
             evidence = _evidence(payload.sources, "Supports the decision-maker research result.")
-            if payload.employee_count is not None:
-                self.state.save_organization(
-                    organization.model_copy(update={"employee_count": payload.employee_count})
+            domain = normalized_domain(payload.canonical_domain)
+            self.state.save_organization(
+                organization.model_copy(
+                    update={
+                        "domain": domain or organization.domain,
+                        "aliases": list(
+                            dict.fromkeys([*organization.aliases, *payload.aliases])
+                        ),
+                        "employee_count": payload.employee_count
+                        if payload.employee_count is not None
+                        else organization.employee_count,
+                    }
                 )
+            )
             people: list[Person] = []
+            dossier_contacts: list[ContactCandidate] = []
             for raw in payload.decision_makers[:3]:
                 name = str(raw.get("name") or "").strip()
-                if not name or not evidence:
+                nested_payload = ContactPayload.model_validate(
+                    {
+                        "name": name,
+                        "organization": organization.canonical_name,
+                        "linkedin": raw.get("linkedin") or "",
+                        "email": raw.get("email") or "",
+                        "phone": raw.get("phone") or "",
+                        "sources": raw.get("sources") or [],
+                    }
+                )
+                nested_evidence = _evidence(
+                    nested_payload.sources,
+                    f"Supports the current role and contact details for {name}.",
+                )
+                person_evidence = nested_evidence or evidence
+                if not name or not person_evidence:
                     continue
                 person = Person(
                     person_id=person_id(name, organization.organization_id),
@@ -129,10 +193,51 @@ class DecisionMakerService:
                     name=name,
                     title=str(raw.get("title") or "").strip(),
                     scope=str(raw.get("scope") or "").strip(),
-                    evidence=evidence,
+                    evidence=person_evidence,
                 )
                 self.state.save_person(person)
                 people.append(person)
+                if not self.verifier or not nested_evidence or not any(
+                    (nested_payload.email, nested_payload.phone, nested_payload.linkedin)
+                ):
+                    continue
+                verification = self.verifier.verify(
+                    email=nested_payload.email,
+                    phone=nested_payload.phone,
+                    linkedin=nested_payload.linkedin,
+                    organization_domain=domain or organization.domain,
+                )
+                for event in self.events_by_org.get(organization.organization_id, []):
+                    dossier_contacts.append(
+                        ContactCandidate(
+                            contact_candidate_id=stable_uuid(
+                                "contact-candidate",
+                                event.lead_event_id,
+                                person.person_id,
+                                "model-dossier",
+                                stable_hash(
+                                    nested_payload.email,
+                                    nested_payload.phone,
+                                    nested_payload.linkedin,
+                                ),
+                            ),
+                            run_id=event.run_id,
+                            lead_event_id=event.lead_event_id,
+                            organization_id=organization.organization_id,
+                            person_id=person.person_id,
+                            person_name=person.name,
+                            title=person.title,
+                            email=verification.email,
+                            phone=verification.phone,
+                            linkedin=verification.linkedin,
+                            provider="model-dossier",
+                            verification_status=verification.status,
+                            verification_reason=verification.reason,
+                            evidence=nested_evidence,
+                        )
+                    )
+            for contact in select_best(dossier_contacts):
+                self.state.save_contact(contact)
             self.state.record_provider_attempt(
                 attempt_id=attempt_id,
                 run_id=self.artifacts.run_id,
@@ -206,22 +311,37 @@ class ContactResearchService:
         events_by_org: dict[str, list[LeadEvent]] = {}
         for event in events:
             events_by_org.setdefault(event.organization_id, []).append(event)
-        candidates: list[ContactCandidate] = []
+        active_event_ids = {event.lead_event_id for event in events}
+        person_ids = {person.person_id for person in people}
+        candidates = [
+            contact
+            for contact in self.state.contacts_for_run(self.artifacts.run_id)
+            if contact.lead_event_id in active_event_ids
+            and contact.person_id in person_ids
+        ]
+        covered = {
+            (contact.lead_event_id, contact.person_id)
+            for contact in candidates
+            if contact.selected
+            and contact.verification_status != VerificationStatus.REJECTED
+        }
         reviews: list[ReviewItem] = []
         for person in people:
             organization = org_by_id.get(person.organization_id)
             if not organization:
                 continue
+            person_events = events_by_org.get(person.organization_id, [])
+            if person_events and all(
+                (event.lead_event_id, person.person_id) in covered
+                for event in person_events
+            ):
+                continue
             payload = None
             last_review = None
             for attempt in range(1, attempts + 1):
                 payload, last_review = self._research_one(person, organization, attempt)
-                if payload is not None and any(
-                    (payload.email, payload.phone, payload.linkedin)
-                ):
-                    last_review = None
+                if payload is not None:
                     break
-                payload = None
             if last_review:
                 reviews.append(last_review)
             if payload is None:
@@ -235,7 +355,7 @@ class ContactResearchService:
                 linkedin=payload.linkedin,
                 organization_domain=organization.domain,
             )
-            for event in events_by_org.get(person.organization_id, []):
+            for event in person_events:
                 contact = ContactCandidate(
                     contact_candidate_id=stable_uuid(
                         "contact-candidate",
@@ -267,7 +387,16 @@ class ContactResearchService:
     def _research_one(
         self, person: Person, organization: Organization, attempt_number: int
     ) -> tuple[ContactPayload | None, ReviewItem | None]:
-        attempt_id = stable_uuid("attempt", person.person_id, "contact", attempt_number)
+        attempt_number = self.state.next_provider_attempt_number(
+            self.artifacts.run_id, "contacts", "person", person.person_id
+        )
+        attempt_id = stable_uuid(
+            "attempt",
+            self.artifacts.run_id,
+            person.person_id,
+            "contact",
+            attempt_number,
+        )
         prompt = CONTACT_PROMPT.format(
             person_id=person.person_id,
             name=person.name,

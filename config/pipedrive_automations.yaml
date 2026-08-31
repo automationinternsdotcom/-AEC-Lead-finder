@@ -1,0 +1,53 @@
+# Operator-reviewed specification for Pipedrive's UI-only automation builder.
+# Keep both workflows inactive until the named templates exist, Jordan owns the
+# workflows, and EMAIL_TEMPLATES_APPROVED/PIPEDRIVE_AUTOMATION_READY are enabled.
+templates:
+  - name: Aether — qualified reply follow-up 1
+    subject: "Following up on your note"
+    body_html: >-
+      <p>Hi {{person.first_name}},</p>
+      <p>I wanted to follow up on your note and see whether a short conversation about {{organization.name}}'s facility needs would be useful.</p>
+      <p>If so, send a time that works for you and I will make it easy.</p>
+      <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
+      <p><a href="{{person.Aether Unsubscribe URL}}">Unsubscribe</a><br>2120 W Encanto Blvd, Phoenix, AZ 85009</p>
+  - name: Aether — qualified reply follow-up 2
+    subject: "Closing the loop"
+    body_html: >-
+      <p>Hi {{person.first_name}},</p>
+      <p>I wanted to close the loop on our conversation. If the timing is not right, no problem; I am happy to reconnect when facility support becomes relevant.</p>
+      <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
+      <p><a href="{{person.Aether Unsubscribe URL}}">Unsubscribe</a><br>2120 W Encanto Blvd, Phoenix, AZ 85009</p>
+
+automations:
+  - name: Aether — qualified reply follow-ups
+    active: false
+    owner: Jordan Whitehurst
+    trigger:
+      entity: deal
+      event: enters_stage
+      pipeline_id: 47
+      stage_id: 311
+    required_sender: jw@aetherclean.com
+    guards:
+      - Aether Outreach State equals qualified_reply
+      - Aether Suppressed does not equal yes
+    steps:
+      - delay_business_days: 2
+        condition: Aether Outreach State is not replied or suppressed
+        email_template: Aether — qualified reply follow-up 1
+      - delay_business_days: 5
+        condition: Aether Outreach State is not replied or suppressed
+        email_template: Aether — qualified reply follow-up 2
+  - name: Aether — stop follow-ups after reply or suppression
+    active: false
+    owner: Jordan Whitehurst
+    trigger:
+      entity: deal
+      event: updated
+    conditions:
+      any:
+        - Aether Outreach State equals replied
+        - Aether Outreach State equals suppressed
+    actions:
+      - mark_matching_open_follow-up_activities_done
+      - notify_owner: Jordan

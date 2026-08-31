@@ -21,6 +21,7 @@ from v2.contracts import (  # noqa: E402
     StageStatus,
 )
 from v2.ids import candidate_id, canonicalize_url, stable_uuid  # noqa: E402
+from v2.qualification import JudgmentPayload  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 
 
@@ -56,10 +57,23 @@ def test_review_candidate_requires_validation_reason():
     assert candidate.record_status == RecordStatus.REVIEW
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["Aug 30, 2026", "August 30, 2026", "08/30/2026", "2026-08-30"],
+)
+def test_qualification_accepts_common_provider_date_formats(value):
+    payload = JudgmentPayload(
+        qualified=False,
+        filter_reason="not a qualifying commercial-property event",
+        date_posted=value,
+    )
+    assert payload.date_posted.isoformat() == "2026-08-30"
+
+
 def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
     store = StateStore(tmp_path / "scout.db")
-    assert store.migrate() == 3
-    assert store.migrate() == 3
+    assert store.migrate() == 5
+    assert store.migrate() == 5
     store.create_run("run-1", "2026-08-28", "2026-08-27", {"workers": 5})
     store.set_stage_status("run-1", "discover", StageStatus.RUNNING)
     store.set_stage_status("run-1", "discover", StageStatus.COMPLETED, counters={"candidates": 3})
@@ -69,10 +83,61 @@ def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
 
     assert store.completed_stages("run-1") == {"discover"}
     with sqlite3.connect(tmp_path / "scout.db") as conn:
-        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 5
         assert conn.execute(
             "SELECT attempt_count FROM v2_stage_runs WHERE run_id='run-1' AND stage='qualify'"
         ).fetchone()[0] == 2
+
+
+def test_completed_qualifications_are_scoped_to_the_requested_window(tmp_path):
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-a", "2026-01-14", "2026-01-01")
+    store.create_run("run-b", "2026-01-31", "2026-01-15")
+    store.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    store.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-1",
+            run_id="run-a",
+            provider="curated",
+            discovered_url="https://example.com/article",
+            resolved_url="https://example.com/article",
+            canonical_url="https://example.com/article",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+        )
+    )
+    store.record_provider_attempt(
+        attempt_id="attempt-1",
+        run_id="run-a",
+        stage="qualify",
+        provider="model",
+        target_type="discovery_candidate",
+        target_id="candidate-1",
+        status="completed",
+    )
+
+    assert store.completed_qualification_candidate_ids(
+        since_date="2026-01-01", stamp="2026-01-14"
+    ) == {"candidate-1"}
+    assert not store.completed_qualification_candidate_ids(
+        since_date="2026-01-15", stamp="2026-01-31"
+    )
+    store.record_qualification_completion(
+        candidate_id="candidate-1",
+        since_date="2026-01-15",
+        stamp="2026-01-31",
+        run_id="run-b",
+        outcome="rejected",
+    )
+    assert store.completed_qualification_candidate_ids(
+        since_date="2026-01-15", stamp="2026-01-31"
+    ) == {"candidate-1"}
+    with pytest.raises(ValueError, match="supplied together"):
+        store.completed_qualification_candidate_ids(since_date="2026-01-01")
 
 
 def test_review_lane_returns_only_retryable_items(tmp_path):
@@ -116,7 +181,7 @@ def test_artifacts_are_atomic_hashed_and_manifested(tmp_path):
     assert len(raw["sha256"]) == 64
     assert json.loads(artifacts.manifest_path.read_text())["status"] == "completed"
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM v2_artifacts").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM v2_artifacts").fetchone()[0] == 2
         assert conn.execute("SELECT status FROM v2_runs WHERE run_id='run-1'").fetchone()[0] == (
             "completed"
         )

@@ -67,6 +67,7 @@ def contacts_from_csv(path: str | Path, run_id: str) -> list[ContactSync]:
                 article_url=str(row.get("link") or "").strip(),
                 date_posted=date_posted,
                 summary=str(row.get("summary") or "").strip(),
+                why_line=str(row.get("why_line") or "").strip(),
                 is_primary=is_primary,
                 source_payload={
                     key: value

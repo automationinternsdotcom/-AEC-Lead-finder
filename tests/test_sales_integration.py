@@ -12,11 +12,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 from integration.api import create_app
-from integration.campaign import COPY_PLACEHOLDER, load_campaign
+from integration.campaign import COPY_PLACEHOLDER, campaign_manifest_hash, load_campaign
 from integration.config import ActivationBlocked, Settings
 from integration.database import Database
+from integration.handoff import HANDOFF_PROTOCOL_VERSION, handoff_content_hash
 from integration.memory import MemoryDatabase
-from integration.models import MappingRecord, ReplyDisposition, VerificationStatus
+from integration.models import (
+    CompanySync,
+    EligibilityStatus,
+    EventRole,
+    LeadEventSync,
+    MappingRecord,
+    ReplyDisposition,
+    SalesHandoff,
+    VerificationStatus,
+)
 from integration.providers import PipedriveClient, WarmyClient
 from integration.scout_bridge import contacts_from_csv, enqueue_contacts
 from integration.security import (
@@ -42,9 +52,24 @@ def _load_scout_pipeline(monkeypatch):
     return module
 
 
+def test_scout_pipeline_script_can_load_its_cross_package_handoff_imports():
+    import subprocess
+
+    result = subprocess.run(
+        ["uv", "run", "scout/pipeline.py", "--help"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--apollo-go" in result.stdout
+
+
 class FakeWarmy:
     def __init__(self):
         self.created = []
+        self.updated = []
         self.enrolled = []
         self.suppressed = []
         self.unenrolled = []
@@ -52,6 +77,10 @@ class FakeWarmy:
     def create_prospect(self, payload, operation_key):
         self.created.append(payload)
         return {"data": {"id": "prospect-1"}}
+
+    def update_prospect(self, prospect_id, payload, operation_key):
+        self.updated.append((prospect_id, payload))
+        return {"data": {"id": prospect_id}}
 
     def verify_email(self, email, operation_key):
         return {"data": {"status": "valid"}}
@@ -166,6 +195,9 @@ def enabled_settings(**changes):
             "unsubscribe_url",
             "article_url",
             "date_posted",
+            "canonical_company_id",
+            "event_role",
+            "outreach_sequence_id",
         )
     }
     person_fields = {
@@ -186,6 +218,9 @@ def enabled_settings(**changes):
         "email_templates_approved": True,
         "postal_address": "123 Main St, Phoenix, AZ 85001",
         "warmy_campaign_id": "campaign-1",
+        "warmy_campaign_manifest_hash": campaign_manifest_hash(
+            FakeWarmy().get_campaign("campaign-1")
+        ),
         "warmy_api_key": "warmy-key",
         "warmy_webhook_secret": "warmy-webhook-secret",
         "warmy_mailbox_ids": tuple(f"mailbox-{index}" for index in range(1, 7)),
@@ -201,6 +236,15 @@ def enabled_settings(**changes):
         "pipedrive_webhook_password": "hook-pass",
         "pipedrive_deal_fields": deal_fields,
         "pipedrive_person_fields": person_fields,
+        "pipedrive_person_enum_values": {
+            "verification_status.pending": "201",
+            "verification_status.valid": "202",
+            "verification_status.invalid": "203",
+            "verification_status.catch_all": "204",
+            "verification_status.unknown": "205",
+            "suppressed.yes": "206",
+            "suppressed.no": "207",
+        },
         "pipedrive_reply_disposition_values": {
             str(index): value
             for index, value in enumerate(
@@ -238,6 +282,11 @@ def contact_payload(outreach_id="outreach-1", email="person@example.com"):
         "email": email,
         "location": "Phoenix, AZ",
         "event": "New project",
+        "why_line": (
+            "Hi Pat just wanted to reach out since I saw on the news that Example "
+            "Builders started a new project in Phoenix. Is there any chance we could "
+            "stay in touch regarding your future janitorial needs?"
+        ),
     }
 
 
@@ -367,6 +416,7 @@ def test_contact_sync_verification_and_enrollment_are_idempotent():
     assert mapping.pipedrive_person_id == 202
     assert mapping.pipedrive_lead_id == "lead-303"
     assert mapping.warmy_prospect_id == "prospect-1"
+    assert mapping.why_line.startswith("Hi Pat ")
     assert warmy.created[0]["unsubscribe_url"].startswith(
         "https://sales.example.com/unsubscribe"
     )
@@ -450,7 +500,7 @@ def test_existing_pipedrive_person_is_reconciled_with_unsubscribe_fields():
     assert person_id == 909
     assert fields["aether_person_id_field"] == "person-1"
     assert fields["unsubscribe_url_field"].startswith("https://sales.example.com/")
-    assert fields["suppressed_field"] == "no"
+    assert fields["suppressed_field"] == 207
 
 
 def test_suppression_updates_every_mapping_for_an_email():
@@ -515,6 +565,44 @@ def test_warmy_reply_is_forwarded_and_creates_jordan_review_task():
     mapping = db.get_mapping(outreach_id="outreach-1")
     assert mapping.reply_disposition == ReplyDisposition.PENDING_REVIEW
     assert mapping.gmail_thread_id == "thread-1"
+
+
+def test_warmy_reply_creates_review_task_when_gmail_forwarding_is_deferred():
+    db = MemoryDatabase()
+    db.upsert_mapping(
+        MappingRecord(
+            outreach_id="outreach-1",
+            email="person@example.com",
+            warmy_prospect_id="prospect-1",
+            pipedrive_lead_id="lead-1",
+        )
+    )
+    pipedrive = FakePipedrive()
+    workflows = SalesWorkflows(
+        enabled_settings(
+            gmail_reply_forwarding_enabled=False,
+            gmail_service_account_json="",
+            gmail_monitored_mailboxes=(),
+        ),
+        db,
+        warmy=FakeWarmy(),
+        pipedrive=pipedrive,
+    )
+    workflows.handle_warmy_event(
+        {
+            "event_id": "event-1",
+            "type": "reply.received",
+            "data": {
+                "prospectId": "prospect-1",
+                "prospectEmail": "person@example.com",
+                "mailboxId": "mailbox-1",
+                "subject": "Re: Project",
+                "receivedAt": "2026-08-30T15:00:00Z",
+            },
+        }
+    )
+    assert "available in the WarmySender Inbox" in pipedrive.activities[0][3]
+    assert db.get_mapping(outreach_id="outreach-1").gmail_thread_id is None
 
 
 def test_positive_conversion_is_blocked_until_pipedrive_automation_is_ready():
@@ -656,7 +744,7 @@ def test_v2_pipeline_handoff_uses_exported_path_and_real_run_id(monkeypatch):
     calls = []
     result = SimpleNamespace(
         run_id="1d1cb1d5-6212-4bd2-82f4-9c4dc26be7f0",
-        paths={"contacts": "/persistent/results/2026-08-30/contacts.csv"},
+        paths={"sales_handoff": "/persistent/results/2026-08-30/sales_handoff.json"},
     )
     module.enqueue_sales_handoff(
         result,
@@ -671,31 +759,55 @@ def test_v2_pipeline_handoff_uses_exported_path_and_real_run_id(monkeypatch):
         "python",
         "-m",
     ]
-    assert args[-3:] == [
-        "/persistent/results/2026-08-30/contacts.csv",
-        "--run-id",
-        result.run_id,
+    assert args[-2:] == [
+        "enqueue-handoff",
+        "/persistent/results/2026-08-30/sales_handoff.json",
     ]
     assert kwargs == {"cwd": ROOT, "check": True}
 
 
 def test_v2_pipeline_handoff_runs_in_project_environment(tmp_path, monkeypatch):
     module = _load_scout_pipeline(monkeypatch)
-    csv_path = tmp_path / "contacts.csv"
-    csv_path.write_text(
-        "business_name,person,email,lead_event_id,organization_id,person_id,run_id\n"
-        "Acme,Alex One,alex@example.com,event-1,org-1,person-1,run-live\n",
-        encoding="utf-8",
+    handoff_path = tmp_path / "sales_handoff.json"
+    handoff = SalesHandoff(
+        schema_version=1,
+        protocol_version=HANDOFF_PROTOCOL_VERSION,
+        run_id="run-live",
+        companies=[
+            CompanySync(company_id="company-1", canonical_name="Acme")
+        ],
+        lead_events=[
+            LeadEventSync(
+                run_id="run-live",
+                lead_event_id="event-1",
+                company_id="company-1",
+                organization_name="Acme",
+                event_role=EventRole.ANCHOR,
+                event="Opened a Phoenix location",
+                score=88,
+                confidence="high",
+                record_status="valid",
+                actionable_route=True,
+                crm_eligible=True,
+            )
+        ],
+        recipients=[],
+        sequences=[],
+        content_hash="pending",
     )
+    handoff = handoff.model_copy(update={"content_hash": handoff_content_hash(handoff)})
+    handoff_path.write_text(handoff.model_dump_json(indent=2), encoding="utf-8")
     database_path = tmp_path / "handoff.sqlite"
     monkeypatch.setenv("AETHER_SALES_DB_PATH", str(database_path))
     module.enqueue_sales_handoff(
-        SimpleNamespace(run_id="run-live", paths={"contacts": str(csv_path)})
+        SimpleNamespace(
+            run_id="run-live", paths={"sales_handoff": str(handoff_path)}
+        )
     )
     claimed = Database(database_path).claim_work("test", 10, 60)
     assert len(claimed) == 1
-    assert claimed[0].kind == "scout.contact.sync"
-    assert claimed[0].payload["email"] == "alex@example.com"
+    assert claimed[0].kind == "scout.lead.sync"
+    assert claimed[0].payload["lead_event"]["lead_event_id"] == "event-1"
 
 
 def test_campaign_manifest_cannot_pass_with_placeholder_copy(tmp_path):
@@ -736,8 +848,19 @@ def test_sqlite_database_persists_queue_and_service_state(tmp_path):
     assert [(item.kind, item.payload, item.attempt_count) for item in claimed] == [
         ("test", {"value": 1}, 1)
     ]
+    with db.connection() as conn:
+        conn.execute(
+            "UPDATE work_items SET last_error='previous failure' WHERE id=?",
+            (claimed[0].id,),
+        )
     db.complete_work(claimed[0].id, "worker-1")
     assert not db.claim_work("worker-2", 10, 60)
+    with db.connection() as conn:
+        completed = conn.execute(
+            "SELECT status, last_error FROM work_items WHERE id=?",
+            (claimed[0].id,),
+        ).fetchone()
+    assert dict(completed) == {"status": "completed", "last_error": ""}
 
     db.upsert_mapping(
         MappingRecord(

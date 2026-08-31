@@ -15,6 +15,9 @@ REQUIRED_DEAL_FIELDS = {
     "aether_lead_event_id",
     "aether_outreach_id",
     "aether_contact_candidate_id",
+    "canonical_company_id",
+    "event_role",
+    "outreach_sequence_id",
     "warmy_prospect_id",
     "outreach_state",
     "reply_disposition",
@@ -37,6 +40,15 @@ REQUIRED_DISPOSITIONS = {
     "out_of_office",
     "unsubscribe",
     "other",
+}
+REQUIRED_PERSON_ENUM_VALUES = {
+    "verification_status.pending",
+    "verification_status.valid",
+    "verification_status.invalid",
+    "verification_status.catch_all",
+    "verification_status.unknown",
+    "suppressed.yes",
+    "suppressed.no",
 }
 
 
@@ -80,9 +92,11 @@ class Settings:
     warmy_webhook_secret: str = ""
     warmy_base_url: str = "https://warmysender.com/api/v1"
     warmy_campaign_id: str = ""
+    warmy_campaign_manifest_hash: str = ""
     warmy_mailbox_ids: tuple[str, ...] = ()
     warmy_mailbox_emails: dict[str, str] = field(default_factory=dict)
     warmy_daily_limit: int = 150
+    warmy_verification_policy_version: str = "warmy-verify-v1"
 
     pipedrive_api_token: str = ""
     pipedrive_domain: str = ""
@@ -93,11 +107,13 @@ class Settings:
     pipedrive_webhook_password: str = ""
     pipedrive_deal_fields: dict[str, str] = field(default_factory=dict)
     pipedrive_person_fields: dict[str, str] = field(default_factory=dict)
+    pipedrive_person_enum_values: dict[str, str] = field(default_factory=dict)
     pipedrive_reply_disposition_values: dict[str, str] = field(default_factory=dict)
 
     gmail_service_account_json: str = ""
     gmail_forward_to: str = "jw@aetherclean.com"
     gmail_monitored_mailboxes: tuple[str, ...] = ()
+    gmail_reply_forwarding_enabled: bool = True
 
     unsubscribe_secret: str = ""
     alert_email: str = "jon@automationinterns.com"
@@ -137,9 +153,15 @@ class Settings:
                 "WARMY_BASE_URL", "https://warmysender.com/api/v1"
             ).rstrip("/"),
             warmy_campaign_id=os.environ.get("WARMY_CAMPAIGN_ID", ""),
+            warmy_campaign_manifest_hash=os.environ.get(
+                "WARMY_CAMPAIGN_MANIFEST_HASH", ""
+            ).strip(),
             warmy_mailbox_ids=mailboxes,
             warmy_mailbox_emails=_json_map("WARMY_MAILBOX_EMAILS"),
             warmy_daily_limit=_int("WARMY_DAILY_LIMIT", 150),
+            warmy_verification_policy_version=os.environ.get(
+                "WARMY_VERIFICATION_POLICY_VERSION", "warmy-verify-v1"
+            ).strip(),
             pipedrive_api_token=os.environ.get("PIPEDRIVE_API_TOKEN", ""),
             pipedrive_domain=os.environ.get("PIPEDRIVE_DOMAIN", ""),
             pipedrive_pipeline_id=_int("PIPEDRIVE_PIPELINE_ID", 47),
@@ -149,6 +171,9 @@ class Settings:
             pipedrive_webhook_password=os.environ.get("PIPEDRIVE_WEBHOOK_PASSWORD", ""),
             pipedrive_deal_fields=_json_map("PIPEDRIVE_DEAL_FIELDS"),
             pipedrive_person_fields=_json_map("PIPEDRIVE_PERSON_FIELDS"),
+            pipedrive_person_enum_values=_json_map(
+                "PIPEDRIVE_PERSON_ENUM_VALUES"
+            ),
             pipedrive_reply_disposition_values=_json_map(
                 "PIPEDRIVE_REPLY_DISPOSITION_VALUES"
             ),
@@ -157,6 +182,9 @@ class Settings:
                 "GMAIL_FORWARD_TO", "jw@aetherclean.com"
             ).strip(),
             gmail_monitored_mailboxes=monitored,
+            gmail_reply_forwarding_enabled=_flag(
+                "GMAIL_REPLY_FORWARDING_ENABLED", True
+            ),
             unsubscribe_secret=os.environ.get("UNSUBSCRIBE_SECRET", ""),
             alert_email=os.environ.get("ALERT_EMAIL", "jon@automationinterns.com"),
             max_attempts=_int("WORKER_MAX_ATTEMPTS", 8),
@@ -203,6 +231,8 @@ class Settings:
             missing.append("WARMY_WEBHOOK_SECRET")
         if not self.warmy_campaign_id:
             missing.append("WARMY_CAMPAIGN_ID")
+        if not self.warmy_campaign_manifest_hash:
+            missing.append("WARMY_CAMPAIGN_MANIFEST_HASH")
         mailbox_ids = set(self.warmy_mailbox_ids)
         if len(self.warmy_mailbox_ids) != 6 or len(mailbox_ids) != 6:
             missing.append("WARMY_MAILBOX_IDS (six unique IDs)")
@@ -216,22 +246,27 @@ class Settings:
             missing.append("PIPEDRIVE_DEAL_FIELDS (complete semantic map)")
         if not REQUIRED_PERSON_FIELDS.issubset(self.pipedrive_person_fields):
             missing.append("PIPEDRIVE_PERSON_FIELDS (complete semantic map)")
+        if not REQUIRED_PERSON_ENUM_VALUES.issubset(
+            self.pipedrive_person_enum_values
+        ):
+            missing.append("PIPEDRIVE_PERSON_ENUM_VALUES (complete option map)")
         configured_dispositions = {
             value.casefold().replace(" ", "_")
             for value in self.pipedrive_reply_disposition_values.values()
         }
         if not REQUIRED_DISPOSITIONS.issubset(configured_dispositions):
             missing.append("PIPEDRIVE_REPLY_DISPOSITION_VALUES (all options)")
-        if not self.gmail_service_account_json:
-            missing.append("GMAIL_SERVICE_ACCOUNT_JSON")
-        monitored = set(self.gmail_monitored_mailboxes)
-        expected_mailboxes = {
-            email.casefold() for email in self.warmy_mailbox_emails.values()
-        }
-        if len(self.gmail_monitored_mailboxes) != 6 or len(monitored) != 6:
-            missing.append("GMAIL_MONITORED_MAILBOXES (six unique mailboxes)")
-        elif monitored != expected_mailboxes:
-            missing.append("GMAIL_MONITORED_MAILBOXES (match Warmy mailbox map)")
+        if self.gmail_reply_forwarding_enabled:
+            if not self.gmail_service_account_json:
+                missing.append("GMAIL_SERVICE_ACCOUNT_JSON")
+            monitored = set(self.gmail_monitored_mailboxes)
+            expected_mailboxes = {
+                email.casefold() for email in self.warmy_mailbox_emails.values()
+            }
+            if len(self.gmail_monitored_mailboxes) != 6 or len(monitored) != 6:
+                missing.append("GMAIL_MONITORED_MAILBOXES (six unique mailboxes)")
+            elif monitored != expected_mailboxes:
+                missing.append("GMAIL_MONITORED_MAILBOXES (match Warmy mailbox map)")
         return missing
 
 

@@ -22,7 +22,11 @@ def run_once(
     db = db or Database(settings.database_path)
     workflows = workflows or SalesWorkflows(settings, db)
     owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    if enqueue_gmail_sync:
+    if (
+        enqueue_gmail_sync
+        and settings.gmail_reply_forwarding_enabled
+        and settings.gmail_service_account_json
+    ):
         minute = datetime.now(UTC).strftime("%Y%m%dT%H%M")
         db.enqueue_work(
             "gmail.sync",
@@ -95,6 +99,7 @@ def main() -> int:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     completed = run_once(settings, enqueue_gmail_sync=args.enqueue_gmail_sync)
     LOG.info("worker completed", extra={"completed": completed})
     return 0

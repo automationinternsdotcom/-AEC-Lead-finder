@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable
 
 from .artifacts import ArtifactStore
-from .contracts import DiscoveryCandidate, LeadEvent, Organization, ReviewItem
+from .contracts import DiscoveryCandidate, LeadEvent, ReviewItem
 from .ids import normalize_text, stable_hash
 from .ids import stable_uuid
 from .state import StateStore
@@ -127,6 +127,12 @@ class FuzzyEventDeduper:
         prompt = FUZZY_PROMPT.format(events=json.dumps(inputs, sort_keys=True))
         last_error: Exception | None = None
         for attempt_number in range(1, attempts + 1):
+            attempt_number = self.state.next_provider_attempt_number(
+                self.artifacts.run_id,
+                "dedup",
+                "lead_event_batch",
+                self.artifacts.run_id,
+            )
             attempt_id = stable_uuid("attempt", self.artifacts.run_id, "dedup", attempt_number)
             request = self.artifacts.write_raw(
                 "dedup", f"{attempt_id}-request.json", {"model": self.model, "prompt": prompt}
@@ -172,7 +178,7 @@ class FuzzyEventDeduper:
                 started_at=started,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
-            return self._apply(events, groups, orgs), []
+            return self._apply(events, groups), []
         error = f"{type(last_error).__name__}:{last_error}"
         reviews = [
             ReviewItem(
@@ -195,7 +201,6 @@ class FuzzyEventDeduper:
         self,
         events: list[LeadEvent],
         groups: list[DedupGroup],
-        organizations: dict[str, Organization],
     ) -> list[LeadEvent]:
         by_id = {event.lead_event_id: event for event in events}
         out: list[LeadEvent] = []
@@ -220,16 +225,6 @@ class FuzzyEventDeduper:
                 update={"supporting_candidate_ids": sources, "evidence": evidence}
             )
             self.state.save_lead_event(merged)
-            kept_org = organizations.get(kept.organization_id)
-            if kept_org:
-                aliases = list(kept_org.aliases)
-                for member in members:
-                    member_org = organizations.get(member.organization_id)
-                    if member_org and member_org.canonical_name != kept_org.canonical_name:
-                        aliases.append(member_org.canonical_name)
-                self.state.save_organization(
-                    kept_org.model_copy(update={"aliases": list(dict.fromkeys(aliases))})
-                )
             for member in members:
                 self.state.save_event_merge(
                     self.artifacts.run_id, member.lead_event_id, kept.lead_event_id

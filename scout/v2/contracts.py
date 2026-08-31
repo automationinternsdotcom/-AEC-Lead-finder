@@ -131,6 +131,12 @@ class LeadEvent(BaseModel):
     priority: str
     property_type: str = "other"
     service_angle: str = ""
+    why_line: str = ""
+    why_template_key: str = ""
+    why_slots: dict[str, str] = Field(default_factory=dict)
+    why_confidence: str = "low"
+    why_line_status: str = "missing"
+    why_sources: list[str] = Field(default_factory=list)
     filter_reason: str = ""
     confidence: str = "high"
     record_status: RecordStatus = RecordStatus.VALID
@@ -154,6 +160,56 @@ class LeadEvent(BaseModel):
         if self.record_status == RecordStatus.REVIEW and not self.validation_errors:
             raise ValueError("review lead events require validation_errors")
         return self
+
+
+class CompanyProfile(BaseModel):
+    """Canonical company identity and one validated company-level why line."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: str
+    run_id: str
+    canonical_name: str
+    domain: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    organization_ids: list[str] = Field(default_factory=list)
+    lead_event_ids: list[str] = Field(default_factory=list)
+    anchor_lead_event_id: str
+    why_line: str = ""
+    why_template_key: str = ""
+    why_slots: dict[str, str] = Field(default_factory=dict)
+    why_confidence: str = "low"
+    why_sources: list[str] = Field(default_factory=list)
+    why_line_status: str = "review"
+    record_status: RecordStatus = RecordStatus.REVIEW
+    validation_errors: list[str] = Field(default_factory=list)
+
+
+class OutreachRecipient(BaseModel):
+    """Deterministically ranked person/contact for one canonical company."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_id: str
+    run_id: str
+    company_id: str
+    person_id: str
+    contact_candidate_id: str
+    full_name: str
+    first_name: str
+    title: str = ""
+    scope: str = ""
+    email: str
+    source_provider: str = ""
+    source_verification_status: str = "unknown"
+    source_verification_reason: str = ""
+    role_score: int = Field(ge=0)
+    rank: int = Field(ge=1)
+    primary: bool = False
+    selection_rationale: list[str] = Field(default_factory=list)
+    eligibility_status: str = "review"
+    eligibility_reasons: list[str] = Field(default_factory=list)
 
 
 class ContactCandidate(BaseModel):

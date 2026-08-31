@@ -1,9 +1,9 @@
 #!/bin/bash
-# Stop and remove only the two Aether sales LaunchAgents.
+# Stop and remove only the Aether sales LaunchAgents.
 
 set -euo pipefail
 
-for label in com.aether.sales-api com.aether.sales-worker; do
+for label in com.aether.sales-api com.aether.sales-worker com.aether.sales-tunnel; do
   launchctl bootout "gui/$UID/$label" 2>/dev/null || true
   destination="$HOME/Library/LaunchAgents/$label.plist"
   if [ -f "$destination" ]; then
@@ -11,4 +11,4 @@ for label in com.aether.sales-api com.aether.sales-worker; do
   fi
 done
 
-echo "Stopped both Aether sales LaunchAgents; their plists were moved to Trash."
+echo "Stopped the Aether sales LaunchAgents; their plists were moved to Trash."

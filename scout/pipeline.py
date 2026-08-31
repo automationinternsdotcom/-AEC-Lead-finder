@@ -17,11 +17,13 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from v2.orchestrator import PipelineOptions, PipelineRunner
 
 import config
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parser() -> argparse.ArgumentParser:
@@ -123,10 +125,10 @@ def _flag(name: str) -> bool:
 
 
 def enqueue_sales_handoff(result, *, run=subprocess.run) -> None:
-    """Pass V2's exact exported contacts path and UUID to the sales boundary."""
-    contacts_path = result.paths.get("contacts", "")
-    if not contacts_path:
-        raise ValueError("V2 export did not return a contacts path")
+    """Pass V2's hashed, typed sales handoff to the local integration."""
+    handoff_path = result.paths.get("sales_handoff", "")
+    if not handoff_path:
+        raise ValueError("V2 export did not return a sales handoff path")
     run(
         [
             "uv",
@@ -136,10 +138,8 @@ def enqueue_sales_handoff(result, *, run=subprocess.run) -> None:
             "python",
             "-m",
             "integration.cli",
-            "enqueue-contacts",
-            contacts_path,
-            "--run-id",
-            result.run_id,
+            "enqueue-handoff",
+            handoff_path,
         ],
         cwd=REPO_ROOT,
         check=True,

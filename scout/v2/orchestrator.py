@@ -42,9 +42,11 @@ from .research import ContactResearchService, DecisionMakerService
 from .scoring import ScoringService
 from .state import SCHEMA_VERSION, StateStore
 from .verification import ContactVerifier, select_best
+from .outreach import CompanyOutreachService
 
 
 ModelCall = Callable[[str, str, list[dict]], tuple[str, dict]]
+PIPELINE_PROTOCOL_VERSION = "aether-aec-v2-run-v6"
 
 
 @dataclass(slots=True)
@@ -87,6 +89,7 @@ class PipelineRunner:
         "contacts",
         "apollo",
         "score",
+        "company-outreach",
         "export",
     )
 
@@ -118,6 +121,12 @@ class PipelineRunner:
         )
         configuration = {
             "schema_version": SCHEMA_VERSION,
+            "pipeline_protocol": PIPELINE_PROTOCOL_VERSION,
+            "stamp": options.stamp,
+            "since": options.since,
+            "sources_sha256": stable_hash(
+                Path(options.sources_csv).read_text(encoding="utf-8")
+            ),
             "workers": options.workers,
             "max_articles": options.max_articles,
             "apollo_go": options.apollo_go,
@@ -127,6 +136,22 @@ class PipelineRunner:
             "grok_model": options.grok_model,
             "extractor_model": options.extractor_model,
         }
+        configuration["configuration_hash"] = stable_hash(
+            json.dumps(configuration, sort_keys=True, separators=(",", ":"))
+        )
+        existing_run = self.state.get_run(self.run_id)
+        if options.resume:
+            if existing_run is None:
+                raise ValueError(f"cannot resume unknown run: {self.run_id}")
+            prior_configuration = existing_run["configuration"]
+            if prior_configuration != configuration:
+                raise ValueError(
+                    "cannot resume run with a different or obsolete pipeline configuration"
+                )
+        elif existing_run is not None:
+            raise ValueError(
+                f"run ID already exists; use --resume with identical configuration: {self.run_id}"
+            )
         self.state.create_run(
             self.run_id,
             options.stamp,
@@ -136,7 +161,8 @@ class PipelineRunner:
         )
         if options.resume and self.artifacts.manifest_path.exists():
             self.manifest = self.artifacts.load_manifest()
-            self.manifest.configuration = configuration
+            if self.manifest.configuration != configuration:
+                raise ValueError("run manifest configuration does not match durable run state")
         else:
             self.manifest = new_manifest(
                 self.run_id, options.stamp, options.since, configuration
@@ -148,7 +174,10 @@ class PipelineRunner:
         self.people = []
         self.contacts: list[ContactCandidate] = []
         self.scores = []
+        self.company_profiles = []
+        self.outreach_recipients = []
         self.export_result: dict[str, object] = {}
+        self._retry_from = self._retry_from_stage()
 
     def run(self) -> PipelineResult:
         self.manifest.status = StageStatus.RUNNING
@@ -162,6 +191,11 @@ class PipelineRunner:
             self._stage("contacts", "step 3/6: contact enrichment", self._contacts)
             self._stage("apollo", "step 4/6: apollo fallback lookup", self._apollo)
             self._stage("score", "step 5/6: score leads", self._score)
+            self._stage(
+                "company-outreach",
+                "step 6/7: consolidate companies and select outreach recipients",
+                self._company_outreach,
+            )
             self._stage("export", "step 6/6: build lead email", self._export)
         except Exception as exc:
             self.manifest.status = StageStatus.FAILED
@@ -179,6 +213,9 @@ class PipelineRunner:
             )
             self._refresh_manifest()
             raise error
+        # A successful retry supersedes run-level terminal errors from an earlier
+        # failed attempt. Per-stage attempt history remains durable in SQLite.
+        self.manifest.errors = []
         self.manifest.status = StageStatus.COMPLETED
         self._refresh_manifest()
         print(self.summary(), file=sys.stderr)
@@ -197,21 +234,33 @@ class PipelineRunner:
 
     def summary(self) -> str:
         top = sorted(self.scores, key=lambda item: -item.score)[:3]
+        open_reviews = self.state.reviews_for_run(self.run_id, state="open")
+        active_event_ids = {
+            event.lead_event_id for event in self.state.active_events_for_run(self.run_id)
+        }
+        active_contacts = [
+            item for item in self.contacts if item.lead_event_id in active_event_ids
+        ]
         return (
             f"== summary {self.options.stamp} ==\n"
             f"leads: {len(self.events)} sales-ready "
-            f"(+{len(self.state.reviews_for_run(self.run_id))} review)\n"
+            f"(+{len(open_reviews)} open review)\n"
             f"top scores: {', '.join(f'{item.lead_event_id} {item.score}' for item in top)}\n"
             f"decision makers: {len(self.people)}, contacts: "
-            f"{sum(1 for item in self.contacts if item.selected)} selected\n"
+            f"{sum(1 for item in active_contacts if item.selected)} selected\n"
             f"files: {self.export_result.get('paths', {})}"
         )
 
     def _stage(self, name: str, banner: str, function: Callable[[], dict]) -> None:
         completed = self.state.completed_stages(self.run_id)
-        if self.options.resume and name in completed and (
-            not self.options.retry_review or name == "discover"
-        ):
+        should_retry = (
+            self.options.retry_review
+            and self._retry_from is not None
+            and self.STAGES.index(name) >= self.STAGES.index(self._retry_from)
+            and name != "discover"
+        )
+        if self.options.resume and name in completed and not should_retry:
+            self.artifacts.verify_stage(name)
             print(f"== {banner} [resume: already completed] ==", file=sys.stderr)
             self._hydrate(name)
             return
@@ -248,7 +297,11 @@ class PipelineRunner:
         logbook.log(name, f"completed: {counters}")
 
     def _discover(self) -> dict:
-        known_before = self.state.candidate_urls()
+        known_before = self.state.candidate_ids()
+        terminal_before = self.state.completed_qualification_candidate_ids(
+            since_date=self.options.since,
+            stamp=self.options.stamp,
+        )
         curated = CuratedSiteAdapter(
             self.sources,
             self.state,
@@ -274,7 +327,7 @@ class PipelineRunner:
         new_candidates = [
             candidate
             for candidate in all_candidates
-            if candidate.canonical_url not in known_before
+            if candidate.candidate_id not in terminal_before
         ]
         exact = dedupe_candidates_exact(new_candidates)
         if self.options.max_articles > 0:
@@ -327,10 +380,20 @@ class PipelineRunner:
         return {
             "sources": len(self.sources),
             "discovered": len(all_candidates),
-            "new": len(new_candidates),
+            "novel": sum(
+                candidate.candidate_id not in known_before
+                for candidate in all_candidates
+            ),
+            "previously_seen": sum(
+                candidate.candidate_id in known_before
+                for candidate in all_candidates
+            ),
+            "qualification_eligible": len(new_candidates),
             "selected": len(selected),
             "deferred": len(deferred),
-            "reviews": sum(len(batch.reviews) for batch in batches),
+            "discovery_reviews_created": sum(
+                len(batch.reviews) for batch in batches
+            ),
             "source_errors": sum(len(batch.source_errors) for batch in batches),
         }
 
@@ -494,10 +557,21 @@ class PipelineRunner:
 
     def _qualify(self) -> dict:
         candidates = self.candidates
+        retried_reviews = []
         if self.options.retry_review:
+            retried_reviews = [
+                *[
+                    item
+                    for item in self.state.eligible_reviews(
+                        "discover", run_id=self.run_id
+                    )
+                    if item.reason_code == "deferred_by_max_articles"
+                ],
+                *self.state.eligible_reviews("qualify", run_id=self.run_id),
+            ]
             review_ids = {
                 item.record_id
-                for item in self.state.eligible_reviews("qualify")
+                for item in retried_reviews
                 if item.record_type == "discovery_candidate"
             }
             candidates = [
@@ -509,14 +583,22 @@ class PipelineRunner:
             candidates = list(
                 {item.candidate_id: item for item in [*candidates, *self.state.candidates_by_ids(review_ids)]}.values()
             )
+            for review in retried_reviews:
+                self.state.mark_review_retried(review.review_id)
         service = QualificationService(
             self.state,
             self.artifacts,
             self.options.grok_model,
             call_model=self.model_call,
             workers=self.options.workers,
+            window_start=date.fromisoformat(self.options.since),
+            window_end=date.fromisoformat(self.options.stamp),
         )
         result = service.qualify(candidates, retry_review=self.options.retry_review)
+        still_open_records = {item.record_id for item in result.reviews}
+        for review in retried_reviews:
+            if review.record_id not in still_open_records:
+                self.state.resolve_review(review.review_id)
         self.events = self.state.active_events_for_run(self.run_id)
         return {
             "qualified": len(result.events),
@@ -539,11 +621,14 @@ class PipelineRunner:
         organizations = self.state.organizations(
             {event.organization_id for event in self.events}
         )
+        verifier = ContactVerifier(self.state, mx_lookup=self.mx_lookup)
         service = DecisionMakerService(
             self.state,
             self.artifacts,
             self.options.grok_model,
             call_model=self.model_call,
+            verifier=verifier,
+            events=self.events,
         )
         self.people, reviews = service.research(organizations, attempts=2)
         return {"organizations": len(organizations), "people": len(self.people), "reviews": len(reviews)}
@@ -552,7 +637,12 @@ class PipelineRunner:
         organizations = self.state.organizations(
             {event.organization_id for event in self.events}
         )
-        self.people = self.state.people()
+        organization_ids = {item.organization_id for item in organizations}
+        self.people = [
+            person
+            for person in self.state.people()
+            if person.organization_id in organization_ids
+        ]
         verifier = ContactVerifier(self.state, mx_lookup=self.mx_lookup)
         service = ContactResearchService(
             self.state,
@@ -578,14 +668,24 @@ class PipelineRunner:
                 {event.organization_id for event in self.events}
             )
         }
-        self.people = self.state.people()
-        self.contacts = self.state.contacts_for_run(self.run_id)
+        organization_ids = set(organizations)
+        self.people = [
+            person
+            for person in self.state.people()
+            if person.organization_id in organization_ids
+        ]
+        active_event_ids = {event.lead_event_id for event in self.events}
+        self.contacts = [
+            item
+            for item in self.state.contacts_for_run(self.run_id)
+            if item.lead_event_id in active_event_ids
+        ]
         reachable = {
             item.person_id
             for item in self.contacts
             if item.selected
             and item.verification_status.value != "rejected"
-            and any((item.email, item.phone, item.linkedin))
+            and any((item.email, item.phone))
         }
         events_by_org: dict[str, list] = {}
         for event in self.events:
@@ -604,7 +704,12 @@ class PipelineRunner:
             organization = organizations.get(person.organization_id)
             if not organization:
                 continue
-            attempt_id = stable_uuid("attempt", self.run_id, "apollo", person.person_id)
+            attempt_number = self.state.next_provider_attempt_number(
+                self.run_id, "apollo", "person", person.person_id
+            )
+            attempt_id = stable_uuid(
+                "attempt", self.run_id, "apollo", person.person_id, attempt_number
+            )
             try:
                 found = resolver.resolve(
                     person.name,
@@ -698,7 +803,12 @@ class PipelineRunner:
 
     def _score(self) -> dict:
         self.events = self.state.active_events_for_run(self.run_id)
-        self.contacts = self.state.contacts_for_run(self.run_id)
+        active_event_ids = {event.lead_event_id for event in self.events}
+        self.contacts = [
+            item
+            for item in self.state.contacts_for_run(self.run_id)
+            if item.lead_event_id in active_event_ids
+        ]
         service = ScoringService(
             self.state,
             self.artifacts,
@@ -707,6 +817,55 @@ class PipelineRunner:
         )
         self.scores, reviews = service.score(self.events, self.contacts, attempts=2)
         return {"scored": len(self.scores), "reviews": len(reviews)}
+
+    def _company_outreach(self) -> dict:
+        self.events = self.state.active_events_for_run(self.run_id)
+        organizations = self.state.organizations(
+            {event.organization_id for event in self.events}
+        )
+        organization_ids = {event.organization_id for event in self.events}
+        self.people = [
+            person
+            for person in self.state.people()
+            if person.organization_id in organization_ids
+        ]
+        active_event_ids = {event.lead_event_id for event in self.events}
+        self.contacts = [
+            item
+            for item in self.state.contacts_for_run(self.run_id)
+            if item.lead_event_id in active_event_ids
+        ]
+        self.scores = [
+            item
+            for item in self.state.scores_for_run(self.run_id)
+            if item.lead_event_id in active_event_ids
+        ]
+        service = CompanyOutreachService(
+            self.state,
+            self.artifacts,
+            self.options.grok_model,
+            call_model=self.model_call,
+        )
+        self.company_profiles, self.outreach_recipients, reviews = service.build(
+            self.events,
+            organizations,
+            self.people,
+            self.contacts,
+            self.scores,
+        )
+        self.events = self.state.active_events_for_run(self.run_id)
+        return {
+            "companies": len(self.company_profiles),
+            "valid_why_lines": sum(
+                item.why_line_status == "valid" for item in self.company_profiles
+            ),
+            "recipients": len(self.outreach_recipients),
+            "primaries_ready": sum(
+                item.primary and item.eligibility_status == "ready"
+                for item in self.outreach_recipients
+            ),
+            "reviews": len(reviews),
+        }
 
     def _export(self) -> dict:
         self.export_result = ExportService(
@@ -723,37 +882,111 @@ class PipelineRunner:
 
     def _hydrate(self, stage: str) -> None:
         if stage == "discover":
+            retry_ids = {
+                item.record_id
+                for item in self.state.eligible_reviews(
+                    "discover", run_id=self.run_id
+                )
+                if item.record_type == "discovery_candidate"
+                and item.reason_code == "deferred_by_max_articles"
+            } if self.options.retry_review else set()
             self.candidates = [
                 item
                 for item in self.state.candidates_for_run(self.run_id)
                 if item.metadata.get("selected_for_qualification")
+                or item.candidate_id in retry_ids
             ]
         elif stage in {"qualify", "dedup"}:
             self.events = self.state.active_events_for_run(self.run_id)
         elif stage == "decision-makers":
-            self.people = self.state.people()
+            organization_ids = {event.organization_id for event in self.events}
+            self.people = [
+                person
+                for person in self.state.people()
+                if person.organization_id in organization_ids
+            ]
         elif stage in {"contacts", "apollo"}:
             self.contacts = self.state.contacts_for_run(self.run_id)
         elif stage == "score":
             self.scores = self.state.scores_for_run(self.run_id)
+        elif stage == "company-outreach":
+            self.company_profiles = self.state.company_profiles_for_run(self.run_id)
+            self.outreach_recipients = self.state.outreach_recipients_for_run(self.run_id)
         elif stage == "export":
             day = Path(self.options.results_dir) / self.options.stamp
+            active_event_ids = {
+                event.lead_event_id
+                for event in self.state.active_events_for_run(self.run_id)
+            }
+            selected_contacts = [
+                item
+                for item in self.state.contacts_for_run(self.run_id)
+                if item.lead_event_id in active_event_ids
+                and item.selected
+                and item.verification_status.value != "rejected"
+            ]
             self.export_result = {
                 "lead_count": len(self.state.active_events_for_run(self.run_id)),
-                "contact_count": len(self.state.contacts_for_run(self.run_id)),
-                "review_count": len(self.state.reviews_for_run(self.run_id)),
+                "contact_count": len(selected_contacts),
+                "review_count": len(
+                    self.state.reviews_for_run(self.run_id, state="open")
+                ),
                 "paths": {
                     "raw_leads": str(day / "raw_leads.csv"),
                     "contacts": str(day / "contacts.csv"),
                     "uncertain_leads": str(day / "uncertain_leads.csv"),
                     "html": str(day / "leads_email.html"),
+                    "sales_handoff": str(self.artifacts.final_dir / "sales_handoff.json"),
                 },
             }
 
     def _refresh_manifest(self) -> None:
+        events = self.state.active_events_for_run(self.run_id)
+        active_event_ids = {event.lead_event_id for event in events}
+        organization_ids = {event.organization_id for event in events}
+        contacts = [
+            item
+            for item in self.state.contacts_for_run(self.run_id)
+            if item.lead_event_id in active_event_ids
+        ]
+        reviews = self.state.reviews_for_run(self.run_id)
+        self.manifest.counts = {
+            "lead_events": len(events),
+            "relevant_people": sum(
+                person.organization_id in organization_ids
+                for person in self.state.people()
+            ),
+            "contact_candidates": len(contacts),
+            "selected_contacts": sum(
+                item.selected and item.verification_status.value != "rejected"
+                for item in contacts
+            ),
+            "open_reviews": sum(item.state == "open" for item in reviews),
+            "resolved_reviews": sum(item.state == "resolved" for item in reviews),
+        }
         self.manifest.usage = self.state.usage_summary(self.run_id)
-        self.manifest.artifacts = self.state.artifacts_for_run(self.run_id)
+        self.manifest.artifacts = [
+            artifact
+            for artifact in self.state.artifacts_for_run(self.run_id)
+            if artifact["stage"] != "manifest"
+        ]
         self.artifacts.write_manifest(self.manifest)
+
+    def _retry_from_stage(self) -> str | None:
+        if not (self.options.resume and self.options.retry_review):
+            return None
+        stage_alias = {"discover": "qualify", "why-lines": "company-outreach"}
+        candidates = []
+        for review in self.state.eligible_reviews(run_id=self.run_id):
+            if (
+                review.stage == "discover"
+                and review.reason_code != "deferred_by_max_articles"
+            ):
+                continue
+            stage = stage_alias.get(review.stage, review.stage)
+            if stage in self.STAGES:
+                candidates.append(stage)
+        return min(candidates, key=self.STAGES.index) if candidates else None
 
 
 class ZeroLeadError(RuntimeError):

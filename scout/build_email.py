@@ -39,9 +39,9 @@ def build(day, results_dir=None):
     )
     if nurture:
         sections += email_html.section(
-            "Research &amp; nurture",
-            f"Remaining {len(nurture)} qualifying AEC leads",
-            "Sorted by lead score, highest to lowest. These need stronger timing, contact, or property-fit evidence before outreach.",
+            "Research &amp; review",
+            f"Remaining {len(nurture)} reviewed AEC signals",
+            "Sorted by lead score, highest to lowest. These are not approved for outreach and may include negative, incomplete, or lower-confidence signals.",
             nurture,
             contacts,
             styles="background:#f4f8f6;border-top:1px solid #e0ebe6",

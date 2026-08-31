@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -11,7 +12,24 @@ import csvio
 
 from .artifacts import ArtifactStore
 from .contracts import ContactCandidate, DiscoveryCandidate, Organization, Person
+from .contracts import CompanyProfile, OutreachRecipient, RecordStatus
+from .ids import stable_uuid
 from .state import StateStore
+from outreach_contract import WHY_LINE_PROTOCOL_VERSION, personalize_why_line
+from integration.handoff import (
+    HANDOFF_PROTOCOL_VERSION,
+    HANDOFF_SCHEMA_VERSION,
+    handoff_content_hash,
+)
+from integration.models import (
+    CompanySync,
+    EligibilityStatus,
+    EventRole,
+    LeadEventSync,
+    OutreachSequenceSync,
+    RecipientSync,
+    SalesHandoff,
+)
 
 
 LEAD_FIELDS = [
@@ -22,6 +40,11 @@ LEAD_FIELDS = [
     "date_posted",
     "location",
     "summary",
+    "why_line",
+    "why_template_key",
+    "why_confidence",
+    "why_line_status",
+    "why_sources",
     "state",
     "source_site",
     "aka",
@@ -48,6 +71,11 @@ CONTACT_FIELDS = [
     "event",
     "date_posted",
     "summary",
+    "why_line",
+    "why_template_key",
+    "why_confidence",
+    "why_line_status",
+    "why_sources",
     "link",
     "employee_count",
     "person",
@@ -125,6 +153,10 @@ class ExportService:
             item.lead_event_id: item.score
             for item in self.state.scores_for_run(self.artifacts.run_id)
         }
+        profiles = self.state.company_profiles_for_run(self.artifacts.run_id)
+        outreach_recipients = self.state.outreach_recipients_for_run(
+            self.artifacts.run_id
+        )
         lead_rows = [
             self._lead_row(
                 event,
@@ -144,12 +176,15 @@ class ExportService:
             if not organization:
                 continue
             for person in people_by_org[event.organization_id]:
+                contact = selected_contacts.get((event.lead_event_id, person.person_id))
+                if contact is None:
+                    continue
                 contact_rows.append(
                     self._contact_row(
                         event,
                         organization,
                         person,
-                        selected_contacts.get((event.lead_event_id, person.person_id)),
+                        contact,
                         primary,
                         scores.get(event.lead_event_id),
                     )
@@ -169,10 +204,28 @@ class ExportService:
             self.artifacts.record_existing("export", "csv", uncertain_path),
             self.artifacts.write_jsonl("export", "lead_events.jsonl", events),
             self.artifacts.write_jsonl("export", "contacts.jsonl", contacts),
+            self.artifacts.write_jsonl("export", "company_profiles.jsonl", profiles),
             self.artifacts.write_jsonl(
-                "export", "reviews.jsonl", self.state.reviews_for_run(self.artifacts.run_id)
+                "export", "outreach_recipients.jsonl", outreach_recipients
+            ),
+            self.artifacts.write_jsonl(
+                "export",
+                "reviews.jsonl",
+                self.state.reviews_for_run(self.artifacts.run_id, state="open"),
             ),
         ]
+        handoff = self._sales_handoff(
+            events,
+            organizations,
+            candidates,
+            scores,
+            profiles,
+            outreach_recipients,
+        )
+        handoff_artifact = self.artifacts.write_json(
+            "export", "sales_handoff.json", handoff.model_dump(mode="json")
+        )
+        artifacts.append(handoff_artifact)
         html_path = Path(build_email.build(self.stamp, str(self.results_dir)))
         artifacts.append(self.artifacts.record_existing("export", "html", html_path))
         return {
@@ -184,6 +237,7 @@ class ExportService:
                 "contacts": str(contacts_path),
                 "uncertain_leads": str(uncertain_path),
                 "html": str(html_path),
+                "sales_handoff": handoff_artifact["path"],
             },
             "artifacts": artifacts,
         }
@@ -208,6 +262,11 @@ class ExportService:
             "date_posted": str(event.date_posted or ""),
             "location": event.location,
             "summary": event.summary,
+            "why_line": event.why_line,
+            "why_template_key": event.why_template_key,
+            "why_confidence": event.why_confidence,
+            "why_line_status": event.why_line_status,
+            "why_sources": " ".join(event.why_sources),
             "state": event.state,
             "source_site": _site(primary.canonical_url) if primary else "",
             "aka": ", ".join(organization.aliases),
@@ -241,6 +300,11 @@ class ExportService:
             "event": event.event,
             "date_posted": str(event.date_posted or ""),
             "summary": event.summary,
+            "why_line": _personalize_why_line(event.why_line, person.name),
+            "why_template_key": event.why_template_key,
+            "why_confidence": event.why_confidence,
+            "why_line_status": event.why_line_status,
+            "why_sources": " ".join(event.why_sources),
             "link": primary.canonical_url if primary else "",
             "employee_count": _employee_count(organization),
             "person": person.name,
@@ -264,9 +328,172 @@ class ExportService:
             ),
         }
 
+    def _sales_handoff(
+        self,
+        events,
+        organizations: dict[str, Organization],
+        candidates: dict[str, DiscoveryCandidate],
+        scores: dict[str, int],
+        profiles: list[CompanyProfile],
+        recipients: list[OutreachRecipient],
+    ) -> SalesHandoff:
+        profile_by_org = {
+            organization_id: profile
+            for profile in profiles
+            for organization_id in profile.organization_ids
+        }
+        recipients_by_company: dict[str, list[OutreachRecipient]] = defaultdict(list)
+        for recipient in recipients:
+            recipients_by_company[recipient.company_id].append(recipient)
+
+        company_models = [
+            CompanySync(
+                company_id=profile.company_id,
+                canonical_name=profile.canonical_name,
+                domain=profile.domain,
+                aliases=profile.aliases,
+                legacy_ids=profile.organization_ids,
+            )
+            for profile in profiles
+        ]
+        event_models: list[LeadEventSync] = []
+        for event in events:
+            profile = profile_by_org.get(event.organization_id)
+            organization = organizations.get(event.organization_id)
+            if not profile or not organization:
+                continue
+            is_anchor = event.lead_event_id == profile.anchor_lead_event_id
+            actionable = profile.why_line_status == "valid"
+            reasons = []
+            if event.record_status != RecordStatus.VALID:
+                reasons.append("event_record_not_valid")
+            if event.confidence != "high":
+                reasons.append("event_confidence_not_high")
+            if scores.get(event.lead_event_id, 0) <= 0:
+                reasons.append("event_score_zero")
+            if not actionable:
+                reasons.append(f"company_route_{profile.why_line_status}")
+            primary = candidates.get(event.primary_candidate_id)
+            event_models.append(
+                LeadEventSync(
+                    run_id=self.artifacts.run_id,
+                    lead_event_id=event.lead_event_id,
+                    company_id=profile.company_id,
+                    organization_name=profile.canonical_name,
+                    event_role=EventRole.ANCHOR if is_anchor else EventRole.SUPPORTING,
+                    event=event.event,
+                    location=event.location,
+                    date_posted=str(event.date_posted or ""),
+                    summary=event.summary,
+                    article_url=primary.canonical_url if primary else "",
+                    score=scores.get(event.lead_event_id, 0),
+                    confidence=event.confidence,
+                    record_status=event.record_status.value,
+                    actionable_route=actionable,
+                    supporting_event_ids=[
+                        item for item in profile.lead_event_ids if item != event.lead_event_id
+                    ],
+                    crm_eligible=not reasons,
+                    crm_exclusion_reasons=reasons,
+                )
+            )
+
+        recipient_models = [
+            RecipientSync(
+                recipient_id=item.recipient_id,
+                company_id=item.company_id,
+                person_id=item.person_id,
+                contact_candidate_id=item.contact_candidate_id,
+                full_name=item.full_name,
+                first_name=item.first_name,
+                title=item.title,
+                scope=item.scope,
+                email=item.email,
+                source_provider=item.source_provider,
+                source_verification_status=item.source_verification_status,
+                source_verification_reason=item.source_verification_reason,
+                role_score=item.role_score,
+                rank=item.rank,
+                primary=item.primary,
+                selection_rationale=item.selection_rationale,
+            )
+            for item in recipients
+        ]
+
+        sequences: list[OutreachSequenceSync] = []
+        for profile in profiles:
+            primary = next(
+                (
+                    item
+                    for item in recipients_by_company.get(profile.company_id, [])
+                    if item.primary
+                ),
+                None,
+            )
+            if not primary or not profile.why_line:
+                continue
+            personalized = personalize_why_line(profile.why_line, primary.first_name)
+            merge_snapshot = {
+                "firstName": primary.first_name,
+                "company": profile.canonical_name,
+                "whyLine": personalized,
+                "unsubscribeUrl": "__integration_generated__",
+            }
+            merge_hash = hashlib.sha256(
+                json.dumps(
+                    merge_snapshot,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            sequences.append(
+                OutreachSequenceSync(
+                    sequence_id=stable_uuid(
+                        "outreach-sequence",
+                        profile.company_id,
+                        HANDOFF_PROTOCOL_VERSION,
+                    ),
+                    run_id=self.artifacts.run_id,
+                    company_id=profile.company_id,
+                    campaign_protocol=HANDOFF_PROTOCOL_VERSION,
+                    anchor_lead_event_id=profile.anchor_lead_event_id,
+                    supporting_event_ids=[
+                        item
+                        for item in profile.lead_event_ids
+                        if item != profile.anchor_lead_event_id
+                    ],
+                    primary_recipient_id=primary.recipient_id,
+                    why_template_key=profile.why_template_key,
+                    why_slots=profile.why_slots,
+                    why_sources=profile.why_sources,
+                    why_confidence=profile.why_confidence,
+                    company_why_line=profile.why_line,
+                    personalized_why_line=personalized,
+                    merge_snapshot=merge_snapshot,
+                    merge_hash=merge_hash,
+                    eligibility_status=(
+                        EligibilityStatus.READY
+                        if primary.eligibility_status == "ready"
+                        else EligibilityStatus.BLOCKED
+                    ),
+                    eligibility_reasons=primary.eligibility_reasons,
+                )
+            )
+        value = SalesHandoff(
+            schema_version=HANDOFF_SCHEMA_VERSION,
+            protocol_version=HANDOFF_PROTOCOL_VERSION,
+            run_id=self.artifacts.run_id,
+            companies=company_models,
+            lead_events=event_models,
+            recipients=recipient_models,
+            sequences=sequences,
+            content_hash="pending",
+        )
+        return value.model_copy(update={"content_hash": handoff_content_hash(value)})
+
     def _uncertain_rows(self, candidates: dict[str, DiscoveryCandidate]) -> list[dict]:
         rows = []
-        for review in self.state.reviews_for_run(self.artifacts.run_id):
+        for review in self.state.reviews_for_run(self.artifacts.run_id, state="open"):
             candidate = candidates.get(review.record_id)
             if not candidate:
                 continue
@@ -318,3 +545,20 @@ def _score(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _personalize_why_line(line: str, person_name: str) -> str:
+    if not line:
+        return ""
+    parts = person_name.split()
+    while parts and parts[0].casefold().rstrip(".") in {
+        "dr",
+        "mr",
+        "mrs",
+        "ms",
+        "prof",
+    }:
+        parts.pop(0)
+    if not parts or not line.startswith("Hi [first name]"):
+        return ""
+    return f"Hi {parts[0]}{line[len('Hi [first name]') :]}"

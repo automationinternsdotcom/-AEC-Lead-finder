@@ -84,7 +84,7 @@ def test_exact_candidate_dedup_preserves_support_ids():
     assert set(kept[0].metadata["exact_duplicate_candidate_ids"]) == {"c1", "c2"}
 
 
-def test_valid_fuzzy_merge_retains_sources_and_alias(tmp_path):
+def test_valid_fuzzy_merge_retains_sources_without_conflating_organizations(tmp_path):
     store, artifacts, events = setup(tmp_path)
     response = [{"kept_id": "event-1", "member_ids": ["event-1", "event-2"]}]
     service = FuzzyEventDeduper(
@@ -100,7 +100,8 @@ def test_valid_fuzzy_merge_retains_sources_and_alias(tmp_path):
     assert [event.lead_event_id for event in store.active_events_for_run("run-1")] == [
         "event-1"
     ]
-    assert "Acme Centre LLC" in store.organizations({"org-1"})[0].aliases
+    assert store.organizations({"org-1"})[0].aliases == []
+    assert store.organizations({"org-2"})[0].canonical_name == "Acme Centre LLC"
 
 
 def test_invalid_fuzzy_merge_keeps_every_event_and_opens_review(tmp_path):

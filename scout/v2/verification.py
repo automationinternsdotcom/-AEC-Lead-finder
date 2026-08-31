@@ -98,8 +98,15 @@ class ContactVerifier:
                         phone=normalized_phone,
                         linkedin=normalized_linkedin,
                     )
-            status = VerificationStatus.VERIFIED if mx is True and http is not False else VerificationStatus.UNKNOWN
-            reason = "mx_valid" if status == VerificationStatus.VERIFIED else "email_syntax_valid_verification_unknown"
+            if http is True:
+                status = VerificationStatus.VERIFIED
+                reason = "external_email_verifier_valid"
+            elif mx is True:
+                status = VerificationStatus.UNKNOWN
+                reason = "domain_mx_valid_mailbox_unverified"
+            else:
+                status = VerificationStatus.UNKNOWN
+                reason = "email_syntax_valid_verification_unknown"
             return VerificationResult(
                 status,
                 reason,

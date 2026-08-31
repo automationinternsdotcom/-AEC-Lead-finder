@@ -19,6 +19,7 @@ from typing import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
+import outreach_contract as shared_outreach
 
 from v2.artifacts import ArtifactStore, new_manifest
 from v2.apollo import ApolloFatalError, ApolloResolver, ApolloTransientError
@@ -154,6 +155,7 @@ WHY_TEMPLATES = {
     "skip_negative": {"text": "", "slots": (), "sendable": False},
     "skip_general": {"text": "", "slots": (), "sendable": False},
 }
+WHY_TEMPLATES = shared_outreach.WHY_TEMPLATES
 
 
 def _template_catalog() -> str:
@@ -631,7 +633,11 @@ class BulkRunner:
             if decision_pending:
                 with ThreadPoolExecutor(max_workers=self.options.workers) as executor:
                     futures = {
-                        executor.submit(self._research_recipient_company, organization): organization
+                        executor.submit(
+                            self._research_recipient_company,
+                            organization,
+                            anchors[organization.organization_id],
+                        ): organization
                         for organization in decision_pending
                     }
                     for future in as_completed(futures):
@@ -651,8 +657,20 @@ class BulkRunner:
             people = _cap_people_by_company(people, MAX_PEOPLE_PER_COMPANY)
 
             contact_attempted = self._provider_target_ids(RECIPIENT_CONTACT_STAGE)
+            existing_contact_people = {
+                contact.person_id
+                for contact in self.state.contacts_for_run(self.options.run_id)
+                if contact.selected
+                and contact.verification_status != VerificationStatus.REJECTED
+                and contact.organization_id in anchors
+                and contact.lead_event_id
+                == anchors[contact.organization_id].lead_event_id
+            }
             contact_pending = [
-                person for person in people if person.person_id not in contact_attempted
+                person
+                for person in people
+                if person.person_id not in contact_attempted
+                and person.person_id not in existing_contact_people
             ]
             if contact_pending:
                 with ThreadPoolExecutor(max_workers=self.options.workers) as executor:
@@ -762,12 +780,16 @@ class BulkRunner:
             organizations.append(organization)
         return organizations
 
-    def _research_recipient_company(self, organization: Organization) -> None:
+    def _research_recipient_company(
+        self, organization: Organization, anchor: LeadEvent
+    ) -> None:
         service = DecisionMakerService(
             self.state,
             self.artifacts,
             self.options.model,
             call_model=self.model_call,
+            verifier=ContactVerifier(self.state),
+            events=[anchor],
         )
         service.research([organization], attempts=1)
 
@@ -3353,16 +3375,32 @@ def _profile_record_status(why_line: WhyVariant) -> str:
 
 
 def _anchor_event(events: list[LeadEvent], scores: dict[str, int]) -> LeadEvent:
-    priority = {"high": 2, "medium": 1, "low": 0}
-    return sorted(
-        events,
-        key=lambda item: (
-            -scores.get(item.lead_event_id, -1),
-            -priority.get(item.priority, -1),
-            -(item.date_posted.toordinal() if item.date_posted else 0),
-            item.lead_event_id,
-        ),
-    )[0]
+    return shared_outreach.anchor_event(events, scores)
+
+
+# The bulk workflow retains its local Pydantic projection for compatibility, but
+# delegates the actual v4 contract and personalization rules to shared production
+# code used by the daily pipeline.
+def _why_line_from_payload(
+    payload: dict,
+    *,
+    allowed_event_ids: set[str],
+    known_company_names: Iterable[str] = (),
+) -> WhyVariant:
+    value = shared_outreach.parse_why_line_selection(
+        payload,
+        allowed_event_ids=allowed_event_ids,
+        known_company_names=known_company_names,
+    )
+    return WhyVariant.model_validate(value.model_dump(mode="json"))
+
+
+def _first_name(full_name: str) -> str:
+    return shared_outreach.first_name(full_name)
+
+
+def _personalize_why_line(text: str, first_name: str) -> str:
+    return shared_outreach.personalize_why_line(text, first_name)
 
 
 def _domain(value: str) -> str:

@@ -11,19 +11,22 @@ from typing import Iterator
 from pydantic import BaseModel
 
 from .contracts import (
+    CompanyProfile,
     ContactCandidate,
     DiscoveryCandidate,
     LeadEvent,
     LeadScore,
     Organization,
+    OutreachRecipient,
     Person,
+    RecordStatus,
     ReviewItem,
     StageStatus,
 )
 from .ids import normalize_text
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def _now() -> str:
@@ -289,6 +292,52 @@ CREATE TABLE IF NOT EXISTS v2_event_merges (
 );
 """
 
+MIGRATION_4 = """
+CREATE TABLE IF NOT EXISTS v2_company_profiles (
+    run_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    anchor_lead_event_id TEXT NOT NULL,
+    record_status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, company_id),
+    FOREIGN KEY (run_id) REFERENCES v2_runs(run_id),
+    FOREIGN KEY (anchor_lead_event_id) REFERENCES v2_lead_events(lead_event_id)
+);
+CREATE TABLE IF NOT EXISTS v2_outreach_recipients (
+    run_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    person_id TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    primary_recipient INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, recipient_id),
+    FOREIGN KEY (run_id) REFERENCES v2_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS v2_outreach_recipients_company
+    ON v2_outreach_recipients(run_id, company_id, rank);
+"""
+
+MIGRATION_5 = """
+CREATE TABLE IF NOT EXISTS v2_qualification_completions (
+    candidate_id TEXT NOT NULL,
+    since_date TEXT NOT NULL,
+    stamp TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, since_date, stamp),
+    FOREIGN KEY (candidate_id) REFERENCES v2_discovery_candidates(candidate_id),
+    FOREIGN KEY (run_id) REFERENCES v2_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS v2_qualification_window
+    ON v2_qualification_completions(since_date, stamp, candidate_id);
+"""
+
 
 class StateStore:
     def __init__(self, path: str | Path):
@@ -339,6 +388,18 @@ class StateStore:
                     "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
                     (3, _now()),
                 )
+            if 4 not in applied:
+                conn.executescript(MIGRATION_4)
+                conn.execute(
+                    "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (4, _now()),
+                )
+            if 5 not in applied:
+                conn.executescript(MIGRATION_5)
+                conn.execute(
+                    "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (5, _now()),
+                )
         return SCHEMA_VERSION
 
     def create_run(
@@ -357,7 +418,6 @@ class StateStore:
                     manifest_path, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
-                    configuration_json=excluded.configuration_json,
                     manifest_path=CASE WHEN excluded.manifest_path <> '' THEN excluded.manifest_path ELSE v2_runs.manifest_path END,
                     updated_at=excluded.updated_at""",
                 (
@@ -371,6 +431,17 @@ class StateStore:
                     now,
                 ),
             )
+
+    def get_run(self, run_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM v2_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["configuration"] = json.loads(result.pop("configuration_json"))
+        return result
 
     def set_run_status(self, run_id: str, status: StageStatus, manifest_path: str = "") -> None:
         with self.transaction() as conn:
@@ -568,6 +639,87 @@ class StateStore:
                 for row in conn.execute("SELECT canonical_url FROM v2_discovery_candidates")
             }
 
+    def candidate_ids(self) -> set[str]:
+        with self.connect() as conn:
+            return {
+                row["candidate_id"]
+                for row in conn.execute("SELECT candidate_id FROM v2_discovery_candidates")
+            }
+
+    def completed_qualification_candidate_ids(
+        self, *, since_date: str | None = None, stamp: str | None = None
+    ) -> set[str]:
+        """Candidates with a terminal prior qualification outcome.
+
+        Qualification depends on the requested publication window, so a
+        terminal outcome is reusable only for the same window. A deferred or
+        quarantined candidate has no completed attempt and remains eligible.
+        """
+        if bool(since_date) != bool(stamp):
+            raise ValueError("since_date and stamp must be supplied together")
+        sql = """SELECT DISTINCT p.target_id
+                 FROM v2_provider_attempts p"""
+        params: list[object] = []
+        if since_date and stamp:
+            sql += " JOIN v2_runs r ON r.run_id=p.run_id"
+        sql += """ WHERE p.stage='qualify'
+                    AND p.target_type='discovery_candidate'
+                    AND p.status='completed'"""
+        if since_date and stamp:
+            sql += " AND r.since_date=? AND r.stamp=?"
+            params.extend((since_date, stamp))
+        with self.connect() as conn:
+            completed = {
+                row["target_id"]
+                for row in conn.execute(sql, params)
+            }
+            if since_date and stamp:
+                completed.update(
+                    row["candidate_id"]
+                    for row in conn.execute(
+                        """SELECT candidate_id
+                           FROM v2_qualification_completions
+                           WHERE since_date=? AND stamp=?""",
+                        (since_date, stamp),
+                    )
+                )
+            return completed
+
+    def record_qualification_completion(
+        self,
+        *,
+        candidate_id: str,
+        since_date: str,
+        stamp: str,
+        run_id: str,
+        outcome: str,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO v2_qualification_completions(
+                    candidate_id, since_date, stamp, run_id, outcome, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id, since_date, stamp) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    outcome=excluded.outcome,
+                    created_at=excluded.created_at""",
+                (candidate_id, since_date, stamp, run_id, outcome, _now()),
+            )
+
+    def completed_provider_target_ids(
+        self, run_id: str, stage: str, target_type: str
+    ) -> set[str]:
+        with self.connect() as conn:
+            return {
+                row["target_id"]
+                for row in conn.execute(
+                    """SELECT target_id FROM v2_provider_attempts
+                       WHERE run_id=? AND stage=? AND target_type=?
+                         AND status='completed'""",
+                    (run_id, stage, target_type),
+                )
+            }
+
     def candidates_for_run(self, run_id: str) -> list[DiscoveryCandidate]:
         with self.connect() as conn:
             return [
@@ -658,6 +810,32 @@ class StateStore:
                     (event.lead_event_id, candidate),
                 )
 
+    def retire_events_for_candidate(
+        self, run_id: str, candidate_id: str, reason: str
+    ) -> int:
+        with self.connect() as conn:
+            rows = list(
+                conn.execute(
+                    """SELECT payload_json FROM v2_lead_events
+                       WHERE run_id=? AND primary_candidate_id=? AND record_status='valid'""",
+                    (run_id, candidate_id),
+                )
+            )
+        for row in rows:
+            event = LeadEvent.model_validate_json(row["payload_json"])
+            errors = list(event.validation_errors)
+            if reason not in errors:
+                errors.append(reason)
+            self.save_lead_event(
+                event.model_copy(
+                    update={
+                        "record_status": RecordStatus.REJECTED,
+                        "validation_errors": errors,
+                    }
+                )
+            )
+        return len(rows)
+
     def save_contact(self, contact: ContactCandidate) -> None:
         self.upsert_model(
             "v2_contact_candidates",
@@ -712,7 +890,8 @@ class StateStore:
                     FROM v2_lead_events e
                     LEFT JOIN v2_event_merges m
                       ON m.run_id=e.run_id AND m.merged_event_id=e.lead_event_id
-                    WHERE e.run_id=? AND m.merged_event_id IS NULL
+                    WHERE e.run_id=? AND e.record_status='valid'
+                      AND m.merged_event_id IS NULL
                     ORDER BY e.lead_event_id""",
                     (run_id,),
                 )
@@ -769,6 +948,136 @@ class StateStore:
                 )
             ]
 
+    def save_company_profile(self, profile: CompanyProfile) -> None:
+        now = _now()
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO v2_company_profiles(
+                    run_id, company_id, anchor_lead_event_id, record_status,
+                    payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, company_id) DO UPDATE SET
+                    anchor_lead_event_id=excluded.anchor_lead_event_id,
+                    record_status=excluded.record_status,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at""",
+                (
+                    profile.run_id,
+                    profile.company_id,
+                    profile.anchor_lead_event_id,
+                    profile.record_status.value,
+                    _json(profile.model_dump(mode="json")),
+                    now,
+                    now,
+                ),
+            )
+
+    def company_profiles_for_run(self, run_id: str) -> list[CompanyProfile]:
+        with self.connect() as conn:
+            return [
+                CompanyProfile.model_validate_json(row["payload_json"])
+                for row in conn.execute(
+                    "SELECT payload_json FROM v2_company_profiles WHERE run_id=? ORDER BY company_id",
+                    (run_id,),
+                )
+            ]
+
+    def resolve_company_profile_identity(
+        self, domain: str, names: list[str]
+    ) -> str | None:
+        """Resolve a durable company ID from any prior domain/name alias."""
+        normalized_domain = domain.strip().casefold()
+        normalized_names = {normalize_text(value) for value in names if value.strip()}
+        matches: set[str] = set()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT company_id, payload_json FROM v2_company_profiles"
+            ).fetchall()
+        for row in rows:
+            profile = CompanyProfile.model_validate_json(row["payload_json"])
+            profile_names = {
+                normalize_text(value)
+                for value in [profile.canonical_name, *profile.aliases]
+                if value.strip()
+            }
+            if (
+                normalized_domain
+                and profile.domain.strip().casefold() == normalized_domain
+            ) or (normalized_names and profile_names & normalized_names):
+                matches.add(str(row["company_id"]))
+        if len(matches) > 1:
+            raise ValueError(
+                f"ambiguous prior company identity for domain={domain!r}, names={names!r}"
+            )
+        return next(iter(matches), None)
+
+    def save_outreach_recipient(self, recipient: OutreachRecipient) -> None:
+        now = _now()
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO v2_outreach_recipients(
+                    run_id, recipient_id, company_id, person_id, rank,
+                    primary_recipient, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, recipient_id) DO UPDATE SET
+                    company_id=excluded.company_id,
+                    person_id=excluded.person_id,
+                    rank=excluded.rank,
+                    primary_recipient=excluded.primary_recipient,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at""",
+                (
+                    recipient.run_id,
+                    recipient.recipient_id,
+                    recipient.company_id,
+                    recipient.person_id,
+                    recipient.rank,
+                    int(recipient.primary),
+                    _json(recipient.model_dump(mode="json")),
+                    now,
+                    now,
+                ),
+            )
+
+    def outreach_recipients_for_run(self, run_id: str) -> list[OutreachRecipient]:
+        with self.connect() as conn:
+            return [
+                OutreachRecipient.model_validate_json(row["payload_json"])
+                for row in conn.execute(
+                    """SELECT payload_json FROM v2_outreach_recipients
+                       WHERE run_id=? ORDER BY company_id, rank, recipient_id""",
+                    (run_id,),
+                )
+            ]
+
+    def prune_company_outreach(
+        self,
+        run_id: str,
+        company_ids: set[str],
+        recipient_ids: set[str],
+    ) -> None:
+        with self.transaction() as conn:
+            if company_ids:
+                placeholders = ", ".join("?" for _ in company_ids)
+                conn.execute(
+                    f"DELETE FROM v2_company_profiles WHERE run_id=? AND company_id NOT IN ({placeholders})",
+                    (run_id, *sorted(company_ids)),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM v2_company_profiles WHERE run_id=?", (run_id,)
+                )
+            if recipient_ids:
+                placeholders = ", ".join("?" for _ in recipient_ids)
+                conn.execute(
+                    f"DELETE FROM v2_outreach_recipients WHERE run_id=? AND recipient_id NOT IN ({placeholders})",
+                    (run_id, *sorted(recipient_ids)),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM v2_outreach_recipients WHERE run_id=?", (run_id,)
+                )
+
     def record_provider_attempt(
         self,
         *,
@@ -816,6 +1125,21 @@ class StateStore:
                     completed_at,
                 ),
             )
+
+    def next_provider_attempt_number(
+        self,
+        run_id: str,
+        stage: str,
+        target_type: str,
+        target_id: str,
+    ) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS count FROM v2_provider_attempts
+                   WHERE run_id=? AND stage=? AND target_type=? AND target_id=?""",
+                (run_id, stage, target_type, target_id),
+            ).fetchone()
+        return int(row["count"]) + 1
 
     def get_verification_cache(self, cache_key: str) -> sqlite3.Row | None:
         with self.connect() as conn:
@@ -943,8 +1267,16 @@ class StateStore:
             conn.execute(sql, [values[name] for name in names])
 
     def add_review(self, item: ReviewItem) -> None:
-        payload = item.model_dump(mode="json")
         with self.transaction() as conn:
+            prior = conn.execute(
+                "SELECT retry_count FROM v2_review_items WHERE review_id=?",
+                (item.review_id,),
+            ).fetchone()
+            if prior and int(prior["retry_count"]) > item.retry_count:
+                item = item.model_copy(
+                    update={"retry_count": int(prior["retry_count"])}
+                )
+            payload = item.model_dump(mode="json")
             conn.execute(
                 """INSERT INTO v2_review_items(
                     review_id, run_id, stage, record_type, record_id, reason_code,
@@ -970,24 +1302,75 @@ class StateStore:
                 ),
             )
 
-    def eligible_reviews(self, stage: str | None = None, max_retries: int = 2) -> list[ReviewItem]:
+    def mark_review_retried(self, review_id: str) -> None:
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json, retry_count FROM v2_review_items WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            if not row:
+                return
+            item = ReviewItem.model_validate_json(row["payload_json"])
+            retry_count = int(row["retry_count"]) + 1
+            item = item.model_copy(
+                update={"retry_count": retry_count, "updated_at": datetime.now(timezone.utc)}
+            )
+            conn.execute(
+                """UPDATE v2_review_items
+                   SET retry_count=?, payload_json=?, updated_at=? WHERE review_id=?""",
+                (retry_count, _json(item.model_dump(mode="json")), _now(), review_id),
+            )
+
+    def resolve_review(self, review_id: str) -> None:
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM v2_review_items WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            if not row:
+                return
+            item = ReviewItem.model_validate_json(row["payload_json"])
+            item = item.model_copy(
+                update={"state": "resolved", "updated_at": datetime.now(timezone.utc)}
+            )
+            conn.execute(
+                """UPDATE v2_review_items SET state='resolved', payload_json=?, updated_at=?
+                   WHERE review_id=?""",
+                (_json(item.model_dump(mode="json")), _now(), review_id),
+            )
+
+    def eligible_reviews(
+        self,
+        stage: str | None = None,
+        max_retries: int = 2,
+        *,
+        run_id: str | None = None,
+    ) -> list[ReviewItem]:
         sql = "SELECT payload_json FROM v2_review_items WHERE state='open' AND retry_count < ?"
         params: list[object] = [max_retries]
         if stage:
             sql += " AND stage=?"
             params.append(stage)
+        if run_id:
+            sql += " AND run_id=?"
+            params.append(run_id)
         sql += " ORDER BY created_at, review_id"
         with self.connect() as conn:
             return [ReviewItem.model_validate_json(row["payload_json"]) for row in conn.execute(sql, params)]
 
-    def reviews_for_run(self, run_id: str) -> list[ReviewItem]:
+    def reviews_for_run(
+        self, run_id: str, *, state: str | None = None
+    ) -> list[ReviewItem]:
+        sql = "SELECT payload_json FROM v2_review_items WHERE run_id=?"
+        params: list[object] = [run_id]
+        if state is not None:
+            sql += " AND state=?"
+            params.append(state)
+        sql += " ORDER BY created_at, review_id"
         with self.connect() as conn:
             return [
                 ReviewItem.model_validate_json(row["payload_json"])
-                for row in conn.execute(
-                    "SELECT payload_json FROM v2_review_items WHERE run_id=? ORDER BY created_at, review_id",
-                    (run_id,),
-                )
+                for row in conn.execute(sql, params)
             ]
 
     def record_artifact(

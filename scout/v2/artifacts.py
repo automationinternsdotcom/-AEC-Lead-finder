@@ -53,12 +53,30 @@ class ArtifactStore:
             "manifest",
             self.manifest_path,
             _json_bytes(manifest.model_dump(mode="json")),
+            record=False,
         )
         self.state.set_run_status(self.run_id, manifest.status, str(self.manifest_path))
         return artifact
 
     def load_manifest(self) -> RunManifest:
         return RunManifest.model_validate_json(self.manifest_path.read_text(encoding="utf-8"))
+
+    def verify_stage(self, stage: str) -> None:
+        """Fail closed when a completed stage's durable artifacts changed."""
+        for artifact in self.state.artifacts_for_run(self.run_id):
+            if artifact["stage"] != stage:
+                continue
+            path = Path(artifact["path"])
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot resume completed stage {stage}: artifact missing: {path}"
+                )
+            payload = path.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest != artifact["sha256"] or len(payload) != artifact["byte_count"]:
+                raise ValueError(
+                    f"cannot resume completed stage {stage}: artifact integrity mismatch: {path}"
+                )
 
     def record_existing(self, stage: str, kind: str, path: str | Path) -> dict:
         target = Path(path)
@@ -76,7 +94,15 @@ class ArtifactStore:
         )
         return artifact
 
-    def _write(self, stage: str, kind: str, path: Path, payload: bytes) -> dict:
+    def _write(
+        self,
+        stage: str,
+        kind: str,
+        path: Path,
+        payload: bytes,
+        *,
+        record: bool = True,
+    ) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(path.name + ".tmp")
         with temp.open("wb") as file:
@@ -92,7 +118,10 @@ class ArtifactStore:
             "sha256": digest,
             "byte_count": len(payload),
         }
-        self.state.record_artifact(self.run_id, stage, kind, str(path), digest, len(payload))
+        if record:
+            self.state.record_artifact(
+                self.run_id, stage, kind, str(path), digest, len(payload)
+            )
         return artifact
 
 

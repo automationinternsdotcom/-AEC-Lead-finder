@@ -16,6 +16,9 @@ DEAL_FIELDS = (
         "varchar",
         None,
     ),
+    ("canonical_company_id", "Aether Canonical Company ID", "varchar", None),
+    ("event_role", "Aether Event Role", "varchar", None),
+    ("outreach_sequence_id", "Aether Outreach Sequence ID", "varchar", None),
     ("warmy_prospect_id", "Warmy Prospect ID", "varchar", None),
     ("outreach_state", "Aether Outreach State", "varchar", None),
     (
@@ -85,10 +88,23 @@ def apply(settings: Settings) -> dict[str, Any]:
     pipedrive = PipedriveClient(settings)
     warmy = WarmyClient(settings)
     try:
-        deal_fields, disposition_values = _ensure_fields(
+        deal_fields, deal_options = _ensure_fields(
             pipedrive, "dealFields", DEAL_FIELDS
         )
-        person_fields, _ = _ensure_fields(pipedrive, "personFields", PERSON_FIELDS)
+        person_fields, person_options = _ensure_fields(
+            pipedrive, "personFields", PERSON_FIELDS
+        )
+        disposition_values = {
+            option_id: label
+            for label, option_id in deal_options.get(
+                "reply_disposition", {}
+            ).items()
+        }
+        person_enum_values = {
+            f"{semantic}.{label}": option_id
+            for semantic, options in person_options.items()
+            for label, option_id in options.items()
+        }
         pipedrive_url = f"{settings.public_base_url}/webhooks/pipedrive"
         warmy_url = f"{settings.public_base_url}/webhooks/warmy"
         pipedrive_webhook = next(
@@ -111,6 +127,7 @@ def apply(settings: Settings) -> dict[str, Any]:
         return {
             "PIPEDRIVE_DEAL_FIELDS": deal_fields,
             "PIPEDRIVE_PERSON_FIELDS": person_fields,
+            "PIPEDRIVE_PERSON_ENUM_VALUES": person_enum_values,
             "PIPEDRIVE_REPLY_DISPOSITION_VALUES": disposition_values,
             "pipedrive_webhook": pipedrive_webhook,
             "warmy_webhook": warmy_webhook,
@@ -128,7 +145,7 @@ def _ensure_fields(client, resource, definitions):
         if not item.get("is_deleted")
     }
     semantic_to_key: dict[str, str] = {}
-    disposition_values: dict[str, str] = {}
+    option_values: dict[str, dict[str, str]] = {}
     for semantic, label, field_type, options in definitions:
         field = by_name.get(label)
         if field is None:
@@ -137,12 +154,11 @@ def _ensure_fields(client, resource, definitions):
         if not key:
             raise RuntimeError(f"Pipedrive did not return a field code for {label}")
         semantic_to_key[semantic] = key
-        if semantic == "reply_disposition":
-            for option in field.get("options") or []:
-                option_id = str(option.get("id") or "")
-                option_label = (
-                    str(option.get("label") or "").casefold().replace(" ", "_")
-                )
-                if option_id and option_label:
-                    disposition_values[option_id] = option_label
-    return semantic_to_key, disposition_values
+        for option in field.get("options") or []:
+            option_id = str(option.get("id") or "")
+            option_label = (
+                str(option.get("label") or "").casefold().replace(" ", "_")
+            )
+            if option_id and option_label:
+                option_values.setdefault(semantic, {})[option_label] = option_id
+    return semantic_to_key, option_values

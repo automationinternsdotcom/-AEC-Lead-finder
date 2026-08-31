@@ -25,7 +25,10 @@ from v2.exports import ExportService, LEAD_FIELDS  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 
 
-def test_export_preserves_legacy_columns_and_separates_same_name_events(tmp_path):
+def test_export_preserves_legacy_columns_and_only_displays_selected_contacts(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("AETHER_FEEDBACK_BASE_URL", raising=False)
     store = StateStore(tmp_path / "scout.db")
     store.migrate()
     store.create_run("run-1", "2026-08-28", "2026-08-27")
@@ -72,6 +75,14 @@ def test_export_preserves_legacy_columns_and_separates_same_name_events(tmp_path
             location=organization.location,
             date_posted=date(2026, 8, 28),
             priority="high",
+            why_line=(
+                "Hi [first name] just wanted to reach out since I saw on the news that "
+                "the new site is opening in Phoenix. Is there any chance we could stay "
+                "in touch regarding your future janitorial needs?"
+            ),
+            why_template_key="opening",
+            why_line_status="valid",
+            why_sources=["https://example.com/source"],
             evidence=evidence,
         )
         store.save_lead_event(event)
@@ -100,6 +111,15 @@ def test_export_preserves_legacy_columns_and_separates_same_name_events(tmp_path
                 attempt_id="attempt-1",
             )
         )
+    store.save_person(
+        Person(
+            person_id="article-subject",
+            organization_id="org-1",
+            name="Unverified Article Subject",
+            title="Unrelated source subject",
+            evidence=evidence,
+        )
+    )
     artifacts = ArtifactStore(tmp_path / "results", "2026-08-28", "run-1", store)
     output = ExportService(store, artifacts, tmp_path / "results", "2026-08-28").export()
 
@@ -110,7 +130,13 @@ def test_export_preserves_legacy_columns_and_separates_same_name_events(tmp_path
     assert len(rows) == 2
     assert {row["score"] for row in rows} == {"0", "90"}
     assert {row["lead_event_id"] for row in rows} == {"event-1", "event-2"}
+    with Path(output["paths"]["contacts"]).open(newline="", encoding="utf-8") as file:
+        contacts = list(csv.DictReader(file))
+    assert {row["why_line"].split()[1] for row in contacts} == {"Jane", "Joe"}
     html = Path(output["paths"]["html"]).read_text()
     assert html.count("Jane Manager") == 1
     assert html.count("Joe Operator") == 1
+    assert "Unverified Article Subject" not in html
+    assert "REPLACE-" not in html
+    assert "qualifying AEC leads" not in html
     assert not list((tmp_path / "results").rglob("*.tmp"))

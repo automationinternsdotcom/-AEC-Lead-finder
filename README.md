@@ -22,7 +22,8 @@ The one intentional difference is discovery:
 The active V2 pipeline writes compatibility CSV/HTML outputs plus typed JSONL, raw
 responses, stage state, and an auditable run manifest. Provider writes are off by
 default. When `AETHER_INTEGRATION_ENABLED=true` on the persistent Mac, a successful V2
-export enqueues stable event/person outreach records for the separate sales worker.
+export enqueues a typed, hashed company/event/recipient/sequence handoff for the
+separate sales worker.
 Comparison delivery remains a separate exactly-once Gmail command.
 
 ## Folder Layout
@@ -148,17 +149,24 @@ Apollo credits are only spent when `--apollo-go` is present.
 The integration stays outside Scout's authoritative database:
 
 ```text
-V2 export -> aether_sales.sqlite -> Pipedrive Lead + Warmy prospect
-Warmy reply -> original Gmail mailbox -> Jordan -> Pipedrive review task
-Jordan disposition -> positive Deal conversion or permanent suppression
+V2 hashed handoff -> canonical company + event-level Pipedrive Leads
+eligible primary -> standalone Warmy verification -> unenrolled Warmy prospect
+immutable approval batch -> exact named sequence enrollment
+Warmy reply -> Jordan review task -> positive Deal conversion or suppression
 ```
 
-V2's `lead_event_id + person_id` form the durable outreach identity. The selected
-`contact_candidate_id` remains provenance, so a later Apollo/model selection or email
-change does not create another Pipedrive Lead for the same event and person. Warmy
-prospects are reused by normalized email, but only one outreach record is the active
-reply route for a prospect. Material contact corrections enqueue a new revision,
-reconcile the Pipedrive record, and suppress the superseded address.
+If Google Workspace delegation is intentionally deferred, set
+`GMAIL_REPLY_FORWARDING_ENABLED=false`. Warmy reply webhooks still create Jordan's
+Pipedrive review activity and point to the WarmySender Inbox, but the original
+message is not forwarded until delegation is enabled.
+
+V2 creates one immutable company identity, one Pipedrive Lead per qualified event,
+and one outreach sequence per company/campaign protocol. Leads are organization-only
+until the deterministic primary recipient passes all eligibility gates. Backup
+recipients remain research records and are never enrolled. `contact_candidate_id`
+is provenance rather than CRM identity, so a later source correction does not create
+another event Lead. Warmy prospects are reused by normalized email and are created
+only after a standalone valid verification result.
 
 Run the default-off configuration check:
 
@@ -166,8 +174,18 @@ Run the default-off configuration check:
 uv run python -m integration.cli doctor
 ```
 
-Enrollment remains deferred until every activation check passes and the configured
-live Warmy campaign matches the approved mailbox, limit, step, and stop settings.
+Enrollment remains deferred until every activation check passes, the configured live
+Warmy campaign exactly matches its approved manifest hash, and an unexpired immutable
+approval batch names the exact sequence and merge hash. Campaign approval cannot
+release an older backlog accidentally.
+
+The interrupted Southwest Value Partners canary has a local-only, idempotent
+reconciliation command. Preview is read-only; apply performs no provider calls:
+
+```bash
+uv run python -m integration.cli reconcile-legacy-swvp
+uv run python -m integration.cli reconcile-legacy-swvp --apply-local
+```
 
 The GitHub workflow intentionally leaves the handoff disabled. The persistent Mac's
 `run-nightly.sh` owns both Scout execution and enqueueing. See
@@ -185,7 +203,8 @@ health-check, and backup instructions.
 | contacts | Sourced contact research, normalization, and verification |
 | apollo | Persistent cached fallback; dry unless `--apollo-go` is present |
 | score | Exactly one 0–100 score per submitted `lead_event_id` |
-| export | Compatibility CSV/HTML plus validated JSONL and hashes |
+| company-outreach | Company consolidation, sourced Y-line selection, and deterministic primary/backups |
+| export | Compatibility CSV/HTML plus typed, hashed `sales_handoff.json` |
 
 ## Outputs
 
@@ -195,8 +214,9 @@ Each run writes to `results/YYYY-MM-DD/`:
 |---|---|
 | `raw_leads.csv` | Qualified sales-ready AEC leads. |
 | `uncertain_leads.csv` | Plausible but low-confidence leads. |
-| `contacts.csv` | Decision makers and contact data. |
+| `contacts.csv` | Decision makers, contact data, and the personalized outreach `why_line`. |
 | `leads_email.html` | HTML lead digest ready to review/send. |
+| `runs/<run-id>/final/sales_handoff.json` | The only provider-worker input; typed, versioned, and content-hashed. |
 
 The database `scout.db` is authoritative run state. Every run also writes
 `results/YYYY-MM-DD/runs/<run-id>/raw/`, `final/`, and `manifest.json`.

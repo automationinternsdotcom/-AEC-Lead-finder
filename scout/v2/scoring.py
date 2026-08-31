@@ -76,6 +76,12 @@ class ScoringService:
         prompt = PROMPT.format(events=json.dumps(inputs, sort_keys=True))
         last_error: Exception | None = None
         for attempt_number in range(1, attempts + 1):
+            attempt_number = self.state.next_provider_attempt_number(
+                self.artifacts.run_id,
+                "score",
+                "lead_event_batch",
+                self.artifacts.run_id,
+            )
             attempt_id = stable_uuid(
                 "attempt", self.artifacts.run_id, "score", attempt_number
             )

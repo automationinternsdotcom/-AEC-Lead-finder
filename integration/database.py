@@ -12,7 +12,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .models import MappingRecord, SuppressionReason, WorkItem
+from .models import (
+    ApprovalBatch,
+    CompanySync,
+    LeadEventSync,
+    MappingRecord,
+    OutreachSequenceSync,
+    RecipientSync,
+    SequenceApprovalState,
+    SuppressionReason,
+    WorkItem,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS webhook_events (
@@ -33,7 +43,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   dedupe_key TEXT NOT NULL UNIQUE,
   payload TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'running', 'completed', 'dead_letter')),
+    CHECK (status IN ('pending', 'running', 'completed', 'dead_letter', 'superseded')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   run_after TEXT NOT NULL,
   lease_owner TEXT,
@@ -58,6 +68,7 @@ CREATE TABLE IF NOT EXISTS lead_mappings (
   lead_event_id TEXT NOT NULL DEFAULT '',
   organization_id TEXT NOT NULL DEFAULT '',
   person_id TEXT NOT NULL DEFAULT '',
+  why_line TEXT NOT NULL DEFAULT '',
   pipedrive_organization_id INTEGER,
   pipedrive_person_id INTEGER,
   pipedrive_lead_id TEXT UNIQUE,
@@ -103,7 +114,7 @@ CREATE TABLE IF NOT EXISTS provider_operations (
   provider TEXT NOT NULL,
   operation_key TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'started'
-    CHECK (status IN ('started', 'completed', 'failed')),
+    CHECK (status IN ('started', 'completed', 'failed', 'uncertain')),
   request_payload TEXT NOT NULL DEFAULT '{}',
   response_payload TEXT NOT NULL DEFAULT '{}',
   external_id TEXT NOT NULL DEFAULT '',
@@ -130,6 +141,135 @@ CREATE TABLE IF NOT EXISTS integration_runs (
   started_at TEXT NOT NULL,
   completed_at TEXT,
   metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS sales_companies (
+  company_id TEXT PRIMARY KEY,
+  canonical_name TEXT NOT NULL,
+  domain TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL DEFAULT '{}',
+  pipedrive_organization_id INTEGER UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sales_company_aliases (
+  alias_type TEXT NOT NULL,
+  alias_value TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (alias_type, alias_value),
+  FOREIGN KEY (company_id) REFERENCES sales_companies(company_id)
+);
+
+CREATE TABLE IF NOT EXISTS sales_lead_events (
+  lead_event_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  crm_state TEXT NOT NULL DEFAULT 'local_review',
+  pipedrive_lead_id TEXT UNIQUE,
+  pipedrive_deal_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (company_id) REFERENCES sales_companies(company_id)
+);
+
+CREATE INDEX IF NOT EXISTS sales_lead_events_company_idx
+  ON sales_lead_events(company_id, crm_state);
+
+CREATE TABLE IF NOT EXISTS sales_recipients (
+  recipient_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  normalized_email TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  verification_status TEXT NOT NULL DEFAULT 'pending',
+  verification_policy_version TEXT NOT NULL DEFAULT '',
+  verification_reason TEXT NOT NULL DEFAULT '',
+  pipedrive_person_id INTEGER,
+  warmy_prospect_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (company_id, person_id),
+  FOREIGN KEY (company_id) REFERENCES sales_companies(company_id)
+);
+
+CREATE INDEX IF NOT EXISTS sales_recipients_email_idx
+  ON sales_recipients(normalized_email);
+CREATE INDEX IF NOT EXISTS sales_recipients_warmy_idx
+  ON sales_recipients(warmy_prospect_id);
+
+CREATE TABLE IF NOT EXISTS outreach_sequences (
+  sequence_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  campaign_protocol TEXT NOT NULL,
+  anchor_lead_event_id TEXT NOT NULL,
+  primary_recipient_id TEXT NOT NULL,
+  merge_hash TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  approval_state TEXT NOT NULL DEFAULT 'draft'
+    CHECK (approval_state IN ('draft', 'approved', 'enrolled', 'replied', 'superseded')),
+  eligibility_status TEXT NOT NULL DEFAULT 'review'
+    CHECK (eligibility_status IN ('ready', 'review', 'blocked')),
+  eligibility_reasons TEXT NOT NULL DEFAULT '[]',
+  approval_batch_id TEXT,
+  warmy_campaign_id TEXT,
+  warmy_mailbox_id TEXT,
+  pipedrive_deal_id INTEGER,
+  reply_disposition TEXT,
+  reply_received_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (company_id, campaign_protocol),
+  FOREIGN KEY (company_id) REFERENCES sales_companies(company_id),
+  FOREIGN KEY (anchor_lead_event_id) REFERENCES sales_lead_events(lead_event_id),
+  FOREIGN KEY (primary_recipient_id) REFERENCES sales_recipients(recipient_id)
+);
+
+CREATE TABLE IF NOT EXISTS outreach_sequence_events (
+  sequence_id TEXT NOT NULL,
+  lead_event_id TEXT NOT NULL,
+  event_role TEXT NOT NULL CHECK (event_role IN ('anchor', 'supporting')),
+  PRIMARY KEY (sequence_id, lead_event_id),
+  FOREIGN KEY (sequence_id) REFERENCES outreach_sequences(sequence_id),
+  FOREIGN KEY (lead_event_id) REFERENCES sales_lead_events(lead_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS approval_batches (
+  batch_id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  campaign_manifest_hash TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  approved_by TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS eligibility_decisions (
+  decision_id TEXT PRIMARY KEY,
+  subject_type TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ready', 'review', 'blocked', 'superseded')),
+  reasons TEXT NOT NULL DEFAULT '[]',
+  evidence TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS eligibility_decisions_subject_idx
+  ON eligibility_decisions(subject_type, subject_id, created_at);
+
+CREATE TABLE IF NOT EXISTS email_verifications (
+  normalized_email TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'valid', 'invalid', 'catch_all', 'unknown')),
+  reason TEXT NOT NULL DEFAULT '',
+  provider_payload TEXT NOT NULL DEFAULT '{}',
+  verified_at TEXT NOT NULL,
+  PRIMARY KEY (normalized_email, policy_version)
 );
 """
 
@@ -181,15 +321,97 @@ class Database:
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
         """Apply additive migrations for databases created by earlier previews."""
+        work_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='work_items'"
+        ).fetchone()
+        work_sql = str(work_sql_row["sql"] or "") if work_sql_row else ""
+        if work_sql and "superseded" not in work_sql:
+            conn.executescript(
+                """
+                ALTER TABLE work_items RENAME TO work_items_legacy;
+                CREATE TABLE work_items (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  kind TEXT NOT NULL,
+                  dedupe_key TEXT NOT NULL UNIQUE,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'running', 'completed', 'dead_letter', 'superseded')),
+                  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                  run_after TEXT NOT NULL,
+                  lease_owner TEXT,
+                  lease_until TEXT,
+                  last_error TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT
+                );
+                INSERT INTO work_items(
+                  id, kind, dedupe_key, payload, status, attempt_count, run_after,
+                  lease_owner, lease_until, last_error, created_at, updated_at,
+                  completed_at
+                )
+                SELECT id, kind, dedupe_key, payload, status, attempt_count, run_after,
+                       lease_owner, lease_until, last_error, created_at, updated_at,
+                       completed_at
+                FROM work_items_legacy;
+                DROP TABLE work_items_legacy;
+                CREATE INDEX work_items_ready_idx
+                  ON work_items(status, run_after, id);
+                """
+            )
+        operation_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='provider_operations'"
+        ).fetchone()
+        operation_sql = (
+            str(operation_sql_row["sql"] or "") if operation_sql_row else ""
+        )
+        if operation_sql and "uncertain" not in operation_sql:
+            conn.executescript(
+                """
+                ALTER TABLE provider_operations RENAME TO provider_operations_legacy;
+                CREATE TABLE provider_operations (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  provider TEXT NOT NULL,
+                  operation_key TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'started'
+                    CHECK (status IN ('started', 'completed', 'failed', 'uncertain')),
+                  request_payload TEXT NOT NULL DEFAULT '{}',
+                  response_payload TEXT NOT NULL DEFAULT '{}',
+                  external_id TEXT NOT NULL DEFAULT '',
+                  last_error TEXT NOT NULL DEFAULT '',
+                  lease_owner TEXT,
+                  lease_until TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT,
+                  UNIQUE (provider, operation_key)
+                );
+                INSERT INTO provider_operations(
+                  id, provider, operation_key, status, request_payload,
+                  response_payload, external_id, last_error, lease_owner,
+                  lease_until, created_at, updated_at, completed_at
+                )
+                SELECT id, provider, operation_key, status, request_payload,
+                       response_payload, external_id, last_error, lease_owner,
+                       lease_until, created_at, updated_at, completed_at
+                FROM provider_operations_legacy;
+                DROP TABLE provider_operations_legacy;
+                """
+            )
         additions = {
             "lead_mappings": {
                 "source_verification_status": "TEXT NOT NULL DEFAULT 'unknown'",
                 "source_verification_reason": "TEXT NOT NULL DEFAULT ''",
                 "source_provider": "TEXT NOT NULL DEFAULT ''",
+                "why_line": "TEXT NOT NULL DEFAULT ''",
             },
             "provider_operations": {
                 "lease_owner": "TEXT",
                 "lease_until": "TEXT",
+            },
+            "outreach_sequences": {
+                "reply_disposition": "TEXT",
+                "reply_received_at": "TEXT",
             },
         }
         for table, columns in additions.items():
@@ -327,7 +549,7 @@ class Database:
             conn.execute(
                 """UPDATE work_items
                    SET status='completed', completed_at=?, lease_owner=NULL,
-                       lease_until=NULL, updated_at=?
+                       lease_until=NULL, last_error='', updated_at=?
                    WHERE id=? AND lease_owner=? AND status='running'""",
                 (now, now, item_id, owner),
             )
@@ -408,13 +630,14 @@ class Database:
                        outreach_id, source_contact_candidate_id,
                        source_verification_status, source_verification_reason,
                        source_provider, email, lead_event_id,
-                       organization_id, person_id, pipedrive_organization_id,
+                       organization_id, person_id, why_line,
+                       pipedrive_organization_id,
                        pipedrive_person_id,
                        pipedrive_lead_id, pipedrive_deal_id, warmy_prospect_id,
                        warmy_campaign_id, warmy_mailbox_id, gmail_thread_id,
                        verification_status, reply_disposition, reply_received_at,
                        created_at, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(outreach_id) DO UPDATE SET
                        source_contact_candidate_id=excluded.source_contact_candidate_id,
                        source_verification_status=excluded.source_verification_status,
@@ -424,6 +647,7 @@ class Database:
                        lead_event_id=excluded.lead_event_id,
                        organization_id=excluded.organization_id,
                        person_id=excluded.person_id,
+                       why_line=excluded.why_line,
                        pipedrive_organization_id=COALESCE(
                            excluded.pipedrive_organization_id,
                            lead_mappings.pipedrive_organization_id),
@@ -466,6 +690,7 @@ class Database:
                     data["lead_event_id"],
                     data["organization_id"],
                     data["person_id"],
+                    data["why_line"],
                     data["pipedrive_organization_id"],
                     data["pipedrive_person_id"],
                     data["pipedrive_lead_id"],
@@ -490,6 +715,8 @@ class Database:
             "warmy_prospect_id",
             "pipedrive_lead_id",
             "pipedrive_deal_id",
+            "reply_disposition",
+            "reply_received_at",
         }
         if len(lookup) != 1 or next(iter(lookup)) not in allowed:
             raise ValueError("exactly one supported mapping lookup is required")
@@ -517,6 +744,7 @@ class Database:
             "source_verification_reason",
             "source_provider",
             "email",
+            "why_line",
             "pipedrive_organization_id",
             "pipedrive_person_id",
             "pipedrive_lead_id",
@@ -711,6 +939,18 @@ class Database:
                 (str(error)[:1000], _now(), provider, operation_key),
             )
 
+    def mark_operation_uncertain(
+        self, provider: str, operation_key: str, error: Exception
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE provider_operations
+                   SET status='uncertain', last_error=?, updated_at=?,
+                       lease_owner=NULL, lease_until=NULL
+                   WHERE provider=? AND operation_key=?""",
+                (str(error)[:1000], _now(), provider, operation_key),
+            )
+
     def get_state(self, key: str) -> dict[str, Any] | None:
         with self.connection() as conn:
             row = conn.execute(
@@ -745,3 +985,536 @@ class Database:
                        completed_at=excluded.completed_at""",
                 (run_id, source_file, discovered_count, enqueued_count, now, now),
             )
+
+    def upsert_company(self, company: CompanySync, *, source: str = "scout") -> None:
+        now = _now()
+        payload = company.model_dump(mode="json")
+        aliases = {
+            ("name", company.canonical_name.strip().casefold()),
+            *(("name", value.strip().casefold()) for value in company.aliases if value.strip()),
+            *(("legacy_id", value.strip()) for value in company.legacy_ids if value.strip()),
+        }
+        if company.domain.strip():
+            aliases.add(("domain", company.domain.strip().casefold()))
+        with self.connection(immediate=True) as conn:
+            existing = conn.execute(
+                "SELECT company_id FROM sales_companies WHERE company_id=?",
+                (company.company_id,),
+            ).fetchone()
+            if not existing:
+                for alias_type, alias_value in aliases:
+                    row = conn.execute(
+                        "SELECT company_id FROM sales_company_aliases WHERE alias_type=? AND alias_value=?",
+                        (alias_type, alias_value),
+                    ).fetchone()
+                    if row and row["company_id"] != company.company_id:
+                        raise ValueError(
+                            f"company alias {alias_type}:{alias_value} already belongs to {row['company_id']}"
+                        )
+            conn.execute(
+                """INSERT INTO sales_companies(
+                       company_id, canonical_name, domain, payload, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(company_id) DO UPDATE SET
+                       canonical_name=excluded.canonical_name,
+                       domain=CASE WHEN excluded.domain <> '' THEN excluded.domain ELSE sales_companies.domain END,
+                       payload=excluded.payload,
+                       updated_at=excluded.updated_at""",
+                (
+                    company.company_id,
+                    company.canonical_name,
+                    company.domain.strip().casefold(),
+                    _json(payload),
+                    now,
+                    now,
+                ),
+            )
+            for alias_type, alias_value in sorted(aliases):
+                conn.execute(
+                    """INSERT INTO sales_company_aliases(
+                           alias_type, alias_value, company_id, source, created_at
+                       ) VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(alias_type, alias_value) DO UPDATE SET
+                           source=excluded.source""",
+                    (alias_type, alias_value, company.company_id, source, now),
+                )
+
+    def resolve_company_alias(self, alias_type: str, alias_value: str) -> str | None:
+        normalized = (
+            alias_value.strip().casefold()
+            if alias_type in {"name", "domain"}
+            else alias_value.strip()
+        )
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT company_id FROM sales_company_aliases WHERE alias_type=? AND alias_value=?",
+                (alias_type, normalized),
+            ).fetchone()
+        return str(row["company_id"]) if row else None
+
+    def get_company(self, company_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sales_companies WHERE company_id=?",
+                (company_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def update_company(self, company_id: str, **fields: Any) -> None:
+        allowed = {"pipedrive_organization_id"}
+        bad = set(fields) - allowed
+        if bad or not fields:
+            raise ValueError(f"unsupported company fields: {sorted(bad)}")
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE sales_companies SET {assignments}, updated_at=? WHERE company_id=?",
+                (*fields.values(), _now(), company_id),
+            )
+
+    def upsert_lead_event(self, event: LeadEventSync) -> None:
+        now = _now()
+        crm_state = "ready" if event.crm_eligible else "local_review"
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO sales_lead_events(
+                       lead_event_id, company_id, run_id, payload, crm_state,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(lead_event_id) DO UPDATE SET
+                       company_id=excluded.company_id,
+                       run_id=excluded.run_id,
+                       payload=excluded.payload,
+                       crm_state=CASE
+                         WHEN sales_lead_events.pipedrive_deal_id IS NOT NULL THEN 'converted'
+                         ELSE excluded.crm_state END,
+                       updated_at=excluded.updated_at""",
+                (
+                    event.lead_event_id,
+                    event.company_id,
+                    event.run_id,
+                    _json(event.model_dump(mode="json")),
+                    crm_state,
+                    now,
+                    now,
+                ),
+            )
+
+    def update_lead_event(self, lead_event_id: str, **fields: Any) -> None:
+        allowed = {"crm_state", "pipedrive_lead_id", "pipedrive_deal_id"}
+        bad = set(fields) - allowed
+        if bad or not fields:
+            raise ValueError(f"unsupported lead event fields: {sorted(bad)}")
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE sales_lead_events SET {assignments}, updated_at=? WHERE lead_event_id=?",
+                (*fields.values(), _now(), lead_event_id),
+            )
+
+    def get_lead_event(self, lead_event_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sales_lead_events WHERE lead_event_id=?",
+                (lead_event_id,),
+            ).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        return value
+
+    def get_lead_event_by_pipedrive_id(self, pipedrive_lead_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sales_lead_events WHERE pipedrive_lead_id=?",
+                (pipedrive_lead_id,),
+            ).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        return value
+
+    def upsert_recipient(self, recipient: RecipientSync) -> None:
+        now = _now()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO sales_recipients(
+                       recipient_id, company_id, person_id, normalized_email,
+                       payload, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(recipient_id) DO UPDATE SET
+                       normalized_email=excluded.normalized_email,
+                       payload=excluded.payload,
+                       updated_at=excluded.updated_at""",
+                (
+                    recipient.recipient_id,
+                    recipient.company_id,
+                    recipient.person_id,
+                    recipient.email,
+                    _json(recipient.model_dump(mode="json")),
+                    now,
+                    now,
+                ),
+            )
+
+    def get_recipient(self, *, recipient_id: str = "", warmy_prospect_id: str = "") -> dict[str, Any] | None:
+        if bool(recipient_id) == bool(warmy_prospect_id):
+            raise ValueError("exactly one recipient lookup is required")
+        column, value = (
+            ("recipient_id", recipient_id)
+            if recipient_id
+            else ("warmy_prospect_id", warmy_prospect_id)
+        )
+        with self.connection() as conn:
+            row = conn.execute(
+                f"SELECT * FROM sales_recipients WHERE {column}=?",
+                (value,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def update_recipient(self, recipient_id: str, **fields: Any) -> None:
+        allowed = {
+            "verification_status",
+            "verification_policy_version",
+            "verification_reason",
+            "pipedrive_person_id",
+            "warmy_prospect_id",
+        }
+        bad = set(fields) - allowed
+        if bad or not fields:
+            raise ValueError(f"unsupported recipient fields: {sorted(bad)}")
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE sales_recipients SET {assignments}, updated_at=? WHERE recipient_id=?",
+                (*fields.values(), _now(), recipient_id),
+            )
+
+    def save_sequence(self, sequence: OutreachSequenceSync) -> None:
+        now = _now()
+        payload = sequence.model_dump(mode="json")
+        with self.connection(immediate=True) as conn:
+            prior = conn.execute(
+                "SELECT approval_state, anchor_lead_event_id, primary_recipient_id, merge_hash FROM outreach_sequences WHERE sequence_id=?",
+                (sequence.sequence_id,),
+            ).fetchone()
+            if prior and prior["approval_state"] != SequenceApprovalState.DRAFT.value:
+                immutable = (
+                    prior["anchor_lead_event_id"],
+                    prior["primary_recipient_id"],
+                    prior["merge_hash"],
+                )
+                incoming = (
+                    sequence.anchor_lead_event_id,
+                    sequence.primary_recipient_id,
+                    sequence.merge_hash,
+                )
+                if immutable != incoming:
+                    raise ValueError("approved outreach sequence is immutable")
+            conn.execute(
+                """INSERT INTO outreach_sequences(
+                       sequence_id, company_id, campaign_protocol,
+                       anchor_lead_event_id, primary_recipient_id, merge_hash,
+                       payload, eligibility_status, eligibility_reasons,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(sequence_id) DO UPDATE SET
+                       anchor_lead_event_id=CASE
+                         WHEN outreach_sequences.approval_state='draft'
+                         THEN excluded.anchor_lead_event_id
+                         ELSE outreach_sequences.anchor_lead_event_id END,
+                       primary_recipient_id=CASE
+                         WHEN outreach_sequences.approval_state='draft'
+                         THEN excluded.primary_recipient_id
+                         ELSE outreach_sequences.primary_recipient_id END,
+                       merge_hash=CASE
+                         WHEN outreach_sequences.approval_state='draft'
+                         THEN excluded.merge_hash
+                         ELSE outreach_sequences.merge_hash END,
+                       payload=excluded.payload,
+                       eligibility_status=excluded.eligibility_status,
+                       eligibility_reasons=excluded.eligibility_reasons,
+                       updated_at=excluded.updated_at""",
+                (
+                    sequence.sequence_id,
+                    sequence.company_id,
+                    sequence.campaign_protocol,
+                    sequence.anchor_lead_event_id,
+                    sequence.primary_recipient_id,
+                    sequence.merge_hash,
+                    _json(payload),
+                    sequence.eligibility_status.value,
+                    _json(sequence.eligibility_reasons),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM outreach_sequence_events WHERE sequence_id=?",
+                (sequence.sequence_id,),
+            )
+            conn.execute(
+                "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'anchor')",
+                (sequence.sequence_id, sequence.anchor_lead_event_id),
+            )
+            for lead_event_id in sorted(set(sequence.supporting_event_ids)):
+                if lead_event_id == sequence.anchor_lead_event_id:
+                    continue
+                conn.execute(
+                    "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'supporting')",
+                    (sequence.sequence_id, lead_event_id),
+                )
+
+    def get_sequence(self, sequence_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM outreach_sequences WHERE sequence_id=?",
+                (sequence_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        result["eligibility_reasons"] = json.loads(result["eligibility_reasons"])
+        return result
+
+    def update_sequence(self, sequence_id: str, **fields: Any) -> None:
+        allowed = {
+            "approval_state",
+            "eligibility_status",
+            "eligibility_reasons",
+            "approval_batch_id",
+            "warmy_campaign_id",
+            "warmy_mailbox_id",
+            "pipedrive_deal_id",
+            "reply_disposition",
+            "reply_received_at",
+            "merge_hash",
+            "payload",
+        }
+        bad = set(fields) - allowed
+        if bad or not fields:
+            raise ValueError(f"unsupported sequence fields: {sorted(bad)}")
+        normalized = {
+            key: _json(value) if key in {"eligibility_reasons", "payload"} else value
+            for key, value in fields.items()
+        }
+        assignments = ", ".join(f"{key}=?" for key in normalized)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE outreach_sequences SET {assignments}, updated_at=? WHERE sequence_id=?",
+                (*normalized.values(), _now(), sequence_id),
+            )
+
+    def get_sequence_for_prospect(
+        self, prospect_id: str, campaign_id: str = ""
+    ) -> dict[str, Any] | None:
+        sql = """SELECT s.* FROM outreach_sequences s
+                 JOIN sales_recipients r ON r.recipient_id=s.primary_recipient_id
+                 WHERE r.warmy_prospect_id=?"""
+        params: list[Any] = [prospect_id]
+        if campaign_id:
+            sql += " AND s.warmy_campaign_id=?"
+            params.append(campaign_id)
+        sql += " ORDER BY s.updated_at DESC LIMIT 1"
+        with self.connection() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        result["eligibility_reasons"] = json.loads(result["eligibility_reasons"])
+        return result
+
+    def get_sequence_for_event(self, lead_event_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT s.* FROM outreach_sequences s
+                   JOIN outreach_sequence_events e ON e.sequence_id=s.sequence_id
+                   WHERE e.lead_event_id=?
+                   ORDER BY s.updated_at DESC LIMIT 1""",
+                (lead_event_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        result["eligibility_reasons"] = json.loads(result["eligibility_reasons"])
+        return result
+
+    def sequence_events(self, sequence_id: str) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT e.event_role, l.*
+                   FROM outreach_sequence_events e
+                   JOIN sales_lead_events l ON l.lead_event_id=e.lead_event_id
+                   WHERE e.sequence_id=?
+                   ORDER BY CASE e.event_role WHEN 'anchor' THEN 0 ELSE 1 END,
+                            l.lead_event_id""",
+                (sequence_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["payload"] = json.loads(value["payload"])
+            result.append(value)
+        return result
+
+    def save_approval_batch(self, batch: ApprovalBatch) -> None:
+        if len(batch.sequence_ids) > batch.maximum_recipient_count:
+            raise ValueError("approval batch exceeds its recipient ceiling")
+        now = _now()
+        with self.connection(immediate=True) as conn:
+            existing = conn.execute(
+                "SELECT payload FROM approval_batches WHERE batch_id=?",
+                (batch.batch_id,),
+            ).fetchone()
+            serialized = _json(batch.model_dump(mode="json"))
+            if existing and existing["payload"] != serialized:
+                raise ValueError("approval batch is immutable")
+            for sequence_id in batch.sequence_ids:
+                row = conn.execute(
+                    "SELECT merge_hash, eligibility_status FROM outreach_sequences WHERE sequence_id=?",
+                    (sequence_id,),
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"approval references missing sequence {sequence_id}")
+                if row["eligibility_status"] != "ready":
+                    raise ValueError(f"sequence {sequence_id} is not ready")
+                if batch.merge_hashes.get(sequence_id) != row["merge_hash"]:
+                    raise ValueError(f"sequence {sequence_id} merge hash changed")
+            conn.execute(
+                """INSERT INTO approval_batches(
+                       batch_id, campaign_id, campaign_manifest_hash, payload,
+                       approved_by, approved_at, expires_at, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(batch_id) DO NOTHING""",
+                (
+                    batch.batch_id,
+                    batch.campaign_id,
+                    batch.campaign_manifest_hash,
+                    serialized,
+                    batch.approved_by,
+                    batch.approved_at.astimezone(UTC).isoformat(),
+                    batch.expires_at.astimezone(UTC).isoformat(),
+                    now,
+                ),
+            )
+            for sequence_id in batch.sequence_ids:
+                conn.execute(
+                    """UPDATE outreach_sequences
+                       SET approval_state='approved', approval_batch_id=?, updated_at=?
+                       WHERE sequence_id=? AND approval_state='draft'""",
+                    (batch.batch_id, now, sequence_id),
+                )
+
+    def valid_approval_for_sequence(
+        self,
+        sequence_id: str,
+        *,
+        campaign_id: str,
+        campaign_manifest_hash: str,
+    ) -> bool:
+        now = _now()
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT s.merge_hash, s.approval_state, b.payload
+                   FROM outreach_sequences s
+                   JOIN approval_batches b ON b.batch_id=s.approval_batch_id
+                   WHERE s.sequence_id=? AND b.campaign_id=?
+                     AND b.campaign_manifest_hash=? AND b.revoked_at IS NULL
+                     AND b.expires_at>?""",
+                (sequence_id, campaign_id, campaign_manifest_hash, now),
+            ).fetchone()
+        if not row or row["approval_state"] != SequenceApprovalState.APPROVED.value:
+            return False
+        batch = ApprovalBatch.model_validate(json.loads(row["payload"]))
+        return (
+            sequence_id in batch.sequence_ids
+            and batch.merge_hashes.get(sequence_id) == row["merge_hash"]
+            and len(batch.sequence_ids) <= batch.maximum_recipient_count
+        )
+
+    def cache_email_verification(
+        self,
+        email: str,
+        policy_version: str,
+        status: str,
+        reason: str,
+        provider_payload: dict[str, Any],
+    ) -> None:
+        normalized = email.strip().casefold()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO email_verifications(
+                       normalized_email, policy_version, status, reason,
+                       provider_payload, verified_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(normalized_email, policy_version) DO UPDATE SET
+                       status=excluded.status, reason=excluded.reason,
+                       provider_payload=excluded.provider_payload,
+                       verified_at=excluded.verified_at""",
+                (normalized, policy_version, status, reason, _json(provider_payload), _now()),
+            )
+
+    def get_email_verification(self, email: str, policy_version: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT status, reason, provider_payload, verified_at
+                   FROM email_verifications
+                   WHERE normalized_email=? AND policy_version=?""",
+                (email.strip().casefold(), policy_version),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["provider_payload"] = json.loads(result["provider_payload"])
+        return result
+
+    def record_eligibility_decision(
+        self,
+        decision_id: str,
+        subject_type: str,
+        subject_id: str,
+        status: str,
+        reasons: list[str],
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO eligibility_decisions(
+                       decision_id, subject_type, subject_id, status, reasons,
+                       evidence, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    decision_id,
+                    subject_type,
+                    subject_id,
+                    status,
+                    _json(reasons),
+                    _json(evidence or {}),
+                    _now(),
+                ),
+            )
+
+    def supersede_work(self, work_id: int, reason: str) -> bool:
+        now = _now()
+        with self.connection(immediate=True) as conn:
+            cursor = conn.execute(
+                """UPDATE work_items
+                   SET status='superseded', completed_at=?, lease_owner=NULL,
+                       lease_until=NULL, last_error=?, updated_at=?
+                   WHERE id=? AND status IN ('pending', 'running')""",
+                (now, reason[:1000], now, work_id),
+            )
+        return cursor.rowcount > 0

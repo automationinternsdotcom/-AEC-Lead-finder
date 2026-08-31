@@ -8,16 +8,17 @@ The canonical daily command is:
 uv run scout/pipeline.py
 ```
 
-The V2 pipeline runs eight resumable in-process stages:
+The V2 pipeline runs nine resumable in-process stages:
 
 1. Curated-site and validated-feed discovery.
 2. Typed qualification with review quarantine.
 3. Exact and coverage-checked fuzzy event deduplication.
-4. Organization-grouped decision-maker research.
-5. Person-grouped contact research and verification.
-6. Optional, authorization-gated Apollo fallback.
-7. Complete-ID scoring.
-8. Compatibility CSV/HTML and auditable JSONL export.
+4. Sourced, approved-template why-line generation for LinkedIn and first-email outreach.
+5. Organization-grouped decision-maker research.
+6. Person-grouped contact research and verification.
+7. Optional, authorization-gated Apollo fallback.
+8. Complete-ID scoring.
+9. Compatibility CSV/HTML and auditable JSONL export.
 
 Each run persists stage state, raw/final artifacts, and a manifest under
 `results/<day>/runs/<run_id>/`. Use `--run-id ID --resume` to continue a run.
