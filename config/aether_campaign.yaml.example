@@ -1,0 +1,47 @@
+name: Aether AEC Evergreen Outreach
+description: Person-level outreach for qualified Arizona AEC opportunities.
+channel: email
+timezone: America/Phoenix
+dailySendLimit: 150
+sendingWindowStart: 8
+sendingWindowEnd: 16
+scheduleDays: [1, 2, 3, 4, 5]
+stopOnReply: true
+stopOnBounce: true
+stopOnUnsubscribe: true
+trackOpens: false
+trackClicks: false
+mailboxIds: []
+steps:
+  - stepIndex: 0
+    type: email
+    subject: TODO_APPROVED_COPY_DAY_0_SUBJECT
+    bodyHtml: "<p>TODO_APPROVED_COPY_DAY_0_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
+    bodyText: "TODO_APPROVED_COPY_DAY_0_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
+    delayDays: 0
+    delayHours: 0
+    isActive: true
+  - stepIndex: 1
+    type: email
+    subject: TODO_APPROVED_COPY_DAY_3_SUBJECT
+    bodyHtml: "<p>TODO_APPROVED_COPY_DAY_3_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
+    bodyText: "TODO_APPROVED_COPY_DAY_3_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
+    delayDays: 3
+    delayHours: 0
+    isActive: true
+  - stepIndex: 2
+    type: email
+    subject: TODO_APPROVED_COPY_DAY_7_SUBJECT
+    bodyHtml: "<p>TODO_APPROVED_COPY_DAY_7_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
+    bodyText: "TODO_APPROVED_COPY_DAY_7_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
+    delayDays: 7
+    delayHours: 0
+    isActive: true
+  - stepIndex: 3
+    type: email
+    subject: TODO_APPROVED_COPY_DAY_14_SUBJECT
+    bodyHtml: "<p>TODO_APPROVED_COPY_DAY_14_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
+    bodyText: "TODO_APPROVED_COPY_DAY_14_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
+    delayDays: 14
+    delayHours: 0
+    isActive: true

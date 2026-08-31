@@ -7,15 +7,21 @@
 The CLI remains the compatibility boundary used by local and GitHub automation.
 All stages run in-process and persist resumable state before the next begins.
 """
+
 from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from datetime import date, timedelta
+from pathlib import Path
+
+from v2.orchestrator import PipelineOptions, PipelineRunner
 
 import config
-from v2.orchestrator import PipelineOptions, PipelineRunner
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parser() -> argparse.ArgumentParser:
@@ -27,7 +33,9 @@ def parser() -> argparse.ArgumentParser:
         default=0,
         help="accepted for GPS CLI compatibility; curated AEC discovery remains Arizona-only",
     )
-    value.add_argument("--apollo-go", action="store_true", help="authorize billable Apollo lookups")
+    value.add_argument(
+        "--apollo-go", action="store_true", help="authorize billable Apollo lookups"
+    )
     value.add_argument(
         "--apollo-phones",
         action="store_true",
@@ -39,17 +47,27 @@ def parser() -> argparse.ArgumentParser:
         default=0,
         help="qualify at most N new candidates; deferred candidates enter review (0 = no limit)",
     )
-    value.add_argument("--since", default=(date.today() - timedelta(days=1)).isoformat())
+    value.add_argument(
+        "--since", default=(date.today() - timedelta(days=1)).isoformat()
+    )
     value.add_argument("--stamp", default=date.today().isoformat())
     value.add_argument("--run-id", default="", help="persistent UUID for resume/retry")
-    value.add_argument("--resume", action="store_true", help="resume an existing --run-id")
+    value.add_argument(
+        "--resume", action="store_true", help="resume an existing --run-id"
+    )
     value.add_argument(
         "--retry-review",
         action="store_true",
         help="retry eligible quarantined records while resuming",
     )
-    value.add_argument("--newsapi", action="store_true", help="manually enable the NewsAPI adapter")
-    value.add_argument("--apify", action="store_true", help="manually enable the Apify/Facebook adapter")
+    value.add_argument(
+        "--newsapi", action="store_true", help="manually enable the NewsAPI adapter"
+    )
+    value.add_argument(
+        "--apify",
+        action="store_true",
+        help="manually enable the Apify/Facebook adapter",
+    )
     return value
 
 
@@ -79,12 +97,53 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         result = PipelineRunner(options).run()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports stage failures
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(f"run_id={result.run_id}", file=sys.stderr)
     print(f"manifest={result.manifest_path}", file=sys.stderr)
+    if _flag("AETHER_INTEGRATION_ENABLED"):
+        print("== sales handoff: enqueue V2 contacts ==", file=sys.stderr)
+        try:
+            enqueue_sales_handoff(result)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        except subprocess.CalledProcessError as exc:
+            print(
+                f"ERROR: sales handoff failed with exit {exc.returncode}",
+                file=sys.stderr,
+            )
+            return 1
     return 0
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def enqueue_sales_handoff(result, *, run=subprocess.run) -> None:
+    """Pass V2's exact exported contacts path and UUID to the sales boundary."""
+    contacts_path = result.paths.get("contacts", "")
+    if not contacts_path:
+        raise ValueError("V2 export did not return a contacts path")
+    run(
+        [
+            "uv",
+            "run",
+            "--project",
+            str(REPO_ROOT),
+            "python",
+            "-m",
+            "integration.cli",
+            "enqueue-contacts",
+            contacts_path,
+            "--run-id",
+            result.run_id,
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 if __name__ == "__main__":

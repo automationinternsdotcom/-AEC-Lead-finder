@@ -17,14 +17,17 @@ exec >>"$LOG" 2>&1
 echo "===== Aether scout nightly run: $(date) ====="
 echo "runner=$RUNNER env=$AETHER_ENV"
 
+UV_ENV_ARGS=()
 if [ -f "$AETHER_ENV" ]; then
-  set -a; source "$AETHER_ENV"; set +a
+  UV_ENV_ARGS=(--env-file "$AETHER_ENV")
 else
   echo "WARN: env file not found: $AETHER_ENV"
 fi
 
 cd "$RUNNER"
-uv run scout/pipeline.py "$@"
+set +e
+uv run "${UV_ENV_ARGS[@]}" scout/pipeline.py "$@"
 RC=$?
+set -e
 echo "===== scout pipeline exit=$RC done: $(date) ====="
 exit "$RC"

@@ -19,9 +19,11 @@ The one intentional difference is discovery:
 - GPS discovers articles through Google News and provider expansion.
 - Aether AEC discovers articles from the curated root file `news_websites.csv`.
 
-The active V2 pipeline does not push to Pipedrive or send mail. It writes compatibility
-CSV/HTML outputs plus typed JSONL, raw responses, stage state, and an auditable run
-manifest. Comparison delivery is a separate exactly-once Gmail command.
+The active V2 pipeline writes compatibility CSV/HTML outputs plus typed JSONL, raw
+responses, stage state, and an auditable run manifest. Provider writes are off by
+default. When `AETHER_INTEGRATION_ENABLED=true` on the persistent Mac, a successful V2
+export enqueues stable event/person outreach records for the separate sales worker.
+Comparison delivery remains a separate exactly-once Gmail command.
 
 ## Folder Layout
 
@@ -36,6 +38,9 @@ manifest. Comparison delivery is a separate exactly-once Gmail command.
 | `check.sh` | Fast local self-checks for the `scout/` modules. |
 | `run-nightly.sh` | Local LaunchAgent wrapper around `uv run scout/pipeline.py`. |
 | `scout/v2/` | Typed services, SQLite state, artifacts, migration, comparison, and promotion gates. |
+| `integration/` | Mac-local Warmy, Gmail, Pipedrive, webhook, and SQLite worker service. |
+| `infra/macos/` | LaunchAgent templates and Mac-local operating instructions. |
+| `config/` | Inactive Warmy campaign and Pipedrive automation specifications. |
 | `pipeline/` | Deprecated historical AEC/Pipedrive path. Canonical Scout code does not import it. |
 
 ## Requirements
@@ -137,6 +142,37 @@ uv run scout/pipeline.py --apify
 ```
 
 Apollo credits are only spent when `--apollo-go` is present.
+
+## Sales automation integration
+
+The integration stays outside Scout's authoritative database:
+
+```text
+V2 export -> aether_sales.sqlite -> Pipedrive Lead + Warmy prospect
+Warmy reply -> original Gmail mailbox -> Jordan -> Pipedrive review task
+Jordan disposition -> positive Deal conversion or permanent suppression
+```
+
+V2's `lead_event_id + person_id` form the durable outreach identity. The selected
+`contact_candidate_id` remains provenance, so a later Apollo/model selection or email
+change does not create another Pipedrive Lead for the same event and person. Warmy
+prospects are reused by normalized email, but only one outreach record is the active
+reply route for a prospect. Material contact corrections enqueue a new revision,
+reconcile the Pipedrive record, and suppress the superseded address.
+
+Run the default-off configuration check:
+
+```bash
+uv run python -m integration.cli doctor
+```
+
+Enrollment remains deferred until every activation check passes and the configured
+live Warmy campaign matches the approved mailbox, limit, step, and stop settings.
+
+The GitHub workflow intentionally leaves the handoff disabled. The persistent Mac's
+`run-nightly.sh` owns both Scout execution and enqueueing. See
+[`infra/macos/README.md`](infra/macos/README.md) for launchd, public HTTPS tunnel,
+health-check, and backup instructions.
 
 ## Pipeline Stages
 
