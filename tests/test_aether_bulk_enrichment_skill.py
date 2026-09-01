@@ -1156,6 +1156,37 @@ def _qualification_candidate(index: int) -> DiscoveryCandidate:
     )
 
 
+def _save_score_events(runner: BulkRunner, count: int) -> list[LeadEvent]:
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    runner.state.save_organization(
+        Organization(organization_id="org-score", canonical_name="Score Company")
+    )
+    events = []
+    for index in range(count):
+        candidate = _qualification_candidate(index)
+        runner.state.save_candidate(candidate)
+        event = LeadEvent(
+            lead_event_id=f"event-{index:03d}",
+            run_id="bulk-run",
+            organization_id="org-score",
+            primary_candidate_id=candidate.candidate_id,
+            supporting_candidate_ids=[candidate.candidate_id],
+            event=f"Opened commercial property {index}",
+            location="Phoenix",
+            date_posted=datetime(2026, 8, 1).date(),
+            summary=f"Commercial property opening {index}.",
+            priority="high",
+            property_type="commercial",
+            service_angle="Support the operating property.",
+            evidence=[Evidence(url=candidate.canonical_url, supports="Opening")],
+        )
+        runner.state.save_lead_event(event)
+        events.append(event)
+    return events
+
+
 @pytest.mark.parametrize("contract_failure", ["missing", "typo"])
 def test_bulk_qualification_recovers_peers_from_one_bad_id(
     tmp_path, contract_failure
@@ -1355,6 +1386,180 @@ def test_bulk_qualification_recovery_is_call_bounded_ordered_and_idempotent(tmp_
         ).fetchone()[0]
     assert attempt_count == len(first_order)
     assert len(runner.state.reviews_for_run("bulk-run")) == len(candidates)
+
+
+def test_bulk_scoring_recovers_valid_peers_when_three_ids_are_missing(tmp_path):
+    calls = []
+    missing_ids = {"event-007", "event-021", "event-039"}
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Events:\n", 1)[1])
+        ids = [row["lead_event_id"] for row in rows]
+        calls.append(ids)
+        return json.dumps(
+            {event_id: 80 for event_id in ids if event_id not in missing_ids}
+        ), {"input_tokens": len(rows), "output_tokens": 1}
+
+    runner = BulkRunner(
+        options(tmp_path, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    _save_score_events(runner, 40)
+
+    assert runner._score() == {
+        "submitted": 40,
+        "pending": 40,
+        "batches": 1,
+        "scored": 37,
+        "reviews": 3,
+    }
+    scores = {
+        item.lead_event_id: item.score
+        for item in runner.state.scores_for_run("bulk-run")
+    }
+    assert len(scores) == 37
+    assert set(scores).isdisjoint(missing_ids)
+    assert set(scores.values()) == {80}
+    assert {
+        item.record_id for item in runner.state.reviews_for_run("bulk-run")
+    } == missing_ids
+    assert all([event_id] in calls for event_id in missing_ids)
+    assert all(
+        Path(item.raw_artifact_path).read_text() == "{}"
+        for item in runner.state.reviews_for_run("bulk-run")
+    )
+    assert calls[0] == [f"event-{index:03d}" for index in range(40)]
+    assert len(calls) <= bulk_lib.MAX_SCORE_RECOVERY_CALLS
+    with runner.state.connect() as conn:
+        attempts = list(
+            conn.execute(
+                "SELECT status, token_usage_json, request_artifact_path, "
+                "response_artifact_path FROM v2_provider_attempts "
+                "WHERE run_id=? AND stage='score'",
+                ("bulk-run",),
+            )
+        )
+    assert len(attempts) == len(calls)
+    assert sum(
+        json.loads(row["token_usage_json"])["input_tokens"] for row in attempts
+    ) == sum(len(ids) for ids in calls)
+    assert all(Path(row["request_artifact_path"]).is_file() for row in attempts)
+    assert all(Path(row["response_artifact_path"]).is_file() for row in attempts)
+    assert {row["status"] for row in attempts} == {"completed", "review"}
+
+
+def test_bulk_scoring_value_errors_are_candidate_local(tmp_path):
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Events:\n", 1)[1])
+        ids = [row["lead_event_id"] for row in rows]
+        return json.dumps(
+            {
+                ids[0]: 75,
+                ids[1]: True,
+                ids[2]: 101,
+                ids[3]: 52.5,
+            }
+        ), {"input_tokens": 4}
+
+    runner = BulkRunner(
+        options(tmp_path, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    _save_score_events(runner, 4)
+
+    assert runner._score() == {
+        "submitted": 4,
+        "pending": 4,
+        "batches": 1,
+        "scored": 1,
+        "reviews": 3,
+    }
+    assert [item.lead_event_id for item in runner.state.scores_for_run("bulk-run")] == [
+        "event-000"
+    ]
+    reviews = runner.state.reviews_for_run("bulk-run")
+    assert {item.record_id for item in reviews} == {
+        "event-001", "event-002", "event-003"
+    }
+    assert all(item.raw_artifact_path for item in reviews)
+    with runner.state.connect() as conn:
+        attempts = list(
+            conn.execute(
+                "SELECT status, token_usage_json FROM v2_provider_attempts "
+                "WHERE run_id=? AND stage='score'",
+                ("bulk-run",),
+            )
+        )
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "review"
+    assert json.loads(attempts[0]["token_usage_json"]) == {"input_tokens": 4}
+
+
+def test_bulk_scoring_transport_error_does_not_split_batch(tmp_path):
+    calls = 0
+
+    def model_call(model, prompt, tools):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("provider unavailable")
+
+    runner = BulkRunner(
+        options(tmp_path, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    _save_score_events(runner, 40)
+
+    assert runner._score()["reviews"] == 40
+    assert calls == 1
+    with runner.state.connect() as conn:
+        attempts = list(
+            conn.execute(
+                "SELECT response_artifact_path, error_json "
+                "FROM v2_provider_attempts WHERE run_id=? AND stage='score'",
+                ("bulk-run",),
+            )
+        )
+    assert len(attempts) == 1
+    assert attempts[0]["response_artifact_path"] == ""
+    assert json.loads(attempts[0]["error_json"])["type"] == "RuntimeError"
+
+
+def test_bulk_scoring_recovery_is_call_bounded_ordered_and_idempotent(tmp_path):
+    calls = []
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Events:\n", 1)[1])
+        calls.append([row["lead_event_id"] for row in rows])
+        return "not json", {"input_tokens": 1}
+
+    runner = BulkRunner(
+        options(tmp_path, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    events = _save_score_events(runner, 45)
+
+    first = runner._score_batch(events)
+    first_order = list(calls)
+    second = runner._score_batch(events)
+    second_order = calls[len(first_order):]
+
+    assert first == second == {"scored": 0, "reviews": 45}
+    assert len(first_order) == bulk_lib.MAX_SCORE_RECOVERY_CALLS == 79
+    assert second_order == first_order
+    assert first_order[0] == [item.lead_event_id for item in events]
+    assert first_order[1] == [item.lead_event_id for item in events[:22]]
+    with runner.state.connect() as conn:
+        attempt_count = conn.execute(
+            "SELECT COUNT(*) FROM v2_provider_attempts "
+            "WHERE run_id=? AND stage='score'",
+            ("bulk-run",),
+        ).fetchone()[0]
+    assert attempt_count == len(first_order)
+    assert len(runner.state.reviews_for_run("bulk-run")) == len(events)
 
 
 def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_path):
