@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -431,7 +432,10 @@ def test_approval_batch_releases_only_the_named_sequence(tmp_path):
             warmy_prospect_id=f"prospect-{number}",
         )
     campaign = _campaign()
-    settings = _activation_settings(campaign)
+    settings = replace(_activation_settings(campaign), campaign_start_enabled=False)
+    campaign.pop("mailboxIds")
+    assert settings.campaign_enrollment_ready
+    assert not settings.campaign_activation_ready
     now = datetime.now(UTC)
     db.save_approval_batch(
         ApprovalBatch(
@@ -455,6 +459,45 @@ def test_approval_batch_releases_only_the_named_sequence(tmp_path):
         workflows.enroll_sequence({"sequence_id": "sequence-2"})
     assert ("enroll", "prospect-1") in warmy.calls
     assert ("enroll", "prospect-2") not in warmy.calls
+    assert db.get_state(
+        "warmy:campaign:mailbox-verification:campaign-1"
+    ) == {
+        "status": "not_returned",
+        "requires_ui_check": True,
+        "reason": "Warmy readback omitted mailboxIds/mailboxes; verify in the UI",
+    }
+
+
+@pytest.mark.parametrize("status", ["scheduled", "running"])
+def test_sequence_enrollment_rejects_sendable_campaign_status_without_start(
+    tmp_path, status
+):
+    campaign = _campaign()
+    campaign["status"] = status
+    settings = replace(_activation_settings(campaign), campaign_start_enabled=False)
+    workflows = SalesWorkflows(
+        settings,
+        Database(tmp_path / f"{status}.sqlite"),
+        warmy=FakeWarmy(campaign=campaign),
+        pipedrive=FakePipedrive(),
+    )
+
+    with pytest.raises(ActivationBlocked, match=f"unsafe campaign status {status}"):
+        workflows._validate_live_campaign(
+            {"data": campaign}, for_enrollment=True
+        )
+
+
+def test_live_campaign_validation_rejects_present_mailbox_mismatch(tmp_path):
+    campaign = _campaign()
+    campaign["mailboxIds"] = ["mailbox-other"]
+    settings = replace(_activation_settings(_campaign()), campaign_start_enabled=False)
+    workflows = SalesWorkflows(settings, Database(tmp_path / "mismatch.sqlite"))
+
+    with pytest.raises(ActivationBlocked, match="mailbox set mismatch"):
+        workflows._validate_live_campaign(
+            {"data": campaign}, for_enrollment=True
+        )
 
 
 def test_typed_sequence_reply_forwards_original_message_to_jordan(tmp_path):

@@ -49,7 +49,7 @@ def test_daily_why_line_uses_the_approved_linkedin_template():
     rendered = parse_why_lines(json.dumps(payload), [event], organizations)["event-1"]
     assert rendered["status"] == "valid"
     assert rendered["why_line"] == (
-        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "Hi [first name], I wanted to reach out after seeing on the news that "
         "Southwest Value Partners took ownership of Esplanade III in Phoenix. Is "
         "there any chance we could stay in touch regarding your future janitorial needs?"
     )

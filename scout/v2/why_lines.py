@@ -23,62 +23,62 @@ WHY_QUESTION_ADDITIONAL_SPACE = (
 )
 WHY_TEMPLATES = {
     "acquisition": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} took ownership of {property} in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} took ownership of {property} in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("company", "property", "location"),
     },
     "opening": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is opening in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {property} is opening in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("property", "location"),
     },
     "planned_development": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that plans are moving forward for {project} in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that plans are moving forward for {project} in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
     },
     "approval": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} received {approval}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} received {approval}."
         + WHY_QUESTION_FUTURE,
         "slots": ("project", "approval"),
     },
     "construction_start": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that construction started on {project} in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that construction started on {project} in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
     },
     "lease_relocation": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is preparing to occupy {property} in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} is preparing to occupy {property} in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("company", "property", "location"),
     },
     "site_acquisition": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} acquired {site} in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} acquired {site} in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("company", "site", "location"),
     },
     "expansion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is expanding in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} is expanding in {location}."
         + WHY_QUESTION_ADDITIONAL_SPACE,
         "slots": ("company", "location"),
     },
     "funded_facility": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {funding} is supporting {project_or_expansion}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {funding} is supporting {project_or_expansion}."
         + WHY_QUESTION_FUTURE,
         "slots": ("funding", "project_or_expansion"),
     },
     "renovation_conversion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is being renovated into {new_use}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {property} is being renovated into {new_use}."
         + WHY_QUESTION_REVIEW,
         "slots": ("property", "new_use"),
     },
     "construction_progress": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} reached {milestone}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} reached {milestone}."
         + WHY_QUESTION_FUTURE,
         "slots": ("project", "milestone"),
     },
     "completion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} was completed in {location}."
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} was completed in {location}."
         + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
     },
@@ -296,7 +296,7 @@ def parse_why_lines(
         line = str(template["text"]).format(**values)
         if (
             not line.startswith(
-                "Hi [first name] just wanted to reach out since I saw on the news that "
+                "Hi [first name], I wanted to reach out after seeing on the news that "
             )
             or not line.endswith("?")
             or ". Is there" not in line

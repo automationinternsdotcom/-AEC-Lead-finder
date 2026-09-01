@@ -196,6 +196,10 @@ class Settings:
     def campaign_activation_ready(self) -> bool:
         return not self.campaign_activation_missing()
 
+    @property
+    def campaign_enrollment_ready(self) -> bool:
+        return not self.campaign_enrollment_missing()
+
     def require_provider_writes(self) -> None:
         if not self.provider_writes_enabled:
             raise ActivationBlocked("provider writes are disabled")
@@ -208,13 +212,24 @@ class Settings:
             )
 
     def campaign_activation_missing(self) -> list[str]:
+        missing = self.campaign_enrollment_missing()
+        if not self.campaign_start_enabled:
+            missing.insert(2, "CAMPAIGN_START_ENABLED")
+        return missing
+
+    def require_campaign_enrollment(self) -> None:
+        missing = self.campaign_enrollment_missing()
+        if missing:
+            raise ActivationBlocked(
+                "campaign enrollment blocked: " + ", ".join(missing)
+            )
+
+    def campaign_enrollment_missing(self) -> list[str]:
         missing: list[str] = []
         if not self.provider_writes_enabled:
             missing.append("PROVIDER_WRITES_ENABLED")
         if not self.warmy_enrollment_enabled:
             missing.append("WARMY_ENROLLMENT_ENABLED")
-        if not self.campaign_start_enabled:
-            missing.append("CAMPAIGN_START_ENABLED")
         if not self.email_templates_approved:
             missing.append("EMAIL_TEMPLATES_APPROVED")
         if not self.pipedrive_automation_ready:

@@ -28,62 +28,62 @@ WHY_QUESTION_ADDITIONAL_SPACE = (
 WHY_SHORT_REFERENCE_SLOTS = {"company", "project", "project_or_expansion"}
 WHY_TEMPLATES = {
     "acquisition": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} took ownership of {property} in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} took ownership of {property} in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("company", "property", "location"),
         "sendable": True,
     },
     "opening": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is opening in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {property} is opening in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("property", "location"),
         "sendable": True,
     },
     "planned_development": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that plans are moving forward for {project} in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that plans are moving forward for {project} in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
         "sendable": True,
     },
     "approval": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} received {approval}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} received {approval}." + WHY_QUESTION_FUTURE,
         "slots": ("project", "approval"),
         "sendable": True,
     },
     "construction_start": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that construction started on {project} in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that construction started on {project} in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
         "sendable": True,
     },
     "lease_relocation": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is preparing to occupy {property} in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} is preparing to occupy {property} in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("company", "property", "location"),
         "sendable": True,
     },
     "site_acquisition": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} acquired {site} in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} acquired {site} in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("company", "site", "location"),
         "sendable": True,
     },
     "expansion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {company} is expanding in {location}." + WHY_QUESTION_ADDITIONAL_SPACE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {company} is expanding in {location}." + WHY_QUESTION_ADDITIONAL_SPACE,
         "slots": ("company", "location"),
         "sendable": True,
     },
     "funded_facility": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {funding} is supporting {project_or_expansion}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {funding} is supporting {project_or_expansion}." + WHY_QUESTION_FUTURE,
         "slots": ("funding", "project_or_expansion"),
         "sendable": True,
     },
     "renovation_conversion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {property} is being renovated into {new_use}." + WHY_QUESTION_REVIEW,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {property} is being renovated into {new_use}." + WHY_QUESTION_REVIEW,
         "slots": ("property", "new_use"),
         "sendable": True,
     },
     "construction_progress": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} reached {milestone}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} reached {milestone}." + WHY_QUESTION_FUTURE,
         "slots": ("project", "milestone"),
         "sendable": True,
     },
     "completion": {
-        "text": "Hi [first name] just wanted to reach out since I saw on the news that {project} was completed in {location}." + WHY_QUESTION_FUTURE,
+        "text": "Hi [first name], I wanted to reach out after seeing on the news that {project} was completed in {location}." + WHY_QUESTION_FUTURE,
         "slots": ("project", "location"),
         "sendable": True,
     },
@@ -202,7 +202,7 @@ def parse_why_line_selection(
                 errors.append("why_line_dash")
             if _sentence_count(text) != 2 or not text.endswith("?"):
                 errors.append("why_line_sentence_count")
-            prefix = "Hi [first name] just wanted to reach out since I saw on the news that "
+            prefix = "Hi [first name], I wanted to reach out after seeing on the news that "
             if not text.startswith(prefix):
                 errors.append("why_line_opener")
             company_references = [slots["company"]] if slots.get("company") else []

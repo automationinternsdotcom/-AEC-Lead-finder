@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .config import ActivationBlocked, Settings
 
 COPY_PLACEHOLDER = "TODO_APPROVED_COPY"
+BODY_MERGE_VARIABLES = {"firstName", "company", "whyLine", "unsubscribeUrl"}
+SUBJECT_MERGE_VARIABLES = {"firstName", "company"}
 
 
 class CampaignStep(BaseModel):
@@ -67,10 +69,18 @@ class CampaignManifest(BaseModel):
             raise ValueError("campaign sending window must be 08:00–16:00")
         if not all((self.stopOnReply, self.stopOnBounce, self.stopOnUnsubscribe)):
             raise ValueError("reply, bounce, and unsubscribe stops are mandatory")
-        if [step.delayDays for step in self.steps] != [0, 3, 7, 14]:
-            raise ValueError("campaign delays must be day 0, 3, 7, and 14")
+        if [step.delayDays for step in self.steps] != [0, 3, 4, 7]:
+            raise ValueError(
+                "campaign delays must be relative step offsets 0, 3, 4, and 7"
+            )
         if [step.stepIndex for step in self.steps] != [0, 1, 2, 3]:
             raise ValueError("campaign step indexes must be 0 through 3")
+        if any(not step.isActive for step in self.steps):
+            raise ValueError("all campaign steps must be active")
+        if any(step.delayHours != 0 for step in self.steps):
+            raise ValueError("campaign step delayHours must be zero")
+        if len(set(self.mailboxIds)) != len(self.mailboxIds):
+            raise ValueError("campaign mailbox IDs must be unique")
         return self
 
 
@@ -106,15 +116,53 @@ def load_campaign(path: str | Path, settings: Settings) -> CampaignManifest:
             raise ActivationBlocked(
                 f"step {step.stepIndex} is missing the unsubscribe link"
             )
-        variables = set(
-            re.findall(r"\{\{\s*([A-Za-z][A-Za-z0-9]*)\s*\}\}", step.bodyHtml + step.bodyText)
-        )
-        unsupported = variables - {"firstName", "company", "whyLine", "unsubscribeUrl"}
+        variables: set[str] = set()
+        for body in (step.bodyHtml, step.bodyText):
+            found, malformed = _merge_variables(body)
+            if malformed:
+                raise ActivationBlocked(
+                    f"step {step.stepIndex} has malformed merge variables"
+                )
+            variables.update(found)
+        unsupported = variables - BODY_MERGE_VARIABLES
         if unsupported:
             raise ActivationBlocked(
                 f"step {step.stepIndex} has unsupported merge variables: {sorted(unsupported)}"
             )
+        subject_variables, malformed_subject = _merge_variables(step.subject)
+        if malformed_subject:
+            raise ActivationBlocked(
+                f"step {step.stepIndex} subject has malformed merge variables"
+            )
+        unsupported_subject = subject_variables - SUBJECT_MERGE_VARIABLES
+        if unsupported_subject:
+            raise ActivationBlocked(
+                f"step {step.stepIndex} subject has unsupported merge variables: "
+                f"{sorted(unsupported_subject)}"
+            )
     return manifest
+
+
+def _merge_variables(value: str) -> tuple[set[str], bool]:
+    """Extract simple merge names and reject filters, underscores, or malformed braces."""
+    variables: set[str] = set()
+    cursor = 0
+    while True:
+        opening = value.find("{{", cursor)
+        closing = value.find("}}", cursor)
+        if closing != -1 and (opening == -1 or closing < opening):
+            return variables, True
+        if opening == -1:
+            return variables, False
+        end = value.find("}}", opening + 2)
+        if end == -1:
+            return variables, True
+        inner = value[opening + 2 : end]
+        match = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9]*)\s*", inner)
+        if not match:
+            return variables, True
+        variables.add(match.group(1))
+        cursor = end + 2
 
 
 def campaign_manifest_hash(value: CampaignManifest | dict[str, Any]) -> str:

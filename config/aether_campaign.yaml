@@ -18,10 +18,13 @@ steps:
     subject: "A facilities idea for {{company}}"
     bodyHtml: >-
       <p>{{whyLine}}</p>
+      <p>This is a commercial message from Aether Facility Services.</p>
       <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
       <p><a href="{{unsubscribeUrl}}">Unsubscribe</a><br>{{AETHER_POSTAL_ADDRESS}}</p>
     bodyText: |-
       {{whyLine}}
+
+      This is a commercial message from Aether Facility Services.
 
       Jordan Whitehurst
       Aether Facility Services
@@ -34,19 +37,22 @@ steps:
     isActive: true
   - stepIndex: 1
     type: email
-    subject: "Re: facilities support for {{company}}"
+    subject: "Following up on facilities support for {{company}}"
     bodyHtml: >-
       <p>Hi {{firstName}},</p>
-      <p>I wanted to follow up in case my note arrived at a busy time. Aether supports commercial properties across the Phoenix area with recurring cleaning and on-demand facility services, with one point of contact and work tailored to each site.</p>
+      <p>I wanted to follow up in case my note arrived at a busy time. Aether supports commercial properties with recurring cleaning and on-demand facility services, with one point of contact and work tailored to each site.</p>
       <p>Is this something you oversee, or is there someone else at {{company}} I should contact?</p>
+      <p>This is a commercial message from Aether Facility Services.</p>
       <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
       <p><a href="{{unsubscribeUrl}}">Unsubscribe</a><br>{{AETHER_POSTAL_ADDRESS}}</p>
     bodyText: |-
       Hi {{firstName}},
 
-      I wanted to follow up in case my note arrived at a busy time. Aether supports commercial properties across the Phoenix area with recurring cleaning and on-demand facility services, with one point of contact and work tailored to each site.
+      I wanted to follow up in case my note arrived at a busy time. Aether supports commercial properties with recurring cleaning and on-demand facility services, with one point of contact and work tailored to each site.
 
       Is this something you oversee, or is there someone else at {{company}} I should contact?
+
+      This is a commercial message from Aether Facility Services.
 
       Jordan Whitehurst
       Aether Facility Services
@@ -64,6 +70,7 @@ steps:
       <p>Hi {{firstName}},</p>
       <p>One reason organizations use Aether is to reduce the handoffs between janitorial, porter, floor, window, pressure-washing, and maintenance vendors. We build the service plan around the property rather than forcing a fixed package.</p>
       <p>Would it help if I sent a short capabilities overview for {{company}}?</p>
+      <p>This is a commercial message from Aether Facility Services.</p>
       <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
       <p><a href="{{unsubscribeUrl}}">Unsubscribe</a><br>{{AETHER_POSTAL_ADDRESS}}</p>
     bodyText: |-
@@ -73,13 +80,15 @@ steps:
 
       Would it help if I sent a short capabilities overview for {{company}}?
 
+      This is a commercial message from Aether Facility Services.
+
       Jordan Whitehurst
       Aether Facility Services
       602-612-6393
 
       Unsubscribe: {{unsubscribeUrl}}
       {{AETHER_POSTAL_ADDRESS}}
-    delayDays: 7
+    delayDays: 4
     delayHours: 0
     isActive: true
   - stepIndex: 3
@@ -89,6 +98,7 @@ steps:
       <p>Hi {{firstName}},</p>
       <p>I have not heard back, so I will close the loop after this note. If cleaning or facility support becomes a priority for {{company}}, I would be glad to compare needs and options.</p>
       <p>If someone else is the right contact, a quick redirect would be appreciated.</p>
+      <p>This is a commercial message from Aether Facility Services.</p>
       <p>Jordan Whitehurst<br>Aether Facility Services<br>602-612-6393</p>
       <p><a href="{{unsubscribeUrl}}">Unsubscribe</a><br>{{AETHER_POSTAL_ADDRESS}}</p>
     bodyText: |-
@@ -98,12 +108,14 @@ steps:
 
       If someone else is the right contact, a quick redirect would be appreciated.
 
+      This is a commercial message from Aether Facility Services.
+
       Jordan Whitehurst
       Aether Facility Services
       602-612-6393
 
       Unsubscribe: {{unsubscribeUrl}}
       {{AETHER_POSTAL_ADDRESS}}
-    delayDays: 14
+    delayDays: 7
     delayHours: 0
     isActive: true

@@ -477,9 +477,15 @@ class SalesWorkflows:
         prospect_id = str(recipient.get("warmy_prospect_id") or "")
         if not prospect_id:
             raise WorkflowRetry("Warmy prospect has not been created")
-        self.settings.require_campaign_activation()
+        self.settings.require_campaign_enrollment()
         campaign = self.warmy.get_campaign(self.settings.warmy_campaign_id)
-        self._validate_live_campaign(campaign)
+        mailbox_verification = self._validate_live_campaign(
+            campaign, for_enrollment=True
+        )
+        self.db.set_state(
+            f"warmy:campaign:mailbox-verification:{self.settings.warmy_campaign_id}",
+            mailbox_verification,
+        )
         self._operation(
             "warmy",
             f"enroll:{self.settings.warmy_campaign_id}:{sequence_id}:{prospect_id}",
@@ -1473,7 +1479,9 @@ class SalesWorkflows:
                 {"custom_fields": fields},
             )
 
-    def _validate_live_campaign(self, response: dict[str, Any]) -> None:
+    def _validate_live_campaign(
+        self, response: dict[str, Any], *, for_enrollment: bool = False
+    ) -> dict[str, Any]:
         campaign = response.get("data") if isinstance(response, dict) else None
         if not isinstance(campaign, dict):
             campaign = response
@@ -1481,15 +1489,45 @@ class SalesWorkflows:
         if str(campaign.get("id") or "") != self.settings.warmy_campaign_id:
             errors.append("campaign ID mismatch")
         status = str(campaign.get("status") or "").casefold()
-        if status not in {"draft", "paused", "scheduled", "running"}:
+        allowed_statuses = {"draft", "paused", "scheduled", "running"}
+        if for_enrollment and not self.settings.campaign_start_enabled:
+            allowed_statuses = {"draft", "paused"}
+        if status not in allowed_statuses:
             errors.append(f"unsafe campaign status {status or '(missing)'}")
-        mailbox_values = campaign.get("mailboxIds") or campaign.get("mailboxes") or []
+        mailbox_field_present = "mailboxIds" in campaign or "mailboxes" in campaign
+        mailbox_values = campaign.get("mailboxIds")
+        if mailbox_values is None and "mailboxes" in campaign:
+            mailbox_values = campaign.get("mailboxes")
         mailbox_ids = {
             str(item.get("id") if isinstance(item, dict) else item)
-            for item in mailbox_values
+            for item in mailbox_values or []
         }
-        if mailbox_ids != set(self.settings.warmy_mailbox_ids):
+        mailbox_mismatch = mailbox_field_present and mailbox_ids != set(
+            self.settings.warmy_mailbox_ids
+        )
+        if mailbox_mismatch:
             errors.append("mailbox set mismatch")
+        mailbox_verification = (
+            {
+                "status": "mismatch",
+                "requires_ui_check": False,
+            }
+            if mailbox_mismatch
+            else (
+                {
+                    "status": "verified",
+                    "requires_ui_check": False,
+                }
+                if mailbox_field_present
+                else {
+                    "status": "not_returned",
+                    "requires_ui_check": True,
+                    "reason": (
+                        "Warmy readback omitted mailboxIds/mailboxes; verify in the UI"
+                    ),
+                }
+            )
+        )
         if int(campaign.get("dailySendLimit") or 0) != self.settings.warmy_daily_limit:
             errors.append("daily send limit mismatch")
         if len(campaign.get("steps") or []) != 4:
@@ -1497,11 +1535,17 @@ class SalesWorkflows:
         for name in ("stopOnReply", "stopOnBounce", "stopOnUnsubscribe"):
             if campaign.get(name) is not True:
                 errors.append(f"{name} must be enabled")
-        actual_hash = campaign_manifest_hash(campaign)
+        hash_payload = dict(campaign)
+        if not mailbox_field_present:
+            hash_payload["mailboxIds"] = list(self.settings.warmy_mailbox_ids)
+        elif "mailboxIds" not in hash_payload:
+            hash_payload["mailboxIds"] = mailbox_values
+        actual_hash = campaign_manifest_hash(hash_payload)
         if actual_hash != self.settings.warmy_campaign_manifest_hash:
             errors.append("campaign manifest hash mismatch")
         if errors:
             raise ActivationBlocked("live Warmy campaign blocked: " + ", ".join(errors))
+        return mailbox_verification
 
     def _deal_fields(self, **values: Any) -> dict[str, Any]:
         result: dict[str, Any] = {}

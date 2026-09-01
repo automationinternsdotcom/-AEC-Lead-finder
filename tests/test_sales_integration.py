@@ -823,7 +823,7 @@ def test_campaign_manifest_cannot_pass_with_placeholder_copy(tmp_path):
     approved = tmp_path / "campaign.yaml"
     approved.write_text(source.read_text().replace(COPY_PLACEHOLDER, "Approved copy"))
     manifest = load_campaign(approved, settings)
-    assert [step.delayDays for step in manifest.steps] == [0, 3, 7, 14]
+    assert [step.delayDays for step in manifest.steps] == [0, 3, 4, 7]
     assert manifest.mailboxIds == [f"mailbox-{index}" for index in range(1, 7)]
     assert "123 Main St" in manifest.steps[0].bodyText
 
