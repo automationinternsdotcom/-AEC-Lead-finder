@@ -149,3 +149,7 @@
 - Handoff generation does not enqueue work. Provider synchronization and campaign
   enrollment are separate actions, and enrollment still requires a matching immutable
   approval batch plus every activation flag.
+- For adjacent historical slices, pass `--existing-sales-db`. The local duplicate
+  guard compares same-company event/date/location signals against existing sales state
+  and earlier events in the handoff. Potential repeats become CRM-ineligible and block
+  an anchored sequence; no existing row is deleted, merged, archived, or overwritten.

@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+import sqlite3
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -14,6 +15,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
@@ -803,7 +805,9 @@ class BulkRunner:
         self._refresh_manifest()
         return summary
 
-    def build_sales_handoff(self) -> dict:
+    def build_sales_handoff(
+        self, *, existing_sales_db: Path | None = None
+    ) -> dict:
         """Build the immutable local provider boundary without calling providers."""
         if not self.options.resume:
             raise ValueError("sales handoff requires --resume and an existing run ID")
@@ -869,6 +873,15 @@ class BulkRunner:
             contacts=contacts,
             open_review_ids=open_review_ids,
         )
+        duplicate_blocks = 0
+        if existing_sales_db is not None:
+            if not existing_sales_db.is_file():
+                raise ValueError(
+                    f"existing sales database does not exist: {existing_sales_db}"
+                )
+            handoff, duplicate_blocks = _block_cross_run_duplicate_events(
+                handoff, existing_sales_db
+            )
         relative_name = (
             f"{WHY_LINE_PROTOCOL_VERSION}/{RECIPIENT_PROTOCOL_VERSION}/sales_handoff.json"
         )
@@ -888,6 +901,7 @@ class BulkRunner:
                 item.eligibility_status == EligibilityStatus.READY
                 for item in validated.sequences
             ),
+            "cross_run_duplicate_blocks": duplicate_blocks,
         }
         self.state.set_stage_status(
             self.options.run_id,
@@ -912,6 +926,7 @@ class BulkRunner:
             "provider_calls": 0,
             "email_delivery": False,
             "campaign_enrollment": False,
+            "existing_sales_db": str(existing_sales_db or ""),
         }
 
     def _recipient_organizations(
@@ -4156,6 +4171,154 @@ def _contact_can_reach_warmy_verification(contact: ContactCandidate) -> bool:
         contact.verification_status == VerificationStatus.UNKNOWN
         and contact.verification_reason == "domain_mx_valid_mailbox_unverified"
     )
+
+
+def _block_cross_run_duplicate_events(
+    handoff: SalesHandoff, sales_db: Path
+) -> tuple[SalesHandoff, int]:
+    """Fail closed on likely repeat stories already represented in sales state."""
+    history: dict[str, list[dict]] = defaultdict(list)
+    with sqlite3.connect(sales_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT e.lead_event_id, e.payload, c.canonical_name
+               FROM sales_lead_events e
+               JOIN sales_companies c ON c.company_id=e.company_id"""
+        ).fetchall()
+    for row in rows:
+        payload = json.loads(row["payload"] or "{}")
+        history[normalize_text(row["canonical_name"])].append(
+            {
+                "lead_event_id": row["lead_event_id"],
+                "event": str(payload.get("event") or ""),
+                "summary": str(payload.get("summary") or ""),
+                "location": str(payload.get("location") or ""),
+                "date_posted": str(payload.get("date_posted") or ""),
+                "article_url": str(payload.get("article_url") or ""),
+            }
+        )
+
+    company_names = {
+        item.company_id: item.canonical_name for item in handoff.companies
+    }
+    blocked_ids: set[str] = set()
+    events: list[LeadEventSync] = []
+    for event in sorted(
+        handoff.lead_events,
+        key=lambda item: (item.date_posted, item.lead_event_id),
+    ):
+        company_key = normalize_text(company_names[event.company_id])
+        current = event.model_dump(mode="json")
+        duplicate = next(
+            (
+                prior
+                for prior in history.get(company_key, [])
+                if prior["lead_event_id"] != event.lead_event_id
+                and _likely_duplicate_event(current, prior, company_key)
+            ),
+            None,
+        )
+        if duplicate is not None:
+            reason = (
+                "potential_cross_run_duplicate:"
+                + str(duplicate["lead_event_id"])
+            )
+            reasons = list(
+                dict.fromkeys([*event.crm_exclusion_reasons, reason])
+            )
+            event = event.model_copy(
+                update={
+                    "crm_eligible": False,
+                    "crm_exclusion_reasons": reasons,
+                }
+            )
+            blocked_ids.add(event.lead_event_id)
+        else:
+            history[company_key].append(current)
+        events.append(event)
+
+    sequences: list[OutreachSequenceSync] = []
+    for sequence in handoff.sequences:
+        if sequence.anchor_lead_event_id not in blocked_ids:
+            sequences.append(sequence)
+            continue
+        reasons = list(
+            dict.fromkeys(
+                [*sequence.eligibility_reasons, "anchor_event_potential_duplicate"]
+            )
+        )
+        sequences.append(
+            sequence.model_copy(
+                update={
+                    "eligibility_status": EligibilityStatus.BLOCKED,
+                    "eligibility_reasons": reasons,
+                }
+            )
+        )
+    value = handoff.model_copy(
+        update={"lead_events": events, "sequences": sequences, "content_hash": "pending"}
+    )
+    return (
+        value.model_copy(update={"content_hash": handoff_content_hash(value)}),
+        len(blocked_ids),
+    )
+
+
+def _likely_duplicate_event(current: dict, prior: dict, company_key: str) -> bool:
+    current_url = canonicalize_url(str(current.get("article_url") or "")) if current.get("article_url") else ""
+    prior_url = canonicalize_url(str(prior.get("article_url") or "")) if prior.get("article_url") else ""
+    if current_url and current_url == prior_url:
+        return True
+    try:
+        current_date = date.fromisoformat(str(current.get("date_posted") or ""))
+        prior_date = date.fromisoformat(str(prior.get("date_posted") or ""))
+    except ValueError:
+        return False
+    day_gap = abs((current_date - prior_date).days)
+    if day_gap > 21:
+        return False
+    current_location = _duplicate_tokens(str(current.get("location") or ""), "")
+    prior_location = _duplicate_tokens(str(prior.get("location") or ""), "")
+    if current_location and prior_location and not (current_location & prior_location):
+        return False
+    current_event = normalize_text(str(current.get("event") or ""))
+    prior_event = normalize_text(str(prior.get("event") or ""))
+    current_tokens = _duplicate_tokens(current_event, company_key)
+    prior_tokens = _duplicate_tokens(prior_event, company_key)
+    shared = current_tokens & prior_tokens
+    if len(shared) >= 2:
+        return True
+    if any(token.isdigit() for token in shared) and len(shared) >= 1:
+        return True
+    if current_event and prior_event and SequenceMatcher(
+        None, current_event, prior_event
+    ).ratio() >= 0.58:
+        return True
+    return day_gap <= 7 and "develop" in current_tokens and "develop" in prior_tokens
+
+
+def _duplicate_tokens(value: str, company_key: str) -> set[str]:
+    stop = {
+        "a", "an", "and", "at", "for", "in", "is", "of", "on", "the", "to",
+        "new", "may", "plans", "planned", "project", "arizona", "az",
+    }
+    company_tokens = set(re.findall(r"[a-z0-9]+", normalize_text(company_key)))
+    aliases = {
+        "approved": "approv", "approval": "approv", "approves": "approv",
+        "build": "develop", "building": "develop", "built": "develop",
+        "construction": "develop", "construct": "develop",
+        "development": "develop", "develops": "develop", "developed": "develop",
+        "expansion": "develop", "expand": "develop", "expands": "develop",
+        "fab": "develop", "fabs": "develop",
+        "condominium": "condo", "condominiums": "condo", "condos": "condo",
+        "units": "unit",
+    }
+    output = set()
+    for token in re.findall(r"[a-z0-9]+", normalize_text(value)):
+        if token in stop or token in company_tokens or len(token) < 3:
+            continue
+        output.add(aliases.get(token, token.rstrip("s")))
+    return output
 
 
 def _bulk_contact_preference(contact: ContactCandidate) -> tuple[int, int, str]:

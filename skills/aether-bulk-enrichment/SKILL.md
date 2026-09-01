@@ -139,7 +139,8 @@ separate local-only action:
 uv run python skills/aether-bulk-enrichment/scripts/bulk_enrich.py \
   --since YYYY-MM-DD --until YYYY-MM-DD \
   --output results/backfills/YYYY-MM-DD_YYYY-MM-DD \
-  --run-id RUN_ID --resume --build-sales-handoff
+  --run-id RUN_ID --resume --build-sales-handoff \
+  --existing-sales-db aether_sales.sqlite
 ```
 
 This action makes zero provider calls and writes `sales_handoff.json` under the
@@ -149,3 +150,7 @@ and immutable merge snapshot match the daily production handoff. Enqueuing that 
 into the integration database and running the worker are distinct operator actions.
 The worker may create Pipedrive organizations/leads/people and Warmy prospects, but
 campaign enrollment remains protected by the immutable approval and activation gates.
+When processing adjacent historical slices, always supply `--existing-sales-db`.
+Likely repeat stories for the same company, nearby date, location, and event signal
+are marked CRM-ineligible and any anchored sequence is blocked; the gate never deletes
+or merges an existing CRM record.

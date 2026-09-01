@@ -59,6 +59,14 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     value.add_argument(
+        "--existing-sales-db",
+        type=Path,
+        help=(
+            "optional existing integration SQLite database used only to block "
+            "likely cross-run duplicate events in --build-sales-handoff"
+        ),
+    )
+    value.add_argument(
         "--apollo-go",
         action="store_true",
         help="authorize email-only Apollo fallback for people with no public email or phone",
@@ -131,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.apollo_go and not args.enrich_recipients:
         print("ERROR: --apollo-go requires --enrich-recipients", file=sys.stderr)
         return 2
+    if args.existing_sales_db and not args.build_sales_handoff:
+        print(
+            "ERROR: --existing-sales-db requires --build-sales-handoff",
+            file=sys.stderr,
+        )
+        return 2
     if args.apollo_cap < 0:
         print("ERROR: --apollo-cap cannot be negative", file=sys.stderr)
         return 2
@@ -180,7 +194,13 @@ def main(argv: list[str] | None = None) -> int:
                 apollo_cap=args.apollo_cap,
             )
         elif args.build_sales_handoff:
-            result = runner.build_sales_handoff()
+            result = runner.build_sales_handoff(
+                existing_sales_db=(
+                    args.existing_sales_db.resolve()
+                    if args.existing_sales_db
+                    else None
+                )
+            )
         else:
             result = runner.run()
     except Exception as exc:

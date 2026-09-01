@@ -25,6 +25,7 @@ from bulk_lib import (  # noqa: E402
     _archive_url_in_scope,
     _bulk_sales_handoff,
     _first_name,
+    _likely_duplicate_event,
     _offline_screen,
     _personalize_why_line,
     _single_sendable_company_name,
@@ -208,6 +209,50 @@ def test_bulk_sales_handoff_ranks_and_gates_recipients():
     assert len(handoff.sequences) == 1
     assert handoff.sequences[0].eligibility_status == EligibilityStatus.READY
     assert handoff.content_hash == handoff_content_hash(handoff)
+
+
+@pytest.mark.parametrize(
+    ("current", "prior"),
+    [
+        ("1,200-unit development approval", "approved for 1200-unit apartment complex"),
+        ("plans new industrial condominium project", "industrial condo development planned"),
+        ("new TSMC expansion", "may build several new fabs"),
+    ],
+)
+def test_cross_run_duplicate_signal_blocks_nearby_repeat_stories(current, prior):
+    assert _likely_duplicate_event(
+        {
+            "event": current,
+            "location": "Phoenix, Arizona",
+            "date_posted": "2026-01-16",
+            "article_url": "https://example.com/current",
+        },
+        {
+            "event": prior,
+            "location": "Phoenix",
+            "date_posted": "2026-01-14",
+            "article_url": "https://example.com/prior",
+        },
+        "tsmc",
+    )
+
+
+def test_cross_run_duplicate_signal_keeps_distant_unrelated_story():
+    assert not _likely_duplicate_event(
+        {
+            "event": "Vineyard Towne Center completion and full leasing",
+            "location": "Queen Creek",
+            "date_posted": "2026-01-23",
+            "article_url": "https://example.com/current",
+        },
+        {
+            "event": "Mesa considers tax reimbursement for Legacy Park",
+            "location": "Mesa",
+            "date_posted": "2026-08-30",
+            "article_url": "https://example.com/prior",
+        },
+        "vestar",
+    )
 
 
 def test_resume_rejects_changed_source_snapshot(tmp_path):
