@@ -855,6 +855,12 @@ class SalesWorkflows:
         email = str(data.get("prospectEmail") or data.get("email") or "").casefold()
         prospect_id = str(data.get("prospectId") or "")
         campaign_id = str(data.get("campaignId") or "")
+        if campaign_id and campaign_id != self.settings.warmy_campaign_id:
+            LOG.info(
+                "ignoring Warmy event for a foreign campaign",
+                extra={"event_id": event_id, "campaign_id": campaign_id},
+            )
+            return
         get_sequence_for_prospect = getattr(
             self.db, "get_sequence_for_prospect", None
         )
