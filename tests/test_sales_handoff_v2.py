@@ -264,6 +264,100 @@ def test_handoff_hash_rejects_tampering_and_ingestion_is_idempotent(tmp_path):
         load_handoff(path)
 
 
+def test_exact_handoff_replay_preserves_provider_derived_sequence_state(tmp_path):
+    path = tmp_path / "sales_handoff.json"
+    handoff = _handoff()
+    _write_handoff(path, handoff)
+    db = Database(tmp_path / "sales.sqlite")
+
+    first = enqueue_handoff(db, path)
+    assert first["sequence_jobs"] == 1
+
+    runtime_payload = _sequence().model_dump(mode="json")
+    runtime_payload["merge_snapshot"]["unsubscribeUrl"] = (
+        "https://sales.example.com/unsubscribe?t=signed"
+    )
+    runtime_payload["merge_hash"] = "provider-derived-merge"
+    db.update_sequence(
+        "sequence-1",
+        eligibility_status="blocked",
+        eligibility_reasons=["warmy_verification_catch_all"],
+        merge_hash="provider-derived-merge",
+        payload=runtime_payload,
+    )
+
+    replay = enqueue_handoff(db, path)
+    assert replay["sequence_jobs"] == 0
+    sequence = db.get_sequence("sequence-1")
+    assert sequence["eligibility_status"] == "blocked"
+    assert sequence["eligibility_reasons"] == ["warmy_verification_catch_all"]
+    assert sequence["merge_hash"] == "provider-derived-merge"
+    assert (
+        sequence["payload"]["merge_snapshot"]["unsubscribeUrl"]
+        == "https://sales.example.com/unsubscribe?t=signed"
+    )
+
+
+def test_changed_sequence_merge_hash_refreshes_draft_and_enqueues_new_sync(tmp_path):
+    path = tmp_path / "sales_handoff.json"
+    first_handoff = _handoff()
+    _write_handoff(path, first_handoff)
+    db = Database(tmp_path / "sales.sqlite")
+    assert enqueue_handoff(db, path)["sequence_jobs"] == 1
+
+    changed_sequence = _sequence().model_copy(
+        update={
+            "personalized_why_line": "Hi Jane — Saw the expanded Phoenix marketplace.",
+            "merge_snapshot": {
+                **_sequence().merge_snapshot,
+                "whyLine": "Hi Jane — Saw the expanded Phoenix marketplace.",
+            },
+            "merge_hash": "changed-merge-hash",
+        }
+    )
+    changed = first_handoff.model_copy(
+        update={"sequences": [changed_sequence], "content_hash": "pending"}
+    )
+    changed = changed.model_copy(update={"content_hash": handoff_content_hash(changed)})
+    _write_handoff(path, changed)
+
+    result = enqueue_handoff(db, path)
+    assert result["sequence_jobs"] == 1
+    sequence = db.get_sequence("sequence-1")
+    assert sequence["merge_hash"] == "changed-merge-hash"
+    assert sequence["payload"]["personalized_why_line"] == (
+        "Hi Jane — Saw the expanded Phoenix marketplace."
+    )
+
+
+def test_non_draft_sequence_snapshot_is_fully_immutable_on_save(tmp_path):
+    db = Database(tmp_path / "sales.sqlite")
+    _seed(db)
+    original = db.get_sequence("sequence-1")
+    db.update_sequence(
+        "sequence-1",
+        approval_state="approved",
+        eligibility_status="ready",
+        approval_batch_id="approval-1",
+    )
+    incoming = _sequence().model_copy(
+        update={
+            "personalized_why_line": "This must not replace approved copy.",
+            "eligibility_status": EligibilityStatus.BLOCKED,
+            "eligibility_reasons": ["later_handoff_replay"],
+        }
+    )
+
+    db.save_sequence(incoming)
+
+    preserved = db.get_sequence("sequence-1")
+    assert preserved["approval_state"] == "approved"
+    assert preserved["approval_batch_id"] == "approval-1"
+    assert preserved["eligibility_status"] == "ready"
+    assert preserved["eligibility_reasons"] == []
+    assert preserved["payload"] == original["payload"]
+
+
 def test_ingest_rejects_multiple_ready_sequences_for_normalized_email(tmp_path):
     original = _handoff()
     second_company = _company().model_copy(
