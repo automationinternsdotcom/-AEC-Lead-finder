@@ -21,6 +21,7 @@ from typing import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
+from trafilatura import extract as extract_main_text
 import outreach_contract as shared_outreach
 
 from v2.artifacts import ArtifactStore, new_manifest
@@ -103,6 +104,13 @@ RECIPIENT_CONTACT_STAGE = "contacts"
 RECIPIENT_APOLLO_STAGE = "apollo"
 MAX_PEOPLE_PER_COMPANY = 3
 APOLLO_MIN_REQUEST_INTERVAL_SECONDS = 1.25
+ARTICLE_PRUNE_XPATHS = (
+    '//*[contains(concat(" ", normalize-space(@class), " "), " wp-block-embed ")]',
+    '//*[contains(concat(" ", normalize-space(@class), " "), " wp-embedded-content ")]',
+    '//*[contains(@class, "related-post") or contains(@id, "related-post")]',
+    '//*[contains(@class, "jp-relatedposts") or contains(@id, "jp-relatedposts")]',
+    '//*[contains(@class, "yarpp-related") or contains(@id, "yarpp-related")]',
+)
 WHY_QUESTION_FUTURE = " Is there any chance we could stay in touch regarding your future janitorial needs?"
 WHY_QUESTION_REVIEW = " Is there any chance you'll be reviewing your janitorial needs?"
 WHY_QUESTION_ADDITIONAL_SPACE = " Is there any chance you'll be reviewing your janitorial needs, with the additional space?"
@@ -2571,6 +2579,23 @@ class BulkRunner:
                 )
                 rejected += 1
                 continue
+            if (
+                candidate.published_at is not None
+                and judgment.date_posted is not None
+                and judgment.date_posted != candidate.published_at.date()
+            ):
+                self._quarantine_bulk_candidate(
+                    candidate,
+                    response_path,
+                    ValueError(
+                        "qualified article publication date disagrees with saved "
+                        "candidate evidence: "
+                        f"candidate={candidate.published_at.date().isoformat()}, "
+                        f"model={judgment.date_posted.isoformat()}"
+                    ),
+                )
+                reviews += 1
+                continue
             effective_date = (
                 candidate.published_at.date()
                 if candidate.published_at is not None
@@ -2655,10 +2680,17 @@ class BulkRunner:
                 errors.append("bulk_event_outside_requested_window")
             if candidate is None:
                 errors.append("bulk_event_primary_candidate_missing")
-            elif organization is None or not _business_is_grounded(
-                candidate, organization.canonical_name
-            ):
-                errors.append("bulk_event_business_not_grounded")
+            else:
+                if (
+                    event.date_posted is not None
+                    and candidate.published_at is not None
+                    and event.date_posted != candidate.published_at.date()
+                ):
+                    errors.append("bulk_event_candidate_date_mismatch")
+                if organization is None or not _business_is_grounded(
+                    candidate, organization.canonical_name
+                ):
+                    errors.append("bulk_event_business_not_grounded")
             if not errors:
                 continue
             invalid_ids.append(event.lead_event_id)
@@ -3544,10 +3576,20 @@ def _candidate_excerpt(candidate: DiscoveryCandidate, limit: int) -> str:
         raw = Path(candidate.raw_artifact_path).read_text(
             encoding="utf-8", errors="replace"
         )[:200_000]
-    except OSError:
+        value = extract_main_text(
+            raw,
+            url=candidate.canonical_url,
+            fast=True,
+            favor_precision=True,
+            include_comments=False,
+            include_tables=False,
+            deduplicate=True,
+            prune_xpath=ARTICLE_PRUNE_XPATHS,
+        )
+    except Exception:
         return ""
-    raw = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", raw)
-    value = html.unescape(re.sub(r"(?s)<[^>]+>", " ", raw))
+    if not value:
+        return ""
     return re.sub(r"\s+", " ", value).strip()[:limit]
 
 
