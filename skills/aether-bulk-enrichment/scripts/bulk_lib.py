@@ -4304,20 +4304,64 @@ def _align_handoff_to_existing_companies(
             by_name[normalize_text(row["alias_value"])] = row["company_id"]
 
     id_map: dict[str, str] = {}
-    for company in handoff.companies:
-        matches = {
+    current_by_domain: dict[str, str] = {}
+    current_by_name: dict[str, str] = {}
+    ordered_companies = sorted(
+        handoff.companies,
+        key=lambda item: (-int(bool(item.domain)), item.company_id),
+    )
+    for company in ordered_companies:
+        supplied_names = [company.canonical_name, *company.aliases]
+        existing_matches = {
             value
             for value in (
                 by_domain.get(company.domain.strip().casefold()) if company.domain else None,
-                by_name.get(normalize_text(company.canonical_name)),
+                *(
+                    by_name.get(normalize_text(name))
+                    for name in supplied_names
+                    if normalize_text(name)
+                ),
             )
             if value
         }
-        if len(matches) > 1:
+        if len(existing_matches) > 1:
             raise ValueError(
                 f"existing sales identity conflict for {company.canonical_name}"
             )
-        id_map[company.company_id] = next(iter(matches), company.company_id)
+        current_matches = {
+            value
+            for value in (
+                (
+                    current_by_domain.get(company.domain.strip().casefold())
+                    if company.domain
+                    else None
+                ),
+                *(
+                    current_by_name.get(normalize_text(name))
+                    for name in supplied_names
+                    if normalize_text(name)
+                ),
+            )
+            if value
+        }
+        if len(current_matches) > 1:
+            raise ValueError(
+                f"current handoff identity conflict for {company.canonical_name}"
+            )
+        existing_id = next(iter(existing_matches), "")
+        current_id = next(iter(current_matches), "")
+        if existing_id and current_id and existing_id != current_id:
+            raise ValueError(
+                f"current/existing identity conflict for {company.canonical_name}"
+            )
+        company_id = existing_id or current_id or company.company_id
+        id_map[company.company_id] = company_id
+        if company.domain:
+            current_by_domain[company.domain.strip().casefold()] = company_id
+        for name in supplied_names:
+            normalized_name = normalize_text(name)
+            if normalized_name:
+                current_by_name[normalized_name] = company_id
 
     consolidated: dict[str, CompanySync] = {}
     for company in handoff.companies:
