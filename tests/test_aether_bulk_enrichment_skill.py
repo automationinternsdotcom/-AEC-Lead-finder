@@ -124,7 +124,7 @@ def test_bulk_sales_handoff_ranks_and_gates_recipients():
     )
     why = WhyVariant(
         text=(
-            "Hi [first name] just wanted to reach out since I saw on the news that "
+            "Hi [first name], I wanted to reach out after seeing on the news that "
             "the new warehouse is opening in phoenix. Is there any chance we could "
             "stay in touch regarding your future janitorial needs?"
         ),
@@ -559,7 +559,7 @@ def test_why_line_selection_renders_approved_template_and_fails_closed():
 
     assert valid.status == "valid"
     assert valid.text == (
-        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "Hi [first name], I wanted to reach out after seeing on the news that "
         "the new phoenix marketplace is opening in phoenix. "
         "Is there any chance we could stay in touch regarding your future janitorial needs?"
     )
@@ -745,7 +745,9 @@ def test_every_approved_template_renders_brief_copy_or_an_intentional_skip():
         if key in samples:
             assert why_line.status == "valid"
             assert why_line.text.endswith("?")
-            assert why_line.text.startswith("Hi [first name] just wanted to reach out")
+            assert why_line.text.startswith(
+                "Hi [first name], I wanted to reach out after seeing"
+            )
             assert _uses_sentence_case_only(
                 why_line.text,
                 company_references=[why_line.slots["company"]]
@@ -1141,7 +1143,7 @@ def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
 
     calls = []
     line = (
-        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "Hi [first name], I wanted to reach out after seeing on the news that "
         "the new warehouse is opening in phoenix. "
         "Is there any chance we could stay in touch regarding your future janitorial needs?"
     )
@@ -1198,7 +1200,7 @@ def test_recipient_why_refresh_reuses_base_company_response(tmp_path):
     article = "https://example.com/anchor"
     why = WhyVariant(
         text=(
-            "Hi [first name] just wanted to reach out since I saw on the news that "
+            "Hi [first name], I wanted to reach out after seeing on the news that "
             "the new warehouse is opening in phoenix. Is there any chance we could "
             "stay in touch regarding your future janitorial needs?"
         ),
@@ -1324,7 +1326,7 @@ def test_recipient_enrichment_adds_real_names_and_resumes_without_repeat_calls(
         )
     )
     line = (
-        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "Hi [first name], I wanted to reach out after seeing on the news that "
         "the warehouse is opening in phoenix. Is there any chance we could stay "
         "in touch regarding your future janitorial needs?"
     )
@@ -1418,7 +1420,9 @@ def test_recipient_enrichment_adds_real_names_and_resumes_without_repeat_calls(
         row = next(csv.DictReader(file))
     assert row["first_name"] == "Michael"
     assert row["full_name"] == "Dr. Michael Hudson"
-    assert row["why_line"].startswith("Hi Michael ")
+    assert row["why_line"].startswith(
+        "Hi Michael, I wanted to reach out after seeing"
+    )
     assert "[first name]" not in row["why_line"]
 
 
@@ -1515,7 +1519,7 @@ def test_bulk_runner_exports_leads_and_companies_without_delivery(tmp_path):
         return response(url, pages[url])
 
     why_line = (
-        "Hi [first name] just wanted to reach out since I saw on the news that "
+        "Hi [first name], I wanted to reach out after seeing on the news that "
         "the new commercial marketplace is opening in phoenix. "
         "Is there any chance we could stay in touch regarding your future janitorial needs?"
     )

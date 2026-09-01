@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .config import ActivationBlocked, Settings
 
 COPY_PLACEHOLDER = "TODO_APPROVED_COPY"
+BODY_MERGE_VARIABLES = {"firstName", "company", "whyLine", "unsubscribeUrl"}
+SUBJECT_MERGE_VARIABLES = {"firstName", "company"}
 
 
 class CampaignStep(BaseModel):
@@ -71,6 +73,12 @@ class CampaignManifest(BaseModel):
             raise ValueError("campaign delays must be day 0, 3, 7, and 14")
         if [step.stepIndex for step in self.steps] != [0, 1, 2, 3]:
             raise ValueError("campaign step indexes must be 0 through 3")
+        if any(not step.isActive for step in self.steps):
+            raise ValueError("all campaign steps must be active")
+        if any(step.delayHours != 0 for step in self.steps):
+            raise ValueError("campaign step delayHours must be zero")
+        if len(set(self.mailboxIds)) != len(self.mailboxIds):
+            raise ValueError("campaign mailbox IDs must be unique")
         return self
 
 
@@ -109,10 +117,19 @@ def load_campaign(path: str | Path, settings: Settings) -> CampaignManifest:
         variables = set(
             re.findall(r"\{\{\s*([A-Za-z][A-Za-z0-9]*)\s*\}\}", step.bodyHtml + step.bodyText)
         )
-        unsupported = variables - {"firstName", "company", "whyLine", "unsubscribeUrl"}
+        unsupported = variables - BODY_MERGE_VARIABLES
         if unsupported:
             raise ActivationBlocked(
                 f"step {step.stepIndex} has unsupported merge variables: {sorted(unsupported)}"
+            )
+        subject_variables = set(
+            re.findall(r"\{\{\s*([A-Za-z][A-Za-z0-9]*)\s*\}\}", step.subject)
+        )
+        unsupported_subject = subject_variables - SUBJECT_MERGE_VARIABLES
+        if unsupported_subject:
+            raise ActivationBlocked(
+                f"step {step.stepIndex} subject has unsupported merge variables: "
+                f"{sorted(unsupported_subject)}"
             )
     return manifest
 

@@ -6,9 +6,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from .campaign import campaign_manifest_hash, load_campaign
-from .config import Settings
+from .config import ActivationBlocked, Settings
 from .database import Database
 from .handoff import enqueue_handoff, load_handoff
 from .legacy_reconcile import apply_legacy_swvp_local, legacy_swvp_plan
@@ -21,6 +22,80 @@ from .scout_bridge import contacts_from_csv
 
 def _json(value) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, default=str))
+
+
+def _campaign_data(response: Any) -> dict[str, Any]:
+    """Normalize Warmy campaign responses that may be wrapped in ``data``."""
+    data = response if isinstance(response, dict) else {}
+    if isinstance(data.get("data"), dict):
+        data = data["data"]
+    if isinstance(data.get("campaign"), dict):
+        data = data["campaign"]
+    return data
+
+
+def _verify_campaign_draft(
+    warmy: WarmyClient,
+    created_response: dict[str, Any],
+    expected_manifest_hash: str,
+    expected_manifest: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    created = _campaign_data(created_response)
+    campaign_id = str(created.get("id") or "").strip()
+    if not campaign_id:
+        raise ActivationBlocked("Warmy campaign draft response did not include an ID")
+
+    readback_response = warmy.get_campaign(campaign_id)
+    readback = _campaign_data(readback_response)
+    errors: list[str] = []
+    if str(readback.get("id") or "").strip() != campaign_id:
+        errors.append("campaign ID mismatch")
+    status = str(readback.get("status") or "").casefold()
+    if status not in {"draft", "paused"}:
+        errors.append(f"unsafe campaign status {status or '(missing)'}")
+
+    mailbox_values = readback.get("mailboxIds")
+    if mailbox_values is None and "mailboxes" in readback:
+        mailbox_values = readback.get("mailboxes")
+    mailbox_ids = {
+        str(item.get("id") if isinstance(item, dict) else item)
+        for item in mailbox_values or []
+    }
+    if "mailboxIds" in readback or "mailboxes" in readback:
+        expected_mailbox_ids = {
+            str(item.get("id") if isinstance(item, dict) else item)
+            for item in (expected_manifest or {}).get("mailboxIds") or []
+        }
+        mailbox_mismatch = mailbox_ids != expected_mailbox_ids
+        if mailbox_mismatch:
+            errors.append("campaign mailbox set mismatch")
+        mailbox_verification = {
+            "status": "mismatch" if mailbox_mismatch else "verified",
+            "requires_ui_check": False,
+        }
+    else:
+        mailbox_verification = {
+            "status": "not_returned",
+            "requires_ui_check": True,
+            "reason": "Warmy readback omitted mailboxIds/mailboxes; verify in the UI",
+        }
+
+    # Warmy omits mailbox IDs from this read endpoint. Fill only that omitted
+    # field from the submitted manifest so the approval hash remains the exact
+    # hash of the config, while reporting mailbox verification separately.
+    hash_payload = dict(readback)
+    if "mailboxIds" not in hash_payload and "mailboxes" not in hash_payload:
+        if expected_manifest is None:
+            errors.append("campaign mailbox IDs unavailable for manifest hash verification")
+        else:
+            hash_payload["mailboxIds"] = expected_manifest.get("mailboxIds", [])
+    elif "mailboxIds" not in hash_payload:
+        hash_payload["mailboxIds"] = mailbox_values
+    if campaign_manifest_hash(hash_payload) != expected_manifest_hash:
+        errors.append("campaign manifest hash mismatch")
+    if errors:
+        raise ActivationBlocked("Warmy campaign draft verification failed: " + ", ".join(errors))
+    return campaign_id, readback_response, mailbox_verification
 
 
 def main() -> int:
@@ -123,6 +198,9 @@ def main() -> int:
                 ),
                 "provider_writes_enabled": settings.provider_writes_enabled,
                 "campaign_activation_ready": settings.campaign_activation_ready,
+                "campaign_activation_missing": settings.campaign_activation_missing(),
+                "campaign_enrollment_ready": settings.campaign_enrollment_ready,
+                "campaign_enrollment_missing": settings.campaign_enrollment_missing(),
             }
         )
         return 0
@@ -158,21 +236,35 @@ def main() -> int:
         return 0
     if args.command == "create-campaign-draft":
         manifest = load_campaign(args.manifest, settings)
+        manifest_hash = campaign_manifest_hash(manifest)
         if not args.apply:
             _json(
                 {
                     "manifest": manifest.model_dump(mode="json"),
-                    "manifest_hash": campaign_manifest_hash(manifest),
+                    "manifest_hash": manifest_hash,
                 }
             )
             return 0
         settings.require_provider_writes()
         warmy = WarmyClient(settings)
         try:
+            operation_key = f"aether-campaign-evergreen-v1:{manifest_hash}"
+            created = warmy.create_campaign(
+                manifest.model_dump(mode="json"), operation_key
+            )
+            campaign_id, verified, mailbox_verification = _verify_campaign_draft(
+                warmy,
+                created,
+                manifest_hash,
+                manifest.model_dump(mode="json"),
+            )
             _json(
-                warmy.create_campaign(
-                    manifest.model_dump(mode="json"), "aether-campaign-evergreen-v1"
-                )
+                {
+                    "campaign_id": campaign_id,
+                    "manifest_hash": manifest_hash,
+                    "campaign": verified,
+                    "mailbox_verification": mailbox_verification,
+                }
             )
         finally:
             warmy.close()

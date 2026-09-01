@@ -41,6 +41,7 @@ def create_app(settings: Settings | None = None, db=None, workflows=None) -> Fas
             "provider_writes_enabled": settings.provider_writes_enabled,
             "warmy_enrollment_enabled": settings.warmy_enrollment_enabled,
             "campaign_activation_ready": settings.campaign_activation_ready,
+            "campaign_enrollment_ready": settings.campaign_enrollment_ready,
         }
 
     @app.post("/webhooks/warmy")

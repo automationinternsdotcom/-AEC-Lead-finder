@@ -148,11 +148,15 @@ def test_pipeline_runs_end_to_end_and_resume_skips_completed_stages(tmp_path):
     with Path(result.paths["raw_leads"]).open(newline="", encoding="utf-8") as file:
         lead = next(csv.DictReader(file))
     assert lead["score"] == "88"
-    assert lead["why_line"].startswith("Hi [first name] ")
+    assert lead["why_line"].startswith(
+        "Hi [first name], I wanted to reach out after seeing"
+    )
     assert len(lead["supporting_candidate_ids"].split(",")) == 2
     with Path(result.paths["contacts"]).open(newline="", encoding="utf-8") as file:
         contact = next(csv.DictReader(file))
-    assert contact["why_line"].startswith("Hi Jane ")
+    assert contact["why_line"].startswith(
+        "Hi Jane, I wanted to reach out after seeing"
+    )
     manifest = json.loads(Path(result.manifest_path).read_text())
     assert manifest["status"] == "completed"
     assert all(manifest["stages"][stage]["status"] == "completed" for stage in PipelineRunner.STAGES)

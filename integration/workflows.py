@@ -477,7 +477,7 @@ class SalesWorkflows:
         prospect_id = str(recipient.get("warmy_prospect_id") or "")
         if not prospect_id:
             raise WorkflowRetry("Warmy prospect has not been created")
-        self.settings.require_campaign_activation()
+        self.settings.require_campaign_enrollment()
         campaign = self.warmy.get_campaign(self.settings.warmy_campaign_id)
         self._validate_live_campaign(campaign)
         self._operation(

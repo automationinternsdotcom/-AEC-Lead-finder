@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -431,7 +432,9 @@ def test_approval_batch_releases_only_the_named_sequence(tmp_path):
             warmy_prospect_id=f"prospect-{number}",
         )
     campaign = _campaign()
-    settings = _activation_settings(campaign)
+    settings = replace(_activation_settings(campaign), campaign_start_enabled=False)
+    assert settings.campaign_enrollment_ready
+    assert not settings.campaign_activation_ready
     now = datetime.now(UTC)
     db.save_approval_batch(
         ApprovalBatch(
