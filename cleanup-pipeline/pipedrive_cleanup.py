@@ -22,7 +22,7 @@ Setup:
   .env file next to this script (and a .gitignore line ".env"):
       PIPEDRIVE_API_TOKEN=your_token_here
       PIPEDRIVE_DOMAIN=yourcompany        # the 'yourcompany' in yourcompany.pipedrive.com
-  pip install requests python-dotenv
+  uv run pipedrive_cleanup.py --dry-run  (httpx is already a declared project dep)
 """
 
 import argparse
@@ -32,7 +32,7 @@ import sys
 import time
 from collections import defaultdict
 
-import requests
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -145,24 +145,25 @@ def find_duplicate_groups(leads):
 def fetch_all_leads():
     """Page through GET /leads and return all lead dicts."""
     leads, start = [], 0
-    while True:
-        resp = requests.get(f"{BASE_URL}/leads",
-                            params={"api_token": API_TOKEN, "start": start, "limit": PAGE_LIMIT},
-                            timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()
-        leads.extend(payload.get("data") or [])
-        page = (payload.get("additional_data") or {}).get("pagination") or {}
-        if not page.get("more_items_in_collection"):
-            break
-        start = page.get("next_start", start + PAGE_LIMIT)
+    with httpx.Client(timeout=30) as client:
+        while True:
+            resp = client.get(f"{BASE_URL}/leads",
+                              params={"api_token": API_TOKEN, "start": start, "limit": PAGE_LIMIT})
+            resp.raise_for_status()
+            payload = resp.json()
+            leads.extend(payload.get("data") or [])
+            page = (payload.get("additional_data") or {}).get("pagination") or {}
+            if not page.get("more_items_in_collection"):
+                break
+            start = page.get("next_start", start + PAGE_LIMIT)
     return leads
 
 
 def write_lead(lead_id, updates):
     """PUT field updates to a single lead, in place, by id."""
-    resp = requests.put(f"{BASE_URL}/leads/{lead_id}",
-                        params={"api_token": API_TOKEN}, json=updates, timeout=30)
+    with httpx.Client(timeout=30) as client:
+        resp = client.put(f"{BASE_URL}/leads/{lead_id}",
+                          params={"api_token": API_TOKEN}, json=updates)
     resp.raise_for_status()
     return resp.json()
 
