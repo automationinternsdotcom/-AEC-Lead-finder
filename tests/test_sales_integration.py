@@ -605,6 +605,37 @@ def test_warmy_reply_creates_review_task_when_gmail_forwarding_is_deferred():
     assert db.get_mapping(outreach_id="outreach-1").gmail_thread_id is None
 
 
+def test_warmy_event_for_foreign_campaign_is_ignored_before_mapping_lookup():
+    db = MemoryDatabase()
+
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("foreign campaign event must not inspect local mappings")
+
+    db.get_state = unexpected_lookup
+    db.get_mapping = unexpected_lookup
+    db.get_mappings_by_email = unexpected_lookup
+    workflows = SalesWorkflows(
+        enabled_settings(warmy_campaign_id="campaign-1"),
+        db,
+        warmy=FakeWarmy(),
+        pipedrive=FakePipedrive(),
+    )
+
+    workflows.handle_warmy_event(
+        {
+            "event_id": "foreign-reply-1",
+            "type": "reply.received",
+            "data": {
+                "campaignId": "campaign-other",
+                "prospectId": "prospect-other",
+                "prospectEmail": "other@example.com",
+            },
+        }
+    )
+
+    assert not db.suppressions
+
+
 def test_positive_conversion_is_blocked_until_pipedrive_automation_is_ready():
     db = MemoryDatabase()
     db.upsert_mapping(
