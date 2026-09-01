@@ -1140,6 +1140,101 @@ def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
     assert "why_line_a" not in reader.fieldnames
 
 
+def test_recipient_why_refresh_reuses_base_company_response(tmp_path):
+    initial = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: (_ for _ in ()).throw(
+            AssertionError("base company response should prevent another model call")
+        ),
+    )
+    initial.manifest.status = StageStatus.COMPLETED
+    initial._refresh_manifest()
+    article = "https://example.com/anchor"
+    why = WhyVariant(
+        text=(
+            "Hi [first name] just wanted to reach out since I saw on the news that "
+            "the new warehouse is opening in phoenix. Is there any chance we could "
+            "stay in touch regarding your future janitorial needs?"
+        ),
+        template_key="opening",
+        lead_event_id="event-anchor",
+        slots={"property": "the new warehouse", "location": "phoenix"},
+        confidence="high",
+        source_urls=[article],
+        status="valid",
+    )
+    response_path = initial.artifacts.raw_dir / "base-response.txt"
+    response_path.write_text(
+        json.dumps(
+            {
+                "selection": {
+                    "template_key": "opening",
+                    "lead_event_id": "event-anchor",
+                    "slots": {
+                        "property": "the new warehouse",
+                        "location": "Phoenix",
+                    },
+                    "confidence": "high",
+                    "source_urls": [article],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = CompanyProfile(
+        profile_key="profile-anchor",
+        company_id="company-anchor",
+        canonical_name="Anchor Co",
+        organization_ids=["org-anchor"],
+        lead_event_ids=["event-anchor"],
+        anchor_lead_event_id="event-anchor",
+        variants={"primary": why},
+        record_status="valid",
+    )
+    initial.artifacts.final_dir.mkdir(parents=True, exist_ok=True)
+    (initial.artifacts.final_dir / "company_profiles.jsonl").write_text(
+        profile.model_dump_json() + "\n", encoding="utf-8"
+    )
+    with (initial.artifacts.final_dir / "leads.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["lead_event_id", "company_id", "record_status"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "lead_event_id": "event-anchor",
+                "company_id": "company-anchor",
+                "record_status": "valid",
+            }
+        )
+    base_dir = initial.artifacts.raw_dir / "company-profiles"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    base_profile = profile.model_copy(
+        update={"company_id": "", "raw_artifact_path": str(response_path)}
+    )
+    (base_dir / "profile-anchor.json").write_text(
+        base_profile.model_dump_json(), encoding="utf-8"
+    )
+
+    runner = BulkRunner(
+        options(tmp_path, resume=True),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: (_ for _ in ()).throw(
+            AssertionError("base company response should prevent another model call")
+        ),
+    )
+    result = runner.refresh_why_lines()
+
+    assert result["counts"]["new_model_calls"] == 0
+    assert result["counts"]["migrated_companies"] == 1
+    assert result["counts"]["valid_lines"] == 1
+    assert result["counts"]["model_calls"] == 0
+
+
 def test_recipient_enrichment_adds_real_names_and_resumes_without_repeat_calls(
     tmp_path, monkeypatch
 ):

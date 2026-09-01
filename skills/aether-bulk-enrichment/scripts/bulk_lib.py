@@ -1484,7 +1484,7 @@ class BulkRunner:
                     cache_path.read_text(encoding="utf-8")
                 )
                 response_path = Path(cached.raw_artifact_path)
-                if response_path.exists():
+                if response_path.is_file():
                     why_line = _why_line_from_payload(
                         _parse_object(response_path.read_text(encoding="utf-8")),
                         allowed_event_ids=set(profile.lead_event_ids),
@@ -1516,7 +1516,7 @@ class BulkRunner:
                         prior_path.read_text(encoding="utf-8")
                     )
                     response_path = Path(prior.raw_artifact_path)
-                    if not response_path.exists():
+                    if not response_path.is_file():
                         continue
                     why_line = _why_line_from_payload(
                         _parse_object(response_path.read_text(encoding="utf-8")),
@@ -1535,6 +1535,51 @@ class BulkRunner:
                         migrated.model_dump(mode="json"),
                     )
                     break
+                if migrated is None:
+                    base_path = (
+                        self.artifacts.raw_dir
+                        / "company-profiles"
+                        / f"{profile.profile_key}.json"
+                    )
+                    if base_path.exists():
+                        base = CompanyProfile.model_validate_json(
+                            base_path.read_text(encoding="utf-8")
+                        )
+                        response_path = Path(base.raw_artifact_path)
+                        if response_path.is_file():
+                            why_line = _why_line_from_payload(
+                                _parse_object(
+                                    response_path.read_text(encoding="utf-8")
+                                ),
+                                allowed_event_ids=set(profile.lead_event_ids),
+                                known_company_names=[
+                                    profile.canonical_name,
+                                    *profile.aliases,
+                                ],
+                            )
+                            migrated = profile.model_copy(
+                                update={
+                                    "variants": {"primary": why_line},
+                                    "record_status": _profile_record_status(why_line),
+                                    "raw_artifact_path": base.raw_artifact_path,
+                                }
+                            )
+                        else:
+                            migrated = profile.model_copy(
+                                update={
+                                    "variants": base.variants,
+                                    "record_status": "review",
+                                    "raw_artifact_path": base.raw_artifact_path,
+                                }
+                            )
+                        self.artifacts.write_raw(
+                            stage,
+                            (
+                                f"{WHY_LINE_PROTOCOL_VERSION}/"
+                                f"{profile.profile_key}-profile.json"
+                            ),
+                            migrated.model_dump(mode="json"),
+                        )
                 if migrated is not None:
                     migrated_count += 1
                     cached_by_key[profile.profile_key] = migrated

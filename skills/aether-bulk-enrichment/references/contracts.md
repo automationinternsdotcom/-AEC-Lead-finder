@@ -90,7 +90,9 @@
 - A why-line-only refresh of a completed run uses its already deduplicated companies,
   preserves the source outputs, and writes a versioned revision with a separate
   `why_line_status` on lead rows. A deterministic contract-only revision may migrate
-  and rerender compatible cached responses without another model call.
+  and rerender compatible cached responses without another model call. This includes
+  the base `raw/company-profiles/` response because the base company stage and v4
+  revision use the same template-selection contract.
 
 ## Outputs
 

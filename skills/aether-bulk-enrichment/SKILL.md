@@ -96,7 +96,9 @@ Grok selects the approved template and slots in that response; deterministic cod
 renders the single why line. It preserves the original final directory and writes
 the revised dataset under `final/recipient-outreach-v4/`. When v3 responses already
 exist, v4 reparses and rerenders them locally under the stricter location contract;
-do not spend another model call solely for this deterministic migration.
+do not spend another model call solely for this deterministic migration. Base bulk
+company responses already use the v4 template-and-slots contract, so the refresh also
+reparses those cached responses locally instead of calling Grok a second time.
 
 For a qualitative pilot, add `--why-limit 20`, inspect the cached profile artifacts,
 then rerun the same command without the limit. Pilot responses are reused and do not
