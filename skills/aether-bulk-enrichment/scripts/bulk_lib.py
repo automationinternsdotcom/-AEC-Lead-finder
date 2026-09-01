@@ -874,11 +874,18 @@ class BulkRunner:
             open_review_ids=open_review_ids,
         )
         duplicate_blocks = 0
+        identity_alignments = 0
+        existing_sequence_skips = 0
         if existing_sales_db is not None:
             if not existing_sales_db.is_file():
                 raise ValueError(
                     f"existing sales database does not exist: {existing_sales_db}"
                 )
+            (
+                handoff,
+                identity_alignments,
+                existing_sequence_skips,
+            ) = _align_handoff_to_existing_companies(handoff, existing_sales_db)
             handoff, duplicate_blocks = _block_cross_run_duplicate_events(
                 handoff, existing_sales_db
             )
@@ -902,6 +909,8 @@ class BulkRunner:
                 for item in validated.sequences
             ),
             "cross_run_duplicate_blocks": duplicate_blocks,
+            "existing_company_id_alignments": identity_alignments,
+            "existing_sequence_skips": existing_sequence_skips,
         }
         self.state.set_stage_status(
             self.options.run_id,
@@ -4264,6 +4273,128 @@ def _block_cross_run_duplicate_events(
     )
 
 
+def _align_handoff_to_existing_companies(
+    handoff: SalesHandoff, sales_db: Path
+) -> tuple[SalesHandoff, int, int]:
+    """Reuse canonical sales company IDs and preserve one sequence per protocol."""
+    with sqlite3.connect(sales_db) as conn:
+        conn.row_factory = sqlite3.Row
+        companies = conn.execute(
+            "SELECT company_id, canonical_name, domain FROM sales_companies"
+        ).fetchall()
+        aliases = conn.execute(
+            "SELECT alias_type, alias_value, company_id FROM sales_company_aliases"
+        ).fetchall()
+        existing_sequences = {
+            (row["company_id"], row["campaign_protocol"])
+            for row in conn.execute(
+                "SELECT company_id, campaign_protocol FROM outreach_sequences"
+            )
+        }
+    by_domain: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    for row in companies:
+        if str(row["domain"] or "").strip():
+            by_domain[str(row["domain"]).strip().casefold()] = row["company_id"]
+        by_name[normalize_text(row["canonical_name"])] = row["company_id"]
+    for row in aliases:
+        if row["alias_type"] == "domain":
+            by_domain[str(row["alias_value"]).strip().casefold()] = row["company_id"]
+        elif row["alias_type"] == "name":
+            by_name[normalize_text(row["alias_value"])] = row["company_id"]
+
+    id_map: dict[str, str] = {}
+    for company in handoff.companies:
+        matches = {
+            value
+            for value in (
+                by_domain.get(company.domain.strip().casefold()) if company.domain else None,
+                by_name.get(normalize_text(company.canonical_name)),
+            )
+            if value
+        }
+        if len(matches) > 1:
+            raise ValueError(
+                f"existing sales identity conflict for {company.canonical_name}"
+            )
+        id_map[company.company_id] = next(iter(matches), company.company_id)
+
+    consolidated: dict[str, CompanySync] = {}
+    for company in handoff.companies:
+        company_id = id_map[company.company_id]
+        prior = consolidated.get(company_id)
+        legacy_ids = list(
+            dict.fromkeys(
+                [
+                    *(prior.legacy_ids if prior else []),
+                    *company.legacy_ids,
+                    *([company.company_id] if company.company_id != company_id else []),
+                ]
+            )
+        )
+        aliases_value = list(
+            dict.fromkeys([*(prior.aliases if prior else []), *company.aliases])
+        )
+        consolidated[company_id] = company.model_copy(
+            update={
+                "company_id": company_id,
+                "aliases": aliases_value,
+                "legacy_ids": legacy_ids,
+            }
+        )
+
+    events = [
+        item.model_copy(update={"company_id": id_map[item.company_id]})
+        for item in handoff.lead_events
+    ]
+    recipient_id_map: dict[str, str] = {}
+    recipients: list[RecipientSync] = []
+    for recipient in handoff.recipients:
+        company_id = id_map[recipient.company_id]
+        recipient_id = stable_uuid("recipient", company_id, recipient.person_id)
+        recipient_id_map[recipient.recipient_id] = recipient_id
+        recipients.append(
+            recipient.model_copy(
+                update={"company_id": company_id, "recipient_id": recipient_id}
+            )
+        )
+
+    sequences: list[OutreachSequenceSync] = []
+    skipped = 0
+    for sequence in handoff.sequences:
+        company_id = id_map[sequence.company_id]
+        if (company_id, sequence.campaign_protocol) in existing_sequences:
+            skipped += 1
+            continue
+        sequences.append(
+            sequence.model_copy(
+                update={
+                    "sequence_id": stable_uuid(
+                        "outreach-sequence",
+                        company_id,
+                        sequence.campaign_protocol,
+                    ),
+                    "company_id": company_id,
+                    "primary_recipient_id": recipient_id_map[
+                        sequence.primary_recipient_id
+                    ],
+                }
+            )
+        )
+    value = handoff.model_copy(
+        update={
+            "companies": list(consolidated.values()),
+            "lead_events": events,
+            "recipients": recipients,
+            "sequences": sequences,
+            "content_hash": "pending",
+        }
+    )
+    return (
+        value.model_copy(update={"content_hash": handoff_content_hash(value)}),
+        sum(old != new for old, new in id_map.items()),
+        skipped,
+    )
 def _likely_duplicate_event(current: dict, prior: dict, company_key: str) -> bool:
     current_url = canonicalize_url(str(current.get("article_url") or "")) if current.get("article_url") else ""
     prior_url = canonicalize_url(str(prior.get("article_url") or "")) if prior.get("article_url") else ""
