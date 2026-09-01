@@ -22,3 +22,6 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -q
+
+      - name: Run Scout self-check suite
+        run: ./check.sh

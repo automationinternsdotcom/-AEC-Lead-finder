@@ -1,0 +1,35 @@
+# Pipedrive has no public Automation CRUD API. Build these two workflows in the UI,
+# leave both inactive, and replace every TODO before enabling them.
+automations:
+  - name: Aether — qualified reply follow-ups
+    active: false
+    trigger:
+      entity: deal
+      event: enters_stage
+      pipeline_id: 47
+      stage_id: 311
+    required_sender: jw@aetherclean.com
+    guards:
+      - Aether Outreach State equals qualified_reply
+      - Aether Suppressed does not equal yes
+    steps:
+      - delay_business_days: 2
+        condition: Aether Outreach State is not replied or suppressed
+        email_template: TODO_APPROVED_PIPEDRIVE_FOLLOWUP_1
+        required_footer: "Unsubscribe: {{person.Aether Unsubscribe URL}}"
+      - delay_business_days: 5
+        condition: Aether Outreach State is not replied or suppressed
+        email_template: TODO_APPROVED_PIPEDRIVE_FOLLOWUP_2
+        required_footer: "Unsubscribe: {{person.Aether Unsubscribe URL}}"
+  - name: Aether — stop follow-ups after reply or suppression
+    active: false
+    trigger:
+      entity: deal
+      event: updated
+    conditions:
+      any:
+        - Aether Outreach State equals replied
+        - Aether Outreach State equals suppressed
+    actions:
+      - mark_matching_open_follow-up_activities_done
+      - notify_owner: Jordan

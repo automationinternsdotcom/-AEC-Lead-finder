@@ -21,6 +21,7 @@ logs/
 scout/logs/
 results/*
 !results/.gitkeep
+comparison/
 
 # Credentials (never commit)
 .env
@@ -28,8 +29,7 @@ results/*
 credentials.json
 client_secret_*.json
 
-# DB state — persisted via actions/cache, not git.
-# Long-term: migrate to S3 / Turso / Supabase if 7-day cache TTL becomes a problem.
+# DB state — scout.db may use Actions cache; aether_sales.sqlite stays on the Mac.
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

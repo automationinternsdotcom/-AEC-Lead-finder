@@ -8,16 +8,22 @@ The canonical daily command is:
 uv run scout/pipeline.py
 ```
 
-The pipeline runs six GPS-style steps:
+The V2 pipeline runs nine resumable in-process stages:
 
-1. `scout/run.py` discovers articles, judges them, deduplicates them, and writes
-   `raw_leads.csv` plus `uncertain_leads.csv`.
-2. `scout/find_decision_maker.py` fills decision makers in `raw_leads.csv`.
-3. `scout/agent_lead_enrichment.py` writes one contact row per person to
-   `contacts.csv`.
-4. `scout/apollo_lead_enrichment.py` optionally fills missing contact data.
-5. `scout/score_leads.py` scores and sorts the lead/contact CSVs.
-6. `scout/build_email.py` writes `leads_email.html`.
+1. Curated-site and validated-feed discovery.
+2. Typed qualification with review quarantine.
+3. Exact and coverage-checked fuzzy event deduplication.
+4. Sourced, approved-template why-line generation for LinkedIn and first-email outreach.
+5. Organization-grouped decision-maker research.
+6. Person-grouped contact research and verification.
+7. Optional, authorization-gated Apollo fallback.
+8. Complete-ID scoring.
+9. Compatibility CSV/HTML and auditable JSONL export.
+
+Each run persists stage state, raw/final artifacts, and a manifest under
+`results/<day>/runs/<run_id>/`. Use `--run-id ID --resume` to continue a run.
+Legacy stage programs remain compatibility entrypoints only; canonical `scout/`
+code must not import the deprecated top-level `pipeline/` package.
 
 The only intentional architecture difference from `gps-grok-leadfinder` is discovery:
 GPS uses Google News/provider expansion, while Aether AEC uses the curated
@@ -25,3 +31,4 @@ GPS uses Google News/provider expansion, while Aether AEC uses the curated
 
 Start commands from the repo root. Keep secrets in `.env`; do not commit them.
 Use `--apollo-go` only when the operator explicitly wants Apollo credits spent.
+NewsAPI and Apify are manual-only via `--newsapi` and `--apify`.

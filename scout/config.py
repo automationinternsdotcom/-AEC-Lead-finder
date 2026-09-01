@@ -23,7 +23,7 @@ def _path(value: str) -> str:
 BASE_URL = _get("CLIPROXY_BASE_URL", "http://localhost:8317/v1")
 API_KEY = _get("CLIPROXY_API_KEY", "ado-local-dev")
 GROK_MODEL = _get("GROK_MODEL", "grok-4.3")
-EXTRACTOR_MODEL = _get("EXTRACTOR_MODEL", "grok-3-mini")
+EXTRACTOR_MODEL = _get("EXTRACTOR_MODEL", "grok-4.3")
 DB_PATH = _path(_get("DB_PATH", "scout.db"))
 RESULTS_DIR = _path(_get("RESULTS_DIR", "results"))
 NEWS_WEBSITES_CSV = _path(_get("NEWS_WEBSITES_CSV", "news_websites.csv"))

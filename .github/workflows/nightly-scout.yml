@@ -30,7 +30,7 @@ jobs:
       CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
       CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
       GROK_MODEL: ${{ vars.GROK_MODEL || 'grok-4.3' }}
-      EXTRACTOR_MODEL: ${{ vars.EXTRACTOR_MODEL || 'grok-3-mini' }}
+      EXTRACTOR_MODEL: ${{ vars.EXTRACTOR_MODEL || 'grok-4.3' }}
       APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
       APOLLO_WEBHOOK_URL: ${{ secrets.APOLLO_WEBHOOK_URL }}
       DB_PATH: scout.db
@@ -52,9 +52,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: scout.db
-          key: scout-db-${{ github.ref_name }}-${{ github.run_id }}
+          key: scout-db-v2-3-production-${{ github.run_id }}
           restore-keys: |
-            scout-db-${{ github.ref_name }}-
+            scout-db-v2-3-production-
 
       - name: Sync dependencies
         run: uv sync
@@ -92,4 +92,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: scout.db
-          key: scout-db-${{ github.ref_name }}-${{ github.run_id }}
+          key: scout-db-v2-3-production-${{ github.run_id }}

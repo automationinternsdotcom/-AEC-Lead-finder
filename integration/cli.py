@@ -1,0 +1,213 @@
+"""Operator CLI. Mutating provider commands always require --apply and activation flags."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .campaign import campaign_manifest_hash, load_campaign
+from .config import Settings
+from .database import Database
+from .handoff import enqueue_handoff, load_handoff
+from .legacy_reconcile import apply_legacy_swvp_local, legacy_swvp_plan
+from .models import ApprovalBatch
+from .providers import WarmyClient
+from .provisioning import apply as apply_provisioning
+from .provisioning import plan as provisioning_plan
+from .scout_bridge import contacts_from_csv
+
+
+def _json(value) -> None:
+    print(json.dumps(value, indent=2, sort_keys=True, default=str))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    enqueue = commands.add_parser("enqueue-contacts")
+    enqueue.add_argument("csv")
+    enqueue.add_argument("--run-id", default="")
+
+    enqueue_handoff_command = commands.add_parser("enqueue-handoff")
+    enqueue_handoff_command.add_argument("handoff")
+
+    validate_handoff = commands.add_parser("validate-handoff")
+    validate_handoff.add_argument("handoff")
+
+    approve_batch = commands.add_parser("approve-batch")
+    approve_batch.add_argument("batch")
+    approve_batch.add_argument("--apply", action="store_true")
+
+    reconcile = commands.add_parser("reconcile-csv")
+    reconcile.add_argument("csv")
+    reconcile.add_argument("--run-id", default="reconcile-preview")
+
+    reconcile_swvp = commands.add_parser("reconcile-legacy-swvp")
+    reconcile_swvp.add_argument("--apply-local", action="store_true")
+
+    provision = commands.add_parser("provision")
+    provision.add_argument("--apply", action="store_true")
+
+    campaign = commands.add_parser("create-campaign-draft")
+    campaign.add_argument("manifest")
+    campaign.add_argument("--apply", action="store_true")
+
+    start = commands.add_parser("start-campaign")
+    start.add_argument("--apply", action="store_true")
+
+    commands.add_parser("doctor")
+    commands.add_parser("replay-dead-letters")
+    args = parser.parse_args()
+    settings = Settings.from_env()
+
+    if args.command == "validate-handoff":
+        handoff = load_handoff(args.handoff)
+        _json(
+            {
+                "valid": True,
+                "run_id": handoff.run_id,
+                "content_hash": handoff.content_hash,
+                "companies": len(handoff.companies),
+                "lead_events": len(handoff.lead_events),
+                "recipients": len(handoff.recipients),
+                "sequences": len(handoff.sequences),
+            }
+        )
+        return 0
+    if args.command == "enqueue-handoff":
+        _json(enqueue_handoff(Database(settings.database_path), args.handoff))
+        return 0
+    if args.command == "approve-batch":
+        batch = ApprovalBatch.model_validate_json(
+            Path(args.batch).read_text(encoding="utf-8")
+        )
+        if not args.apply:
+            _json({"valid": True, "would_approve": batch.model_dump(mode="json")})
+            return 0
+        db = Database(settings.database_path)
+        db.save_approval_batch(batch)
+        enqueued = 0
+        for sequence_id in batch.sequence_ids:
+            if db.enqueue_work(
+                "warmy.sequence.enroll",
+                f"warmy:sequence:enroll:{batch.batch_id}:{sequence_id}",
+                {"sequence_id": sequence_id, "approval_batch_id": batch.batch_id},
+            ):
+                enqueued += 1
+        _json(
+            {
+                "approved": batch.batch_id,
+                "sequences": batch.sequence_ids,
+                "enrollment_jobs": enqueued,
+            }
+        )
+        return 0
+
+    if args.command == "doctor":
+        _json(
+            {
+                "database_path": settings.database_path,
+                "database_ready": Database(settings.database_path).healthcheck(),
+                "warmy_key_configured": bool(settings.warmy_api_key),
+                "pipedrive_configured": bool(
+                    settings.pipedrive_api_token and settings.pipedrive_domain
+                ),
+                "gmail_delegation_configured": bool(
+                    settings.gmail_service_account_json
+                ),
+                "gmail_reply_forwarding_enabled": (
+                    settings.gmail_reply_forwarding_enabled
+                ),
+                "provider_writes_enabled": settings.provider_writes_enabled,
+                "campaign_activation_ready": settings.campaign_activation_ready,
+            }
+        )
+        return 0
+    if args.command == "replay-dead-letters":
+        replayed = Database(settings.database_path).replay_dead_letters()
+        _json({"replayed": replayed})
+        return 0
+    if args.command == "reconcile-csv":
+        contacts = contacts_from_csv(args.csv, args.run_id)
+        ids = [item.outreach_id for item in contacts]
+        emails = [item.email for item in contacts]
+        _json(
+            {
+                "rows_ready": len(contacts),
+                "unique_outreach_ids": len(set(ids)),
+                "duplicate_outreach_ids": len(ids) - len(set(ids)),
+                "unique_emails": len(set(emails)),
+                "duplicate_emails": len(emails) - len(set(emails)),
+            }
+        )
+        return 0
+    if args.command == "reconcile-legacy-swvp":
+        _json(
+            apply_legacy_swvp_local(settings.database_path)
+            if args.apply_local
+            else legacy_swvp_plan(settings.database_path)
+        )
+        return 0
+    if args.command == "provision":
+        _json(
+            apply_provisioning(settings) if args.apply else provisioning_plan(settings)
+        )
+        return 0
+    if args.command == "create-campaign-draft":
+        manifest = load_campaign(args.manifest, settings)
+        if not args.apply:
+            _json(
+                {
+                    "manifest": manifest.model_dump(mode="json"),
+                    "manifest_hash": campaign_manifest_hash(manifest),
+                }
+            )
+            return 0
+        settings.require_provider_writes()
+        warmy = WarmyClient(settings)
+        try:
+            _json(
+                warmy.create_campaign(
+                    manifest.model_dump(mode="json"), "aether-campaign-evergreen-v1"
+                )
+            )
+        finally:
+            warmy.close()
+        return 0
+    if args.command == "start-campaign":
+        if not args.apply:
+            _json(
+                {
+                    "would_start": settings.warmy_campaign_id,
+                    "ready": settings.campaign_activation_ready,
+                }
+            )
+            return 0
+        settings.require_campaign_activation()
+        warmy = WarmyClient(settings)
+        try:
+            _json(
+                warmy.start_campaign(
+                    settings.warmy_campaign_id, "aether-campaign-start-v1"
+                )
+            )
+        finally:
+            warmy.close()
+        return 0
+
+    if args.command == "enqueue-contacts":
+        raise ValueError(
+            "contacts.csv is analytical only; use enqueue-handoff with the hashed sales_handoff.json artifact"
+        )
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:  # noqa: BLE001 - CLI boundary renders a concise error
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)
