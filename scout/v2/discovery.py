@@ -39,6 +39,21 @@ ARIZONA_SCOPE_TERMS = (
     "cottonwood", "sedona", "nogales", "kingman", "marana", "sahuarita",
     "san tan valley",
 )
+NON_ARIZONA_STATE_TERMS = (
+    "alabama", "alaska", "arkansas", "california", "colorado", "connecticut",
+    "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana",
+    "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
+    "massachusetts", "michigan", "minnesota", "mississippi", "missouri",
+    "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico",
+    "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+    "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee",
+    "texas", "utah", "vermont", "virginia", "washington", "west virginia",
+    "wisconsin", "wyoming",
+)
+NON_ARIZONA_LOCALITY_TERMS = (
+    "oak harbor", "puget sound", "whidbey island", "albuquerque", "chicago",
+    "wilmette",
+)
 COMMON_FEED_PATHS = ("/feed", "/rss", "/rss.xml", "/feed.xml", "/atom.xml")
 ARTICLE_HINTS = (
     "article",
@@ -397,7 +412,19 @@ def _listing_partition_outside_window(
     exact = listing_query_date(url)
     if exact:
         return exact < since or (until is not None and exact > until)
-    match = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", urlsplit(url).path)
+    parts = urlsplit(url)
+    query = {key.casefold(): value for key, value in parse_qsl(parts.query)}
+    year = query.get("year", "")
+    month_value = query.get("month", "")
+    if re.fullmatch(r"20\d{2}", year) and re.fullmatch(r"0?[1-9]|1[0-2]", month_value):
+        month = (int(year), int(month_value))
+        return month < (since.year, since.month) or (
+            until is not None and month > (until.year, until.month)
+        )
+    match = re.search(
+        r"(?<!\d)(20\d{2})(?:[-_/]?)(0[1-9]|1[0-2])(?!\d)",
+        parts.path,
+    )
     if match:
         month = (int(match.group(1)), int(match.group(2)))
         return month < (since.year, since.month) or (
@@ -407,7 +434,42 @@ def _listing_partition_outside_window(
 
 
 def _direct_listing_in_arizona_scope(title: str, url: str, page_html: str) -> bool:
-    value = normalize_text(f"{title} {url} {page_html[:200_000]}")
+    document_title = ""
+    title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", page_html[:100_000])
+    if title_match:
+        document_title = re.sub(r"(?s)<[^>]+>", " ", title_match.group(1))
+    metadata = " ".join(
+        re.findall(
+            r'''(?is)<meta[^>]+(?:name|property)=["'](?:description|og:title|og:description|twitter:title)["'][^>]+content=["']([^"']+)["']''',
+            page_html[:100_000],
+        )
+    )
+    event_text = normalize_text(f"{title} {url} {document_title} {metadata}")
+    if any(
+        re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", event_text)
+        for term in NON_ARIZONA_LOCALITY_TERMS
+    ):
+        return False
+    event_nouns = (
+        r"property|project|center|plaza|development|facility|store|restaurant|"
+        r"warehouse|office|apartments?|community|campus|site"
+    )
+    for state in NON_ARIZONA_STATE_TERMS:
+        escaped = re.escape(state)
+        if re.search(
+            rf"\b(?:in|near|at|outside|located in) {escaped}\b"
+            rf"|\b{escaped} (?:{event_nouns})\b",
+            event_text,
+        ):
+            return False
+    value = normalize_text(f"{event_text} {page_html[:200_000]}")
+    # An Arizona owner/investor address does not make an out-of-state property
+    # event local. Remove those identity phrases before evaluating locality.
+    value = re.sub(
+        r"\barizona(?: based)? (?:investor|owner|developer|company|firm)\b",
+        " ",
+        value,
+    )
     return any(
         re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value)
         for term in ARIZONA_SCOPE_TERMS

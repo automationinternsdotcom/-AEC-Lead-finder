@@ -19,6 +19,8 @@ from v2.discovery import (  # noqa: E402
     CuratedSiteAdapter,
     CuratedSource,
     FeedRegistry,
+    _direct_listing_in_arizona_scope,
+    _listing_partition_outside_window,
     feed_status_after_failure,
     load_curated_sources,
     parse_direct_listing,
@@ -291,6 +293,70 @@ def test_curated_direct_listing_routes_non_arizona_article_to_review(tmp_path):
     assert len(batch.candidates) == 1
     assert batch.candidates[0].record_status == RecordStatus.REVIEW
     assert "direct_listing_arizona_scope_unverified" in batch.candidates[0].validation_errors
+
+
+def test_simoncre_oak_harbor_arizona_investor_article_routes_to_review(tmp_path):
+    source = CuratedSource(
+        source_id="source-simoncre",
+        name="SimonCRE News",
+        url="https://blog.simoncre.com/news/rss.xml",
+        domain="blog.simoncre.com",
+    )
+    article = (
+        "https://blog.simoncre.com/news/"
+        "haggen-anchored-shopping-center-in-oak-harbor-sells-to-arizona-investor"
+    )
+    title = "Haggen-anchored shopping center in Oak Harbor sells to Arizona investor"
+    feed = f"""<rss><channel><item><title>{title}</title><link>{article}</link>
+      <pubDate>Tue, 4 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>"""
+    page = f"""<html><head><title>{title}</title>
+      <meta name="description" content="Island Plaza is located in Oak Harbor, WA.">
+      <meta property="article:published_time" content="2026-08-04T10:00:00Z">
+      </head><body><p>Scottsdale, Arizona-based investor SimonCRE acquired the
+      shopping center in Oak Harbor on Whidbey Island in the Puget Sound region.</p>
+      </body></html>"""
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-simoncre", "2026-09-01", "2026-06-01")
+    artifacts = ArtifactStore(tmp_path / "results", "2026-09-01", "run-simoncre", store)
+    batch = CuratedSiteAdapter(
+        [source],
+        store,
+        artifacts,
+        fetch=lambda url: response(url, feed if url == source.url else page),
+        workers=1,
+    ).discover("run-simoncre", date(2026, 6, 1), until=date(2026, 9, 1))
+
+    assert len(batch.candidates) == 1
+    assert batch.candidates[0].record_status == RecordStatus.REVIEW
+    assert batch.candidates[0].validation_errors == [
+        "direct_listing_arizona_scope_unverified"
+    ]
+
+
+def test_non_arizona_investor_origin_does_not_block_phoenix_event():
+    assert _direct_listing_in_arizona_scope(
+        "Phoenix shopping center sells to Washington investor",
+        "https://example.com/phoenix-shopping-center-sale",
+        "<title>Phoenix shopping center sells to Washington investor</title>",
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "outside"),
+    [
+        ("https://example.com/sitemap-202605.xml", True),
+        ("https://example.com/sitemap-202606.xml", False),
+        ("https://example.com/sitemaps/2026-08/posts.xml", False),
+        ("https://example.com/sitemaps/2026/09/posts.xml", True),
+        ("https://example.com/posts.xml?year=2026&month=05", True),
+        ("https://example.com/posts.xml?month=8&year=2026", False),
+    ],
+)
+def test_monthly_listing_partition_pruning_uses_month_overlap(url, outside):
+    assert _listing_partition_outside_window(
+        url, date(2026, 6, 15), date(2026, 8, 10)
+    ) is outside
 
 
 def test_curated_direct_listing_reports_document_cap(tmp_path):
