@@ -109,8 +109,15 @@ def ingest_handoff(db, handoff: SalesHandoff, *, source_file: str = "") -> dict[
         db.upsert_lead_event(event)
     for recipient in handoff.recipients:
         db.upsert_recipient(recipient)
+    sequence_work_keys = {
+        sequence.sequence_id: (
+            f"scout:sequence:{sequence.sequence_id}:{sequence.merge_hash[:16]}"
+        )
+        for sequence in handoff.sequences
+    }
     for sequence in handoff.sequences:
-        db.save_sequence(sequence)
+        if sequence.eligibility_status != EligibilityStatus.READY:
+            db.save_sequence(sequence)
 
     lead_jobs = 0
     sequence_jobs = 0
@@ -143,10 +150,11 @@ def ingest_handoff(db, handoff: SalesHandoff, *, source_file: str = "") -> dict[
                 {"merge_hash": sequence.merge_hash},
             )
             continue
-        if db.enqueue_work(
-            "scout.sequence.sync",
-            f"scout:sequence:{sequence.sequence_id}:{sequence.merge_hash[:16]}",
-            {
+        if db.save_sequence_and_enqueue(
+            sequence,
+            kind="scout.sequence.sync",
+            dedupe_key=sequence_work_keys[sequence.sequence_id],
+            payload={
                 "sequence": sequence.model_dump(mode="json"),
                 "recipient": recipients[sequence.primary_recipient_id].model_dump(
                     mode="json"

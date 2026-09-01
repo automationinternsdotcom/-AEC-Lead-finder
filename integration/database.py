@@ -1202,78 +1202,114 @@ class Database:
 
     def save_sequence(self, sequence: OutreachSequenceSync) -> None:
         now = _now()
-        payload = sequence.model_dump(mode="json")
         with self.connection(immediate=True) as conn:
-            prior = conn.execute(
-                "SELECT approval_state, anchor_lead_event_id, primary_recipient_id, merge_hash FROM outreach_sequences WHERE sequence_id=?",
-                (sequence.sequence_id,),
+            self._save_sequence(conn, sequence, now)
+
+    def save_sequence_and_enqueue(
+        self,
+        sequence: OutreachSequenceSync,
+        *,
+        kind: str,
+        dedupe_key: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Atomically refresh sequence input and reserve its durable work item.
+
+        If the work key already exists, the sequence is left untouched.  This is
+        essential after a worker has replaced Scout's unsubscribe placeholder with
+        its provider-ready merge snapshot.  The immediate transaction also prevents
+        concurrent ingesters or a worker from observing a half-ingested sequence.
+        """
+        now = _now()
+        with self.connection(immediate=True) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM work_items WHERE dedupe_key=?",
+                (dedupe_key,),
             ).fetchone()
-            if prior and prior["approval_state"] != SequenceApprovalState.DRAFT.value:
-                immutable = (
-                    prior["anchor_lead_event_id"],
-                    prior["primary_recipient_id"],
-                    prior["merge_hash"],
-                )
-                incoming = (
-                    sequence.anchor_lead_event_id,
-                    sequence.primary_recipient_id,
-                    sequence.merge_hash,
-                )
-                if immutable != incoming:
-                    raise ValueError("approved outreach sequence is immutable")
-            conn.execute(
-                """INSERT INTO outreach_sequences(
-                       sequence_id, company_id, campaign_protocol,
-                       anchor_lead_event_id, primary_recipient_id, merge_hash,
-                       payload, eligibility_status, eligibility_reasons,
-                       created_at, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(sequence_id) DO UPDATE SET
-                       anchor_lead_event_id=CASE
-                         WHEN outreach_sequences.approval_state='draft'
-                         THEN excluded.anchor_lead_event_id
-                         ELSE outreach_sequences.anchor_lead_event_id END,
-                       primary_recipient_id=CASE
-                         WHEN outreach_sequences.approval_state='draft'
-                         THEN excluded.primary_recipient_id
-                         ELSE outreach_sequences.primary_recipient_id END,
-                       merge_hash=CASE
-                         WHEN outreach_sequences.approval_state='draft'
-                         THEN excluded.merge_hash
-                         ELSE outreach_sequences.merge_hash END,
-                       payload=excluded.payload,
-                       eligibility_status=excluded.eligibility_status,
-                       eligibility_reasons=excluded.eligibility_reasons,
-                       updated_at=excluded.updated_at""",
-                (
-                    sequence.sequence_id,
-                    sequence.company_id,
-                    sequence.campaign_protocol,
-                    sequence.anchor_lead_event_id,
-                    sequence.primary_recipient_id,
-                    sequence.merge_hash,
-                    _json(payload),
-                    sequence.eligibility_status.value,
-                    _json(sequence.eligibility_reasons),
-                    now,
-                    now,
-                ),
+            if existing:
+                return False
+            self._save_sequence(conn, sequence, now)
+            cursor = conn.execute(
+                """INSERT INTO work_items(
+                       kind, dedupe_key, payload, run_after, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (kind, dedupe_key, _json(payload), now, now, now),
             )
-            conn.execute(
-                "DELETE FROM outreach_sequence_events WHERE sequence_id=?",
-                (sequence.sequence_id,),
+            if cursor.rowcount != 1:
+                raise RuntimeError("failed to reserve sequence work item")
+        return True
+
+    def _save_sequence(
+        self,
+        conn: sqlite3.Connection,
+        sequence: OutreachSequenceSync,
+        now: str,
+    ) -> None:
+        prior = conn.execute(
+            "SELECT approval_state, anchor_lead_event_id, primary_recipient_id, merge_hash FROM outreach_sequences WHERE sequence_id=?",
+            (sequence.sequence_id,),
+        ).fetchone()
+        if prior and prior["approval_state"] != SequenceApprovalState.DRAFT.value:
+            immutable = (
+                prior["anchor_lead_event_id"],
+                prior["primary_recipient_id"],
+                prior["merge_hash"],
             )
-            conn.execute(
-                "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'anchor')",
-                (sequence.sequence_id, sequence.anchor_lead_event_id),
+            incoming = (
+                sequence.anchor_lead_event_id,
+                sequence.primary_recipient_id,
+                sequence.merge_hash,
             )
-            for lead_event_id in sorted(set(sequence.supporting_event_ids)):
-                if lead_event_id == sequence.anchor_lead_event_id:
-                    continue
-                conn.execute(
-                    "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'supporting')",
-                    (sequence.sequence_id, lead_event_id),
-                )
+            if immutable != incoming:
+                raise ValueError("approved outreach sequence is immutable")
+            # Approval freezes the complete send snapshot and its eligibility
+            # evidence, not only the three fields checked above.
+            return
+        payload = sequence.model_dump(mode="json")
+        conn.execute(
+            """INSERT INTO outreach_sequences(
+                   sequence_id, company_id, campaign_protocol,
+                   anchor_lead_event_id, primary_recipient_id, merge_hash,
+                   payload, eligibility_status, eligibility_reasons,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(sequence_id) DO UPDATE SET
+                   anchor_lead_event_id=excluded.anchor_lead_event_id,
+                   primary_recipient_id=excluded.primary_recipient_id,
+                   merge_hash=excluded.merge_hash,
+                   payload=excluded.payload,
+                   eligibility_status=excluded.eligibility_status,
+                   eligibility_reasons=excluded.eligibility_reasons,
+                   updated_at=excluded.updated_at""",
+            (
+                sequence.sequence_id,
+                sequence.company_id,
+                sequence.campaign_protocol,
+                sequence.anchor_lead_event_id,
+                sequence.primary_recipient_id,
+                sequence.merge_hash,
+                _json(payload),
+                sequence.eligibility_status.value,
+                _json(sequence.eligibility_reasons),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM outreach_sequence_events WHERE sequence_id=?",
+            (sequence.sequence_id,),
+        )
+        conn.execute(
+            "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'anchor')",
+            (sequence.sequence_id, sequence.anchor_lead_event_id),
+        )
+        for lead_event_id in sorted(set(sequence.supporting_event_ids)):
+            if lead_event_id == sequence.anchor_lead_event_id:
+                continue
+            conn.execute(
+                "INSERT INTO outreach_sequence_events(sequence_id, lead_event_id, event_role) VALUES (?, ?, 'supporting')",
+                (sequence.sequence_id, lead_event_id),
+            )
 
     def get_sequence(self, sequence_id: str) -> dict[str, Any] | None:
         with self.connection() as conn:
