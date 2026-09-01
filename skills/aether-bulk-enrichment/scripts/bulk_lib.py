@@ -104,6 +104,7 @@ RECIPIENT_CONTACT_STAGE = "contacts"
 RECIPIENT_APOLLO_STAGE = "apollo"
 MAX_PEOPLE_PER_COMPANY = 3
 APOLLO_MIN_REQUEST_INTERVAL_SECONDS = 1.25
+MAX_QUALIFICATION_RECOVERY_CALLS = 49
 ARTICLE_PRUNE_XPATHS = (
     '//*[contains(concat(" ", normalize-space(@class), " "), " wp-block-embed ")]',
     '//*[contains(concat(" ", normalize-space(@class), " "), " wp-embedded-content ")]',
@@ -242,6 +243,21 @@ class BulkOptions:
     search_fallback: bool = True
     reuse_discovery_corpus: bool = False
     batch_size: int = 20
+
+
+@dataclass(slots=True)
+class _QualificationRecoveryBudget:
+    remaining_calls: int
+
+    def claim(self) -> bool:
+        if self.remaining_calls <= 0:
+            return False
+        self.remaining_calls -= 1
+        return True
+
+
+class _QualificationBatchContractError(ValueError):
+    """A response cannot be assigned safely to every candidate in its batch."""
 
 
 class SourceCoverage(BaseModel):
@@ -2495,6 +2511,31 @@ class BulkRunner:
         }
 
     def _qualify_batch(self, candidates: list[DiscoveryCandidate]) -> dict[str, int]:
+        # A complete binary split needs at most 2n-1 calls. The absolute ceiling
+        # also protects direct callers that bypass the CLI's 25-candidate limit.
+        budget = _QualificationRecoveryBudget(
+            min(
+                MAX_QUALIFICATION_RECOVERY_CALLS,
+                max(1, (2 * len(candidates)) - 1),
+            )
+        )
+        return self._qualify_batch_attempt(candidates, budget)
+
+    def _qualify_batch_attempt(
+        self,
+        candidates: list[DiscoveryCandidate],
+        budget: _QualificationRecoveryBudget,
+    ) -> dict[str, int]:
+        if not candidates:
+            return {"qualified": 0, "rejected": 0, "reviews": 0}
+        if not budget.claim():
+            exc = _QualificationBatchContractError(
+                "qualification recovery call budget exhausted"
+            )
+            for candidate in candidates:
+                self._quarantine_bulk_candidate(candidate, "", exc)
+            return {"qualified": 0, "rejected": 0, "reviews": len(candidates)}
+
         batch_id = stable_hash(*(item.candidate_id for item in candidates))[:20]
         payload = [
             {
@@ -2520,16 +2561,20 @@ class BulkRunner:
         )
         started = datetime.now(timezone.utc).isoformat()
         response_path = ""
+        usage: dict = {}
         try:
             text, usage = self.model_call(self.options.model, prompt, [])
             response = self.artifacts.write_raw_text(
                 "qualify", f"{attempt_id}-response.txt", text
             )
             response_path = response["path"]
-            raw = _parse_object(text)
+            try:
+                raw = _parse_object(text)
+            except (TypeError, ValueError) as exc:
+                raise _QualificationBatchContractError(str(exc)) from exc
             expected = {item.candidate_id for item in candidates}
             if set(raw) != expected:
-                raise ValueError(
+                raise _QualificationBatchContractError(
                     "qualification IDs must match exactly; "
                     f"missing={sorted(expected - set(raw))}, "
                     f"unknown={sorted(set(raw) - expected)}"
@@ -2543,6 +2588,33 @@ class BulkRunner:
                     )
                 except Exception as exc:
                     invalid[key] = exc
+        except _QualificationBatchContractError as exc:
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id,
+                run_id=self.options.run_id,
+                stage="qualify",
+                provider="model",
+                target_type="discovery_candidate_batch",
+                target_id=batch_id,
+                status="review",
+                token_usage=usage,
+                request_artifact_path=request["path"],
+                response_artifact_path=response_path,
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if len(candidates) > 1 and budget.remaining_calls > 0:
+                midpoint = len(candidates) // 2
+                left = self._qualify_batch_attempt(candidates[:midpoint], budget)
+                right = self._qualify_batch_attempt(candidates[midpoint:], budget)
+                return {
+                    key: left[key] + right[key]
+                    for key in ("qualified", "rejected", "reviews")
+                }
+            for candidate in candidates:
+                self._quarantine_bulk_candidate(candidate, response_path, exc)
+            return {"qualified": 0, "rejected": 0, "reviews": len(candidates)}
         except Exception as exc:
             for candidate in candidates:
                 self._quarantine_bulk_candidate(candidate, response_path, exc)
@@ -2554,6 +2626,7 @@ class BulkRunner:
                 target_type="discovery_candidate_batch",
                 target_id=batch_id,
                 status="review",
+                token_usage=usage,
                 request_artifact_path=request["path"],
                 response_artifact_path=response_path,
                 error={"type": type(exc).__name__, "message": str(exc)},

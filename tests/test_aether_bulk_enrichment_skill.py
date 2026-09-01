@@ -1137,6 +1137,226 @@ def test_bulk_qualification_is_bounded_exact_and_person_free(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM v2_people").fetchone()[0] == 0
 
 
+def _qualification_candidate(index: int) -> DiscoveryCandidate:
+    candidate_id = f"00000000-0000-0000-0000-{index:012d}"
+    url = f"https://example.com/qualification-{index}"
+    return DiscoveryCandidate(
+        candidate_id=candidate_id,
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url=url,
+        resolved_url=url,
+        canonical_url=url,
+        title=f"Qualification story {index}",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={"selected_for_qualification": True},
+    )
+
+
+@pytest.mark.parametrize("contract_failure", ["missing", "typo"])
+def test_bulk_qualification_recovers_peers_from_one_bad_id(
+    tmp_path, contract_failure
+):
+    calls = []
+    poison_id = _qualification_candidate(19).candidate_id
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        ids = [row["candidate_id"] for row in rows]
+        calls.append(ids)
+        payload = {
+            candidate_id: {
+                "qualified": False,
+                "filter_reason": "Not a specific Arizona commercial-property event",
+            }
+            for candidate_id in ids
+        }
+        if poison_id in payload:
+            value = payload.pop(poison_id)
+            if contract_failure == "typo":
+                payload[f"{poison_id[:-1]}a"] = value
+        return json.dumps(payload), {"input_tokens": len(rows), "output_tokens": 1}
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=20, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    for index in range(20):
+        runner.state.save_candidate(_qualification_candidate(index))
+
+    counters = runner._qualify()
+
+    assert counters == {
+        "submitted": 20,
+        "batches": 1,
+        "qualified": 0,
+        "rejected": 19,
+        "reviews": 1,
+    }
+    assert [len(ids) for ids in calls] == [20, 10, 10, 5, 5, 2, 3, 1, 2, 1, 1]
+    candidates = {
+        item.candidate_id: item
+        for item in runner.state.candidates_for_run("bulk-run")
+    }
+    assert candidates[poison_id].record_status == RecordStatus.REVIEW
+    assert all(
+        item.record_status == RecordStatus.REJECTED
+        for candidate_id, item in candidates.items()
+        if candidate_id != poison_id
+    )
+    with runner.state.connect() as conn:
+        attempts = list(
+            conn.execute(
+                "SELECT status, token_usage_json, request_artifact_path, "
+                "response_artifact_path FROM v2_provider_attempts "
+                "WHERE run_id=? AND stage='qualify'",
+                ("bulk-run",),
+            )
+        )
+    assert len(attempts) == len(calls)
+    assert [row["status"] for row in attempts].count("review") == 6
+    assert [row["status"] for row in attempts].count("completed") == 5
+    assert all(Path(row["request_artifact_path"]).is_file() for row in attempts)
+    assert all(Path(row["response_artifact_path"]).is_file() for row in attempts)
+    assert sum(
+        json.loads(row["token_usage_json"])["input_tokens"] for row in attempts
+    ) == sum(
+        len(ids) for ids in calls
+    )
+
+
+def test_bulk_qualification_keeps_irrecoverable_singleton_in_review(tmp_path):
+    def model_call(model, prompt, tools):
+        return "not json", {"input_tokens": 7, "output_tokens": 2}
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=20, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    candidate = _qualification_candidate(0)
+    runner.state.save_candidate(candidate)
+
+    assert runner._qualify() == {
+        "submitted": 1,
+        "batches": 1,
+        "qualified": 0,
+        "rejected": 0,
+        "reviews": 1,
+    }
+    stored = runner.state.candidates_by_ids({candidate.candidate_id})[0]
+    assert stored.record_status == RecordStatus.REVIEW
+    assert "model response did not contain a JSON object" in stored.validation_errors[0]
+    review = runner.state.reviews_for_run("bulk-run")[0]
+    assert review.record_id == candidate.candidate_id
+    assert review.raw_artifact_path
+    assert Path(review.raw_artifact_path).read_text() == "not json"
+    with runner.state.connect() as conn:
+        attempt = conn.execute(
+            "SELECT status, token_usage_json, response_artifact_path "
+            "FROM v2_provider_attempts WHERE run_id=? AND stage='qualify'",
+            ("bulk-run",),
+        ).fetchone()
+    assert attempt["status"] == "review"
+    assert json.loads(attempt["token_usage_json"]) == {
+        "input_tokens": 7,
+        "output_tokens": 2,
+    }
+    assert attempt["response_artifact_path"] == review.raw_artifact_path
+
+
+def test_bulk_qualification_transport_error_does_not_split_batch(tmp_path):
+    calls = 0
+
+    def model_call(model, prompt, tools):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("provider unavailable")
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=20, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    candidates = [_qualification_candidate(index) for index in range(20)]
+    for candidate in candidates:
+        runner.state.save_candidate(candidate)
+
+    assert runner._qualify() == {
+        "submitted": 20,
+        "batches": 1,
+        "qualified": 0,
+        "rejected": 0,
+        "reviews": 20,
+    }
+    assert calls == 1
+    with runner.state.connect() as conn:
+        attempts = list(
+            conn.execute(
+                "SELECT status, response_artifact_path, error_json "
+                "FROM v2_provider_attempts WHERE run_id=? AND stage='qualify'",
+                ("bulk-run",),
+            )
+        )
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "review"
+    assert attempts[0]["response_artifact_path"] == ""
+    assert json.loads(attempts[0]["error_json"])["type"] == "RuntimeError"
+
+
+def test_bulk_qualification_recovery_is_call_bounded_ordered_and_idempotent(tmp_path):
+    calls = []
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        calls.append([row["candidate_id"] for row in rows])
+        return "{}", {"input_tokens": 1}
+
+    runner = BulkRunner(
+        options(tmp_path, workers=1),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    candidates = [_qualification_candidate(index) for index in range(30)]
+    for candidate in candidates:
+        runner.state.save_candidate(candidate)
+
+    first = runner._qualify_batch(candidates)
+    first_order = list(calls)
+    second = runner._qualify_batch(candidates)
+    second_order = calls[len(first_order):]
+
+    assert first == second == {"qualified": 0, "rejected": 0, "reviews": 30}
+    assert len(first_order) == bulk_lib.MAX_QUALIFICATION_RECOVERY_CALLS == 49
+    assert second_order == first_order
+    assert first_order[0] == [item.candidate_id for item in candidates]
+    assert first_order[1] == [item.candidate_id for item in candidates[:15]]
+    with runner.state.connect() as conn:
+        attempt_count = conn.execute(
+            "SELECT COUNT(*) FROM v2_provider_attempts "
+            "WHERE run_id=? AND stage='qualify'",
+            ("bulk-run",),
+        ).fetchone()[0]
+    assert attempt_count == len(first_order)
+    assert len(runner.state.reviews_for_run("bulk-run")) == len(candidates)
+
+
 def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_path):
     def model_call(model, prompt, tools):
         rows = json.loads(prompt.split("Candidates:\n", 1)[1])
