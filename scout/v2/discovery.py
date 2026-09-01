@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import re
+import xml.etree.ElementTree as ET
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import feedparser
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +27,9 @@ from .state import StateStore
 
 
 MAX_LINKS_PER_SOURCE = 25
+MAX_DIRECT_LISTING_DOCUMENTS = 100
+MAX_DIRECT_LISTING_DEPTH = 4
+MAX_DIRECT_LISTING_ITEMS = 1_000
 COMMON_FEED_PATHS = ("/feed", "/rss", "/rss.xml", "/feed.xml", "/atom.xml")
 ARTICLE_HINTS = (
     "article",
@@ -120,6 +125,20 @@ class DiscoveryBatch(BaseModel):
 class ParsedIndex:
     article_links: list[tuple[str, str]]
     feed_links: list[str]
+
+
+@dataclass(slots=True, frozen=True)
+class DirectListingEntry:
+    url: str
+    title: str = ""
+    published_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class DirectListing:
+    kind: str
+    entries: list[DirectListingEntry]
+    children: list[str]
 
 
 class _IndexParser(HTMLParser):
@@ -238,6 +257,171 @@ def parse_index(html: str, base_url: str) -> ParsedIndex:
         if same_registrable_domain(url, base_url) and url not in feeds:
             feeds.append(url)
     return ParsedIndex(articles[:MAX_LINKS_PER_SOURCE], feeds)
+
+
+def parse_direct_listing(
+    content: bytes,
+    base_url: str,
+    source_url: str,
+    *,
+    max_items: int = MAX_DIRECT_LISTING_ITEMS,
+) -> DirectListing | None:
+    """Parse a bounded exact curated listing, or return ``None`` for HTML.
+
+    Supported listings are WordPress post arrays, JSON Feed, RSS/Atom,
+    sitemap urlsets, and sitemap indexes. Every emitted URL remains on the
+    curated source's registrable domain.
+    """
+    if max_items <= 0:
+        return DirectListing(kind="bounded", entries=[], children=[])
+    payload = gzip.decompress(content) if content[:2] == b"\x1f\x8b" else content
+    stripped = payload.lstrip()
+    if stripped[:1] in {b"[", b"{"}:
+        try:
+            value = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(value, list):
+            entries = _json_listing_entries(
+                value, base_url, source_url, max_items=max_items, wordpress=True
+            )
+            return DirectListing(kind="wordpress", entries=entries, children=[])
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            entries = _json_listing_entries(
+                value["items"], base_url, source_url, max_items=max_items, wordpress=False
+            )
+            return DirectListing(kind="json-feed", entries=entries, children=[])
+        return None
+    if stripped[:1] != b"<":
+        return None
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return None
+    root_name = _xml_local(root.tag)
+    if root_name in {"rss", "feed", "rdf"}:
+        parsed = feedparser.parse(payload)
+        valid, _ = _valid_feed_entries(parsed.entries, source_url, max_entries=max_items)
+        return DirectListing(
+            kind="feed",
+            entries=[
+                DirectListingEntry(
+                    url=item["url"],
+                    title=item["title"],
+                    published_at=item["published_at"],
+                )
+                for item in valid
+            ],
+            children=[],
+        )
+    if root_name == "sitemapindex":
+        children: list[str] = []
+        for node in root:
+            raw_url = _xml_child_text(node, "loc")
+            url = _same_domain_url(raw_url, base_url, source_url)
+            if url and url not in children:
+                children.append(url)
+                if len(children) >= max_items:
+                    break
+        return DirectListing(kind="sitemapindex", entries=[], children=children)
+    if root_name == "urlset":
+        entries: list[DirectListingEntry] = []
+        seen: set[str] = set()
+        for node in root:
+            url = _same_domain_url(_xml_child_text(node, "loc"), base_url, source_url)
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            # News sitemap publication_date is authoritative. Ordinary
+            # sitemap lastmod is deliberately not treated as publication.
+            published = parse_datetime(_xml_descendant_text(node, "publication_date"))
+            entries.append(
+                DirectListingEntry(
+                    url=url,
+                    title=_xml_descendant_text(node, "title"),
+                    published_at=published,
+                )
+            )
+            if len(entries) >= max_items:
+                break
+        return DirectListing(kind="urlset", entries=entries, children=[])
+    return None
+
+
+def listing_query_date(url: str) -> date | None:
+    """Return a recognized exact ``?date=YYYY-MM-DD`` listing partition."""
+    for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        if key.casefold() != "date" or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            continue
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _json_listing_entries(
+    rows: list,
+    base_url: str,
+    source_url: str,
+    *,
+    max_items: int,
+    wordpress: bool,
+) -> list[DirectListingEntry]:
+    entries: list[DirectListingEntry] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_url = row.get("link") if wordpress else row.get("url") or row.get("external_url")
+        url = _same_domain_url(str(raw_url or ""), base_url, source_url)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        raw_title = row.get("title") or ""
+        if isinstance(raw_title, dict):
+            raw_title = raw_title.get("rendered") or raw_title.get("raw") or ""
+        raw_date = (
+            row.get("date_gmt") or row.get("date")
+            if wordpress
+            else row.get("date_published")
+        )
+        entries.append(
+            DirectListingEntry(
+                url=url,
+                title=str(raw_title),
+                published_at=parse_datetime(str(raw_date or "")),
+            )
+        )
+        if len(entries) >= max_items:
+            break
+    return entries
+
+
+def _same_domain_url(raw_url: str, base_url: str, source_url: str) -> str:
+    try:
+        url = canonicalize_url(urljoin(base_url, raw_url))
+    except ValueError:
+        return ""
+    return url if same_registrable_domain(url, source_url) else ""
+
+
+def _xml_local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].casefold()
+
+
+def _xml_child_text(node: ET.Element, name: str) -> str:
+    for child in node:
+        if _xml_local(child.tag) == name and child.text:
+            return child.text.strip()
+    return ""
+
+
+def _xml_descendant_text(node: ET.Element, name: str) -> str:
+    for child in node.iter():
+        if _xml_local(child.tag) == name and child.text:
+            return child.text.strip()
+    return ""
 
 
 def article_score(url: str, title: str, base_url: str) -> int:
@@ -402,25 +586,71 @@ class CuratedSiteAdapter:
             index_artifact = self.artifacts.write_raw_text(
                 "discover", f"source-{source.source_id}.html", index.text
             )
-            parsed = parse_index(index.text, index.url)
+            direct = parse_direct_listing(index.content, index.url, source.url)
+            parsed = parse_index(index.text, index.url) if direct is None else None
         except Exception as error:
             batch.source_errors.append(
                 {"source_id": source.source_id, "url": source.url, "error": repr(error)}
             )
             return batch
-        for link, title in parsed.article_links:
+        listing_entries: list[DirectListingEntry] = []
+        if direct is not None:
+            listing_entries.extend(direct.entries)
+            queue = [(url, 1) for url in direct.children]
+            seen_docs = {canonicalize_url(source.url)}
+            while queue and len(seen_docs) < MAX_DIRECT_LISTING_DOCUMENTS:
+                listing_url, depth = queue.pop(0)
+                partition = listing_query_date(listing_url)
+                if partition and (partition < since or (until is not None and partition > until)):
+                    continue
+                if listing_url in seen_docs or depth > MAX_DIRECT_LISTING_DEPTH:
+                    continue
+                seen_docs.add(listing_url)
+                try:
+                    response = self.fetch(listing_url)
+                    child = parse_direct_listing(
+                        response.content,
+                        response.url,
+                        source.url,
+                        max_items=max(0, MAX_DIRECT_LISTING_ITEMS - len(listing_entries)),
+                    )
+                    if child is None:
+                        continue
+                    listing_entries.extend(child.entries)
+                    queue.extend((url, depth + 1) for url in child.children)
+                except Exception as error:
+                    batch.source_errors.append(
+                        {"source_id": source.source_id, "url": listing_url, "error": repr(error)}
+                    )
+                if len(listing_entries) >= MAX_DIRECT_LISTING_ITEMS:
+                    break
+            links = [(item.url, item.title, item.published_at) for item in listing_entries]
+        else:
+            links = [(url, title, None) for url, title in parsed.article_links]
+        seen_articles: set[str] = set()
+        for link, title, listing_published in links:
+            if link in seen_articles:
+                continue
+            seen_articles.add(link)
+            if listing_published and (
+                listing_published.date() < since
+                or (until is not None and listing_published.date() > until)
+            ):
+                continue
             try:
                 page = self.fetch(link)
                 canonical = canonicalize_url(page.url)
+                if not same_registrable_domain(canonical, source.url):
+                    continue
                 artifact = self.artifacts.write_raw_text(
                     "discover", f"article-{stable_hash(canonical)[:20]}.html", page.text
                 )
-                published = publication_date(page.text, canonical)
+                published = publication_date(page.text, canonical) or listing_published
                 errors: list[str] = []
             except Exception as error:
                 canonical = canonicalize_url(link)
                 published_date = date_from_url(canonical)
-                published = (
+                published = listing_published or (
                     datetime.combine(published_date, time.min, tzinfo=timezone.utc)
                     if published_date
                     else None
@@ -590,7 +820,12 @@ def feed_status_after_failure(consecutive_failures: int, inactive_days: int) -> 
     return FeedStatus.PENDING
 
 
-def _valid_feed_entries(entries: Iterable, source_url: str) -> tuple[list[dict], list[str]]:
+def _valid_feed_entries(
+    entries: Iterable,
+    source_url: str,
+    *,
+    max_entries: int = 0,
+) -> tuple[list[dict], list[str]]:
     valid: list[dict] = []
     problems: list[str] = []
     seen: set[str] = set()
@@ -630,6 +865,8 @@ def _valid_feed_entries(entries: Iterable, source_url: str) -> tuple[list[dict],
                 "published_at": published,
             }
         )
+        if max_entries > 0 and len(valid) >= max_entries:
+            break
     return valid, problems
 
 

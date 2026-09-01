@@ -889,6 +889,9 @@ class BulkRunner:
             handoff, duplicate_blocks = _block_cross_run_duplicate_events(
                 handoff, existing_sales_db
             )
+        handoff, duplicate_primary_email_blocks = _block_duplicate_primary_emails(
+            handoff
+        )
         relative_name = (
             f"{WHY_LINE_PROTOCOL_VERSION}/{RECIPIENT_PROTOCOL_VERSION}/sales_handoff.json"
         )
@@ -909,6 +912,7 @@ class BulkRunner:
                 for item in validated.sequences
             ),
             "cross_run_duplicate_blocks": duplicate_blocks,
+            "duplicate_primary_email_blocks": duplicate_primary_email_blocks,
             "existing_company_id_alignments": identity_alignments,
             "existing_sequence_skips": existing_sequence_skips,
         }
@@ -2329,7 +2333,8 @@ class BulkRunner:
             coverage.errors.append(f"robots:{type(exc).__name__}")
         for path in CONVENTIONAL_SITEMAPS:
             roots.append(canonicalize_url(urljoin(base, path)))
-        return list(dict.fromkeys(roots))
+        explicit_source = canonicalize_url(source.url)
+        return [url for url in dict.fromkeys(roots) if url != explicit_source]
 
     def _fallback_source(
         self, coverage: SourceCoverage
@@ -4270,6 +4275,88 @@ def _block_cross_run_duplicate_events(
     return (
         value.model_copy(update={"content_hash": handoff_content_hash(value)}),
         len(blocked_ids),
+    )
+
+
+def _block_duplicate_primary_emails(
+    handoff: SalesHandoff,
+) -> tuple[SalesHandoff, int]:
+    """Allow at most one READY sequence per normalized recipient mailbox."""
+    companies = {item.company_id: item for item in handoff.companies}
+    events = {item.lead_event_id: item for item in handoff.lead_events}
+    recipients = {item.recipient_id: item for item in handoff.recipients}
+    ready_by_email: dict[str, list[OutreachSequenceSync]] = defaultdict(list)
+    for sequence in handoff.sequences:
+        if sequence.eligibility_status != EligibilityStatus.READY:
+            continue
+        recipient = recipients[sequence.primary_recipient_id]
+        ready_by_email[recipient.email.strip().casefold()].append(sequence)
+
+    loser_to_winner: dict[str, str] = {}
+    for sequences in ready_by_email.values():
+        if len(sequences) < 2:
+            continue
+
+        def priority(sequence: OutreachSequenceSync) -> tuple:
+            company = companies[sequence.company_id]
+            recipient = recipients[sequence.primary_recipient_id]
+            event = events[sequence.anchor_lead_event_id]
+            email_domain = recipient.email.rsplit("@", 1)[-1].strip().casefold()
+            company_domain = company.domain.strip().casefold()
+            company_tokens = {
+                token
+                for token in re.findall(
+                    r"[a-z0-9]+", normalize_text(company.canonical_name)
+                )
+                if len(token) > 2 and token not in _BUSINESS_GROUNDING_STOPWORDS
+            }
+            scope_tokens = set(
+                re.findall(r"[a-z0-9]+", normalize_text(recipient.scope))
+            )
+            try:
+                anchor_date = date.fromisoformat(event.date_posted).toordinal()
+            except ValueError:
+                anchor_date = date.min.toordinal()
+            return (
+                -int(bool(company_domain) and email_domain == company_domain),
+                -len(company_tokens & scope_tokens),
+                -anchor_date,
+                -event.score,
+                -recipient.role_score,
+                sequence.sequence_id,
+            )
+
+        winner = min(sequences, key=priority)
+        for sequence in sequences:
+            if sequence.sequence_id != winner.sequence_id:
+                loser_to_winner[sequence.sequence_id] = winner.sequence_id
+
+    if not loser_to_winner:
+        return handoff, 0
+
+    updated_sequences: list[OutreachSequenceSync] = []
+    for sequence in handoff.sequences:
+        winner_id = loser_to_winner.get(sequence.sequence_id)
+        if not winner_id:
+            updated_sequences.append(sequence)
+            continue
+        reason = f"duplicate_primary_email:{winner_id}"
+        updated_sequences.append(
+            sequence.model_copy(
+                update={
+                    "eligibility_status": EligibilityStatus.BLOCKED,
+                    "eligibility_reasons": list(
+                        dict.fromkeys([*sequence.eligibility_reasons, reason])
+                    ),
+                }
+            )
+        )
+    value = handoff.model_copy(
+        update={"sequences": updated_sequences, "content_hash": "pending"}
+    )
+    return (
+        value.model_copy(update={"content_hash": handoff_content_hash(value)}),
+        len(loser_to_winner),
     )
 
 

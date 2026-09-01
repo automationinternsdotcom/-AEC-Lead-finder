@@ -335,6 +335,31 @@ def test_archive_discovery_reads_gzip_sitemap_and_exact_dates(tmp_path):
     assert candidates[0].published_at.date().isoformat() == "2026-07-25"
 
 
+def test_archive_roots_do_not_refetch_exact_curated_sitemap(tmp_path):
+    source_path = tmp_path / "sources.csv"
+    runner_options = options(tmp_path, sources_csv=source_path)
+    exact = "https://example.com/sitemap.xml?year=2026"
+    source_path.write_text(f"Resource Name,URL\nExact sitemap,{exact}\n")
+    runner = BulkRunner(
+        runner_options,
+        fetch=lambda url: response(
+            url,
+            f"Sitemap: {exact}\nSitemap: https://example.com/other-sitemap.xml",
+        ),
+        model_call=lambda *args: ("{}", {}),
+    )
+    coverage = bulk_lib.SourceCoverage(
+        source_id=runner.sources[0].source_id,
+        source_name=runner.sources[0].name,
+        source_url=runner.sources[0].url,
+    )
+
+    roots = runner._sitemap_roots(runner.sources[0], coverage)
+
+    assert exact not in roots
+    assert "https://example.com/other-sitemap.xml" in roots
+
+
 def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tmp_path):
     article = "https://example.com/2026/07/25/major-commercial-project-opens"
     sitemap = f"""<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
