@@ -23,6 +23,7 @@ from bulk_lib import (  # noqa: E402
     CompanyProfile,
     WhyVariant,
     _archive_url_in_scope,
+    _block_duplicate_primary_emails,
     _bulk_sales_handoff,
     _first_name,
     _likely_duplicate_event,
@@ -45,9 +46,17 @@ from v2.contracts import (  # noqa: E402
     VerificationStatus,
 )
 from integration.handoff import handoff_content_hash  # noqa: E402
-from integration.models import EligibilityStatus  # noqa: E402
+from integration.models import (  # noqa: E402
+    CompanySync,
+    EligibilityStatus,
+    EventRole,
+    LeadEventSync,
+    OutreachSequenceSync,
+    RecipientSync,
+    SalesHandoff,
+)
 from v2.http import FetchResponse  # noqa: E402
-from v2.discovery import load_curated_sources  # noqa: E402
+from v2.discovery import DiscoveryBatch, load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 from v2.verification import ContactVerifier as RealContactVerifier  # noqa: E402
 
@@ -211,6 +220,145 @@ def test_bulk_sales_handoff_ranks_and_gates_recipients():
     assert handoff.content_hash == handoff_content_hash(handoff)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_primary_email_keeps_desert_ridge_independent_of_order(reverse):
+    trader_sequence_id = "22f60a30-8ea8-5d66-ba93-cd9408d17f46"
+    desert_ridge_sequence_id = "d2e25a31-0429-517f-8257-09d8ee7d3c68"
+    companies = [
+        CompanySync(
+            company_id="trader-joes",
+            canonical_name="Trader Joe's",
+            domain="traderjoes.com",
+        ),
+        CompanySync(
+            company_id="desert-ridge",
+            canonical_name="Desert Ridge Marketplace",
+            domain="shopdesertridge.com",
+        ),
+    ]
+    events = [
+        LeadEventSync(
+            run_id="bulk-run",
+            lead_event_id="trader-event",
+            company_id="trader-joes",
+            organization_name="Trader Joe's",
+            event_role=EventRole.ANCHOR,
+            event="Trader Joe's opens a new store",
+            location="Phoenix",
+            date_posted="2026-06-16",
+            score=80,
+            confidence="high",
+            record_status="valid",
+            actionable_route=True,
+            crm_eligible=True,
+        ),
+        LeadEventSync(
+            run_id="bulk-run",
+            lead_event_id="desert-ridge-event",
+            company_id="desert-ridge",
+            organization_name="Desert Ridge Marketplace",
+            event_role=EventRole.ANCHOR,
+            event="Desert Ridge Marketplace announces a new tenant",
+            location="Phoenix",
+            date_posted="2026-08-27",
+            score=75,
+            confidence="high",
+            record_status="valid",
+            actionable_route=True,
+            crm_eligible=True,
+        ),
+    ]
+    recipients = [
+        RecipientSync(
+            recipient_id="trader-recipient",
+            company_id="trader-joes",
+            person_id="tim-ray-trader",
+            full_name="Tim Ray",
+            first_name="Tim",
+            title="Vice President",
+            scope="Desert Ridge Marketplace / Vestar",
+            email="tray@vestar.com",
+            role_score=107,
+            rank=1,
+            primary=True,
+        ),
+        RecipientSync(
+            recipient_id="desert-ridge-recipient",
+            company_id="desert-ridge",
+            person_id="tim-ray-desert-ridge",
+            full_name="Tim Ray",
+            first_name="Tim",
+            title="Vice President",
+            scope="Desert Ridge Marketplace / Vestar",
+            email="TRAY@VESTAR.COM",
+            role_score=102,
+            rank=1,
+            primary=True,
+        ),
+    ]
+
+    def sequence(sequence_id, company_id, event_id, recipient_id):
+        return OutreachSequenceSync(
+            sequence_id=sequence_id,
+            run_id="bulk-run",
+            company_id=company_id,
+            campaign_protocol="recipient-outreach-v4",
+            anchor_lead_event_id=event_id,
+            primary_recipient_id=recipient_id,
+            why_template_key="opening",
+            why_slots={"property": company_id},
+            why_sources=["https://example.com/source"],
+            why_confidence="high",
+            company_why_line="Hi [first name] — Saw the opening in Phoenix.",
+            personalized_why_line="Hi Tim — Saw the opening in Phoenix.",
+            merge_snapshot={"firstName": "Tim"},
+            merge_hash=f"merge-{sequence_id}",
+            eligibility_status=EligibilityStatus.READY,
+        )
+
+    sequences = [
+        sequence(
+            trader_sequence_id,
+            "trader-joes",
+            "trader-event",
+            "trader-recipient",
+        ),
+        sequence(
+            desert_ridge_sequence_id,
+            "desert-ridge",
+            "desert-ridge-event",
+            "desert-ridge-recipient",
+        ),
+    ]
+    if reverse:
+        companies.reverse()
+        events.reverse()
+        recipients.reverse()
+        sequences.reverse()
+    value = SalesHandoff(
+        schema_version=1,
+        protocol_version="aether-sales-handoff-v1",
+        run_id="bulk-run",
+        companies=companies,
+        lead_events=events,
+        recipients=recipients,
+        sequences=sequences,
+        content_hash="pending",
+    )
+    handoff = value.model_copy(update={"content_hash": handoff_content_hash(value)})
+
+    updated, blocked_count = _block_duplicate_primary_emails(handoff)
+
+    by_id = {item.sequence_id: item for item in updated.sequences}
+    assert blocked_count == 1
+    assert by_id[desert_ridge_sequence_id].eligibility_status == EligibilityStatus.READY
+    assert by_id[trader_sequence_id].eligibility_status == EligibilityStatus.BLOCKED
+    assert by_id[trader_sequence_id].eligibility_reasons == [
+        f"duplicate_primary_email:{desert_ridge_sequence_id}"
+    ]
+    assert updated.content_hash == handoff_content_hash(updated)
+
+
 @pytest.mark.parametrize(
     ("current", "prior"),
     [
@@ -333,6 +481,130 @@ def test_archive_discovery_reads_gzip_sitemap_and_exact_dates(tmp_path):
     assert coverage.sitemap_documents == 2
     assert coverage.dated_candidates == 1
     assert candidates[0].published_at.date().isoformat() == "2026-07-25"
+
+
+def test_archive_roots_do_not_refetch_exact_curated_sitemap(tmp_path):
+    source_path = tmp_path / "sources.csv"
+    runner_options = options(tmp_path, sources_csv=source_path)
+    exact = "https://example.com/sitemap.xml?year=2026"
+    source_path.write_text(f"Resource Name,URL\nExact sitemap,{exact}\n")
+    runner = BulkRunner(
+        runner_options,
+        fetch=lambda url: response(
+            url,
+            f"Sitemap: {exact}\nSitemap: https://example.com/other-sitemap.xml",
+        ),
+        model_call=lambda *args: ("{}", {}),
+    )
+    coverage = bulk_lib.SourceCoverage(
+        source_id=runner.sources[0].source_id,
+        source_name=runner.sources[0].name,
+        source_url=runner.sources[0].url,
+    )
+
+    roots = runner._sitemap_roots(runner.sources[0], coverage)
+
+    assert exact not in roots
+    assert "https://example.com/other-sitemap.xml" in roots
+
+
+def test_bulk_coverage_counts_only_valid_direct_candidates_before_fallback(tmp_path, monkeypatch):
+    runner = BulkRunner(
+        options(tmp_path, search_fallback=True),
+        fetch=lambda url: (_ for _ in ()).throw(RuntimeError("not found")),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+
+    def candidate(candidate_id, status):
+        return DiscoveryCandidate(
+            candidate_id=candidate_id,
+            run_id=runner.options.run_id,
+            provider="curated",
+            discovered_url=f"https://example.com/{candidate_id}",
+            resolved_url=f"https://example.com/{candidate_id}",
+            canonical_url=f"https://example.com/{candidate_id}",
+            title="Phoenix commercial opening",
+            source_id=source.source_id,
+            source_name=source.name,
+            source_domain=source.domain,
+            published_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            record_status=status,
+            validation_errors=(
+                ["direct_listing_arizona_scope_unverified"]
+                if status == RecordStatus.REVIEW
+                else []
+            ),
+        )
+
+    batch = DiscoveryBatch(candidates=[
+        candidate("valid-direct", RecordStatus.VALID),
+        candidate("national-review", RecordStatus.REVIEW),
+    ])
+    monkeypatch.setattr(
+        bulk_lib.CuratedSiteAdapter,
+        "discover",
+        lambda *_args, **_kwargs: batch,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_discover_source_archive",
+        lambda item: (
+            bulk_lib.SourceCoverage(
+                source_id=item.source_id,
+                source_name=item.name,
+                source_url=item.url,
+            ),
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_fallback_source",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("fallback should not run")),
+    )
+
+    counters = runner._discover()
+
+    assert runner.coverage[0].dated_candidates == 1
+    assert counters["uncovered_sources"] == 0
+
+
+def test_bulk_coverage_marks_direct_listing_cap_incomplete(tmp_path, monkeypatch):
+    runner = BulkRunner(
+        options(tmp_path, search_fallback=False),
+        fetch=lambda url: (_ for _ in ()).throw(RuntimeError("not found")),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+    batch = DiscoveryBatch(source_errors=[{
+        "source_id": source.source_id,
+        "url": source.url,
+        "error": "direct_listing_item_cap_reached",
+    }])
+    monkeypatch.setattr(
+        bulk_lib.CuratedSiteAdapter,
+        "discover",
+        lambda *_args, **_kwargs: batch,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_discover_source_archive",
+        lambda item: (
+            bulk_lib.SourceCoverage(
+                source_id=item.source_id,
+                source_name=item.name,
+                source_url=item.url,
+            ),
+            [],
+        ),
+    )
+
+    counters = runner._discover()
+
+    assert counters["incomplete_sources"] == 1
+    assert runner.coverage[0].incomplete
+    assert "direct_listing_item_cap_reached" in runner.coverage[0].errors
 
 
 def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tmp_path):

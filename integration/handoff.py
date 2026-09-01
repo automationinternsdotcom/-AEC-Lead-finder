@@ -85,6 +85,24 @@ def ingest_handoff(db, handoff: SalesHandoff, *, source_file: str = "") -> dict[
         if recipients[sequence.primary_recipient_id].company_id != sequence.company_id:
             raise ValueError(f"sequence {sequence.sequence_id} recipient company mismatch")
 
+    ready_sequences_by_email: dict[str, list[str]] = {}
+    for sequence in handoff.sequences:
+        if sequence.eligibility_status != EligibilityStatus.READY:
+            continue
+        email = recipients[sequence.primary_recipient_id].email.strip().casefold()
+        ready_sequences_by_email.setdefault(email, []).append(sequence.sequence_id)
+    duplicate_ready_emails = {
+        email: sequence_ids
+        for email, sequence_ids in ready_sequences_by_email.items()
+        if len(sequence_ids) > 1
+    }
+    if duplicate_ready_emails:
+        email, sequence_ids = sorted(duplicate_ready_emails.items())[0]
+        raise ValueError(
+            "handoff contains multiple READY sequences for normalized email "
+            f"{email}: {', '.join(sorted(sequence_ids))}"
+        )
+
     for company in handoff.companies:
         db.upsert_company(company, source=f"handoff:{handoff.run_id}")
     for event in handoff.lead_events:

@@ -15,6 +15,7 @@ from integration.handoff import (
     HANDOFF_PROTOCOL_VERSION,
     enqueue_handoff,
     handoff_content_hash,
+    ingest_handoff,
     load_handoff,
 )
 from integration.legacy_reconcile import (
@@ -261,6 +262,43 @@ def test_handoff_hash_rejects_tampering_and_ingestion_is_idempotent(tmp_path):
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="content hash mismatch"):
         load_handoff(path)
+
+
+def test_ingest_rejects_multiple_ready_sequences_for_normalized_email(tmp_path):
+    original = _handoff()
+    second_company = _company().model_copy(
+        update={"company_id": "company-2", "canonical_name": "Second Company"}
+    )
+    second_event = _event("event-2").model_copy(
+        update={"company_id": "company-2", "organization_name": "Second Company"}
+    )
+    second_recipient = _recipient(
+        "recipient-2", " JANE@ACME.EXAMPLE "
+    ).model_copy(update={"company_id": "company-2"})
+    second_sequence = _sequence("sequence-2", "recipient-2").model_copy(
+        update={
+            "company_id": "company-2",
+            "anchor_lead_event_id": "event-2",
+        }
+    )
+    handoff = original.model_copy(
+        update={
+            "companies": [*original.companies, second_company],
+            "lead_events": [*original.lead_events, second_event],
+            "recipients": [*original.recipients, second_recipient],
+            "sequences": [*original.sequences, second_sequence],
+            "content_hash": "hand-authored",
+        }
+    )
+    db = Database(tmp_path / "sales.sqlite")
+
+    with pytest.raises(
+        ValueError,
+        match="multiple READY sequences for normalized email jane@acme.example",
+    ):
+        ingest_handoff(db, handoff)
+
+    assert db.get_company("company-1") is None
 
 
 def test_pipedrive_lead_is_created_without_a_person(tmp_path):
