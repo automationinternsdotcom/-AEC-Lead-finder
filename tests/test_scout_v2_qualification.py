@@ -8,6 +8,9 @@ import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scout"))
@@ -61,14 +64,17 @@ def valid_payload():
     }
 
 
-def test_judgment_normalizes_grok_optional_date_and_numeric_confidence():
+def test_qualified_judgment_requires_date_and_normalizes_numeric_confidence():
     payload = valid_payload()
     payload["date_posted"] = ""
     payload["confidence"] = 85
 
-    judgment = JudgmentPayload.model_validate(payload)
+    with pytest.raises(ValidationError, match="date_posted"):
+        JudgmentPayload.model_validate(payload)
 
-    assert judgment.date_posted is None
+    payload["date_posted"] = "Aug 28, 2026"
+    judgment = JudgmentPayload.model_validate(payload)
+    assert judgment.date_posted == date(2026, 8, 28)
     assert judgment.confidence == "high"
 
 

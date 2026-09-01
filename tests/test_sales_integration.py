@@ -27,7 +27,7 @@ from integration.models import (
     SalesHandoff,
     VerificationStatus,
 )
-from integration.providers import PipedriveClient, WarmyClient
+from integration.providers import GmailClient, PipedriveClient, WarmyClient
 from integration.scout_bridge import contacts_from_csv, enqueue_contacts
 from integration.security import (
     SignatureError,
@@ -980,3 +980,18 @@ def test_provider_clients_use_current_api_contracts_and_write_gate():
         "field_name": "Aether Field",
         "field_type": "varchar",
     }
+
+
+def test_gmail_writes_require_global_provider_gate():
+    gmail = object.__new__(GmailClient)
+    gmail.settings = Settings(provider_writes_enabled=False)
+
+    with pytest.raises(ActivationBlocked, match="provider writes are disabled"):
+        gmail.forward_message("sender@example.com", "message-1", "owner@example.com")
+    with pytest.raises(ActivationBlocked, match="provider writes are disabled"):
+        gmail.send_text(
+            "sender@example.com",
+            "owner@example.com",
+            "Subject",
+            "Body",
+        )

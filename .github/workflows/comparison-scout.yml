@@ -36,7 +36,8 @@ jobs:
       - name: Check out frozen V1
         uses: actions/checkout@v4
         with:
-          ref: aether-aec-v1-baseline
+          # Immutable V1 baseline; do not replace with a moving branch.
+          ref: 1d54e29dc47fedcdf30935af24eb981ac57def7f
           path: v1
 
       - name: Install uv

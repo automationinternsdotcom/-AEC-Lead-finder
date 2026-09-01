@@ -580,6 +580,7 @@ class GmailClient:
         return BytesParser(policy=email_policy).parsebytes(message_bytes), message_bytes
 
     def forward_message(self, mailbox: str, message_id: str, to: str) -> dict:
+        self.settings.require_provider_writes()
         payload = self.get_message(mailbox, message_id, format="raw")
         original, message_bytes = self.parse_raw_message(payload)
         forward = EmailMessage()
@@ -610,6 +611,7 @@ class GmailClient:
         )
 
     def send_text(self, mailbox: str, to: str, subject: str, body: str) -> dict:
+        self.settings.require_provider_writes()
         message = EmailMessage()
         message["To"] = to
         message["From"] = mailbox

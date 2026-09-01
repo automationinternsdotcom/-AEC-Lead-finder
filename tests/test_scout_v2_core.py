@@ -16,6 +16,9 @@ sys.path.insert(0, str(ROOT / "scout"))
 from v2.artifacts import ArtifactStore, new_manifest  # noqa: E402
 from v2.contracts import (  # noqa: E402
     DiscoveryCandidate,
+    Evidence,
+    LeadEvent,
+    Organization,
     RecordStatus,
     ReviewItem,
     StageStatus,
@@ -72,8 +75,8 @@ def test_qualification_accepts_common_provider_date_formats(value):
 
 def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
     store = StateStore(tmp_path / "scout.db")
-    assert store.migrate() == 5
-    assert store.migrate() == 5
+    assert store.migrate() == 6
+    assert store.migrate() == 6
     store.create_run("run-1", "2026-08-28", "2026-08-27", {"workers": 5})
     store.set_stage_status("run-1", "discover", StageStatus.RUNNING)
     store.set_stage_status("run-1", "discover", StageStatus.COMPLETED, counters={"candidates": 3})
@@ -83,10 +86,68 @@ def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
 
     assert store.completed_stages("run-1") == {"discover"}
     with sqlite3.connect(tmp_path / "scout.db") as conn:
-        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM v2_schema_migrations").fetchone()[0] == 6
         assert conn.execute(
             "SELECT attempt_count FROM v2_stage_runs WHERE run_id='run-1' AND stage='qualify'"
         ).fetchone()[0] == 2
+
+
+def test_lead_event_remains_associated_with_each_run(tmp_path):
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-1", "2026-08-28", "2026-08-27")
+    store.create_run("run-2", "2026-08-29", "2026-08-28")
+    store.upsert_source("source-1", "Example", "https://example.com/", "example.com")
+    evidence = [
+        Evidence(
+            url="https://example.com/article",
+            supports="Source article.",
+            provider="curated",
+        )
+    ]
+    store.save_organization(
+        Organization(
+            organization_id="organization-1",
+            canonical_name="Example",
+            location="Phoenix, Arizona",
+            evidence=evidence,
+        )
+    )
+    for run_id in ("run-1", "run-2"):
+        store.save_candidate(
+            DiscoveryCandidate(
+                candidate_id="candidate-1",
+                run_id=run_id,
+                provider="curated",
+                discovered_url="https://example.com/article",
+                resolved_url="https://example.com/article",
+                canonical_url="https://example.com/article",
+                source_id="source-1",
+                source_name="Example",
+                source_domain="example.com",
+            )
+        )
+        store.save_lead_event(
+            LeadEvent(
+                lead_event_id="event-1",
+                run_id=run_id,
+                organization_id="organization-1",
+                primary_candidate_id="candidate-1",
+                supporting_candidate_ids=["candidate-1"],
+                event="Opened a Phoenix facility.",
+                location="Phoenix, Arizona",
+                priority="high",
+                record_status=RecordStatus.VALID,
+                evidence=evidence,
+            )
+        )
+
+    assert [event.lead_event_id for event in store.events_for_run("run-1")] == [
+        "event-1"
+    ]
+    assert [event.lead_event_id for event in store.events_for_run("run-2")] == [
+        "event-1"
+    ]
 
 
 def test_only_rejected_qualifications_are_reused_across_runs(tmp_path):

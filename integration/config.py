@@ -78,7 +78,7 @@ def _json_map(name: str) -> dict[str, str]:
 class Settings:
     database_path: str = "aether_sales.sqlite"
     environment: str = "development"
-    public_base_url: str = "http://localhost:8080"
+    public_base_url: str = "http://localhost:8187"
     log_level: str = "INFO"
 
     provider_writes_enabled: bool = False
@@ -138,7 +138,7 @@ class Settings:
             database_path=os.environ.get("AETHER_SALES_DB_PATH", "aether_sales.sqlite"),
             environment=os.environ.get("AETHER_ENVIRONMENT", "development"),
             public_base_url=os.environ.get(
-                "PUBLIC_BASE_URL", "http://localhost:8080"
+                "PUBLIC_BASE_URL", "http://localhost:8187"
             ).rstrip("/"),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             provider_writes_enabled=_flag("PROVIDER_WRITES_ENABLED"),

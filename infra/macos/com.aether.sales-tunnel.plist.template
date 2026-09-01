@@ -6,7 +6,7 @@
   <string>com.aether.sales-tunnel</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>__CLOUDFLARED__</string>
     <string>--config</string>
     <string>__HOME__/.cloudflared/aec-sales.yml</string>
     <string>tunnel</string>

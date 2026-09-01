@@ -26,7 +26,7 @@ from .contracts import (
 from .ids import normalize_text
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _now() -> str:
@@ -338,6 +338,31 @@ CREATE INDEX IF NOT EXISTS v2_qualification_window
     ON v2_qualification_completions(since_date, stamp, candidate_id);
 """
 
+MIGRATION_6 = """
+CREATE TABLE IF NOT EXISTS v2_run_lead_events (
+    run_id TEXT NOT NULL,
+    lead_event_id TEXT NOT NULL,
+    primary_candidate_id TEXT NOT NULL,
+    record_status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, lead_event_id),
+    FOREIGN KEY (run_id) REFERENCES v2_runs(run_id),
+    FOREIGN KEY (lead_event_id) REFERENCES v2_lead_events(lead_event_id),
+    FOREIGN KEY (primary_candidate_id) REFERENCES v2_discovery_candidates(candidate_id)
+);
+INSERT OR IGNORE INTO v2_run_lead_events(
+    run_id, lead_event_id, primary_candidate_id, record_status,
+    payload_json, created_at, updated_at
+)
+SELECT run_id, lead_event_id, primary_candidate_id, record_status,
+       payload_json, created_at, updated_at
+FROM v2_lead_events;
+CREATE INDEX IF NOT EXISTS v2_run_lead_events_candidate
+    ON v2_run_lead_events(run_id, primary_candidate_id, record_status);
+"""
+
 
 class StateStore:
     def __init__(self, path: str | Path):
@@ -399,6 +424,12 @@ class StateStore:
                 conn.execute(
                     "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
                     (5, _now()),
+                )
+            if 6 not in applied:
+                conn.executescript(MIGRATION_6)
+                conn.execute(
+                    "INSERT INTO v2_schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (6, _now()),
                 )
         return SCHEMA_VERSION
 
@@ -792,6 +823,28 @@ class StateStore:
             record_status=event.record_status.value,
         )
         with self.transaction() as conn:
+            payload = _json(event.model_dump(mode="json"))
+            now = _now()
+            conn.execute(
+                """INSERT INTO v2_run_lead_events(
+                    run_id, lead_event_id, primary_candidate_id, record_status,
+                    payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, lead_event_id) DO UPDATE SET
+                    primary_candidate_id=excluded.primary_candidate_id,
+                    record_status=excluded.record_status,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at""",
+                (
+                    event.run_id,
+                    event.lead_event_id,
+                    event.primary_candidate_id,
+                    event.record_status.value,
+                    payload,
+                    now,
+                    now,
+                ),
+            )
             for candidate in event.supporting_candidate_ids:
                 conn.execute(
                     "INSERT OR IGNORE INTO v2_lead_event_sources(lead_event_id, candidate_id) VALUES (?, ?)",
@@ -804,7 +857,7 @@ class StateStore:
         with self.connect() as conn:
             rows = list(
                 conn.execute(
-                    """SELECT payload_json FROM v2_lead_events
+                    """SELECT payload_json FROM v2_run_lead_events
                        WHERE run_id=? AND primary_candidate_id=? AND record_status='valid'""",
                     (run_id, candidate_id),
                 )
@@ -864,7 +917,7 @@ class StateStore:
             return [
                 LeadEvent.model_validate_json(row["payload_json"])
                 for row in conn.execute(
-                    "SELECT payload_json FROM v2_lead_events WHERE run_id=? ORDER BY lead_event_id",
+                    "SELECT payload_json FROM v2_run_lead_events WHERE run_id=? ORDER BY lead_event_id",
                     (run_id,),
                 )
             ]
@@ -875,7 +928,7 @@ class StateStore:
                 LeadEvent.model_validate_json(row["payload_json"])
                 for row in conn.execute(
                     """SELECT e.payload_json
-                    FROM v2_lead_events e
+                    FROM v2_run_lead_events e
                     LEFT JOIN v2_event_merges m
                       ON m.run_id=e.run_id AND m.merged_event_id=e.lead_event_id
                     WHERE e.run_id=? AND e.record_status='valid'

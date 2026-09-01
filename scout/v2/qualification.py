@@ -106,7 +106,14 @@ class JudgmentPayload(BaseModel):
             return self
         missing = [
             field
-            for field in ("business_name", "event", "location", "state", "priority")
+            for field in (
+                "business_name",
+                "event",
+                "date_posted",
+                "location",
+                "state",
+                "priority",
+            )
             if not str(getattr(self, field) or "").strip()
         ]
         if missing:

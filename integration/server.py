@@ -11,7 +11,7 @@ from .config import Settings
 
 def main() -> int:
     settings = Settings.from_env()
-    port = int(os.environ.get("AETHER_SALES_PORT", "8080"))
+    port = int(os.environ.get("AETHER_SALES_PORT", "8187"))
     uvicorn.run(
         "integration.api:app",
         host="127.0.0.1",
