@@ -179,6 +179,7 @@ def test_direct_listing_is_bounded_and_malformed_payload_is_not_misparsed():
         payload, "https://example.com/wp-json/posts", "https://example.com", max_items=2
     )
     assert listing and len(listing.entries) == 2
+    assert listing.truncated
     assert parse_direct_listing(
         b"[{malformed", "https://example.com/wp-json/posts", "https://example.com"
     ) is None
@@ -258,6 +259,75 @@ def test_curated_explicit_sitemap_prunes_old_children_before_cap_and_keeps_query
     assert in_window in calls
     assert not any("date=2026-05-" in url for url in calls)
     assert [item.canonical_url for item in batch.candidates] == [article]
+
+
+def test_curated_direct_listing_routes_non_arizona_article_to_review(tmp_path):
+    source = CuratedSource(
+        source_id="source-national",
+        name="JLL Phoenix",
+        url="https://www.jll.com/api/posts?region=phoenix",
+        domain="www.jll.com",
+    )
+    article = "https://www.jll.com/en-us/insights/national-market-report"
+    pages = {
+        source.url: json.dumps([{
+            "link": article,
+            "date_gmt": "2026-08-28T08:00:00Z",
+            "title": {"rendered": "National market report"},
+        }]),
+        article: (
+            '<meta property="article:published_time" content="2026-08-28T08:00:00Z">'
+            "<p>United States commercial property trends.</p>"
+        ),
+    }
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-national", "2026-08-28", "2026-06-01")
+    artifacts = ArtifactStore(tmp_path / "results", "2026-08-28", "run-national", store)
+    batch = CuratedSiteAdapter(
+        [source], store, artifacts, fetch=lambda url: response(url, pages[url]), workers=1
+    ).discover("run-national", date(2026, 6, 1), until=date(2026, 8, 28))
+
+    assert len(batch.candidates) == 1
+    assert batch.candidates[0].record_status == RecordStatus.REVIEW
+    assert "direct_listing_arizona_scope_unverified" in batch.candidates[0].validation_errors
+
+
+def test_curated_direct_listing_reports_document_cap(tmp_path):
+    root_url = "https://example.com/sitemap-index.xml?year=2026"
+    source = CuratedSource(
+        source_id="source-cap",
+        name="Arizona source",
+        url=root_url,
+        domain="example.com",
+    )
+    children = [
+        f"https://example.com/day.xml?date=2026-08-28&page={index}"
+        for index in range(101)
+    ]
+    index_xml = "<sitemapindex>" + "".join(
+        f"<sitemap><loc>{url.replace('&', '&amp;')}</loc></sitemap>" for url in children
+    ) + "</sitemapindex>"
+
+    def fetch(url):
+        if url == root_url:
+            return response(url, index_xml)
+        if url in children:
+            return response(url, "<urlset></urlset>")
+        raise RuntimeError("not found")
+
+    store = StateStore(tmp_path / "scout.db")
+    store.migrate()
+    store.create_run("run-cap", "2026-08-28", "2026-06-01")
+    artifacts = ArtifactStore(tmp_path / "results", "2026-08-28", "run-cap", store)
+    batch = CuratedSiteAdapter(
+        [source], store, artifacts, fetch=fetch, workers=1
+    ).discover("run-cap", date(2026, 6, 1), until=date(2026, 8, 28))
+
+    assert any(
+        item["error"] == "direct_listing_document_cap_reached"
+        for item in batch.source_errors
+    )
 
 
 def test_curated_adapter_persists_valid_and_undated_review(tmp_path):

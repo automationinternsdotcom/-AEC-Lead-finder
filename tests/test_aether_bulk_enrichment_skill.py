@@ -56,7 +56,7 @@ from integration.models import (  # noqa: E402
     SalesHandoff,
 )
 from v2.http import FetchResponse  # noqa: E402
-from v2.discovery import load_curated_sources  # noqa: E402
+from v2.discovery import DiscoveryBatch, load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
 from v2.verification import ContactVerifier as RealContactVerifier  # noqa: E402
 
@@ -506,6 +506,105 @@ def test_archive_roots_do_not_refetch_exact_curated_sitemap(tmp_path):
 
     assert exact not in roots
     assert "https://example.com/other-sitemap.xml" in roots
+
+
+def test_bulk_coverage_counts_only_valid_direct_candidates_before_fallback(tmp_path, monkeypatch):
+    runner = BulkRunner(
+        options(tmp_path, search_fallback=True),
+        fetch=lambda url: (_ for _ in ()).throw(RuntimeError("not found")),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+
+    def candidate(candidate_id, status):
+        return DiscoveryCandidate(
+            candidate_id=candidate_id,
+            run_id=runner.options.run_id,
+            provider="curated",
+            discovered_url=f"https://example.com/{candidate_id}",
+            resolved_url=f"https://example.com/{candidate_id}",
+            canonical_url=f"https://example.com/{candidate_id}",
+            title="Phoenix commercial opening",
+            source_id=source.source_id,
+            source_name=source.name,
+            source_domain=source.domain,
+            published_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            record_status=status,
+            validation_errors=(
+                ["direct_listing_arizona_scope_unverified"]
+                if status == RecordStatus.REVIEW
+                else []
+            ),
+        )
+
+    batch = DiscoveryBatch(candidates=[
+        candidate("valid-direct", RecordStatus.VALID),
+        candidate("national-review", RecordStatus.REVIEW),
+    ])
+    monkeypatch.setattr(
+        bulk_lib.CuratedSiteAdapter,
+        "discover",
+        lambda *_args, **_kwargs: batch,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_discover_source_archive",
+        lambda item: (
+            bulk_lib.SourceCoverage(
+                source_id=item.source_id,
+                source_name=item.name,
+                source_url=item.url,
+            ),
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_fallback_source",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("fallback should not run")),
+    )
+
+    counters = runner._discover()
+
+    assert runner.coverage[0].dated_candidates == 1
+    assert counters["uncovered_sources"] == 0
+
+
+def test_bulk_coverage_marks_direct_listing_cap_incomplete(tmp_path, monkeypatch):
+    runner = BulkRunner(
+        options(tmp_path, search_fallback=False),
+        fetch=lambda url: (_ for _ in ()).throw(RuntimeError("not found")),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = runner.sources[0]
+    batch = DiscoveryBatch(source_errors=[{
+        "source_id": source.source_id,
+        "url": source.url,
+        "error": "direct_listing_item_cap_reached",
+    }])
+    monkeypatch.setattr(
+        bulk_lib.CuratedSiteAdapter,
+        "discover",
+        lambda *_args, **_kwargs: batch,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_discover_source_archive",
+        lambda item: (
+            bulk_lib.SourceCoverage(
+                source_id=item.source_id,
+                source_name=item.name,
+                source_url=item.url,
+            ),
+            [],
+        ),
+    )
+
+    counters = runner._discover()
+
+    assert counters["incomplete_sources"] == 1
+    assert runner.coverage[0].incomplete
+    assert "direct_listing_item_cap_reached" in runner.coverage[0].errors
 
 
 def test_archive_resume_reuses_persisted_candidate_without_refetching_article(tmp_path):

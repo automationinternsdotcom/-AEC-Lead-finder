@@ -1960,6 +1960,32 @@ class BulkRunner:
             archive_results = list(pool.map(self._discover_source_archive, self.sources))
         archive_candidates = [item for _, rows in archive_results for item in rows]
         self.coverage = [item for item, _ in archive_results]
+        direct_urls_by_source: dict[str, set[str]] = defaultdict(set)
+        for candidate in current.candidates:
+            if candidate.published_at and candidate.record_status == RecordStatus.VALID:
+                direct_urls_by_source[candidate.source_id].add(candidate.canonical_url)
+        archive_urls_by_source: dict[str, set[str]] = defaultdict(set)
+        for candidate in archive_candidates:
+            if candidate.published_at:
+                archive_urls_by_source[candidate.source_id].add(candidate.canonical_url)
+        direct_errors_by_source: dict[str, list[str]] = defaultdict(list)
+        for error in current.source_errors:
+            source_id = str(error.get("source_id") or "")
+            code = str(error.get("error") or "")
+            if source_id and code.startswith("direct_listing_"):
+                direct_errors_by_source[source_id].append(code)
+        for coverage in self.coverage:
+            coverage.dated_candidates = len(
+                direct_urls_by_source[coverage.source_id]
+                | archive_urls_by_source[coverage.source_id]
+            )
+            if direct_errors_by_source[coverage.source_id]:
+                coverage.incomplete = True
+                coverage.errors.extend(
+                    code
+                    for code in direct_errors_by_source[coverage.source_id]
+                    if code not in coverage.errors
+                )
         fallback_candidates: list[DiscoveryCandidate] = []
         if self.options.search_fallback:
             targets = [item for item in self.coverage if item.dated_candidates == 0 or item.incomplete]

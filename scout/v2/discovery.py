@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .artifacts import ArtifactStore
 from .contracts import DiscoveryCandidate, FeedStatus, RecordStatus, ReviewItem
 from .http import FetchResponse, HttpFetcher
-from .ids import candidate_id, canonicalize_url, stable_hash, stable_uuid
+from .ids import candidate_id, canonicalize_url, normalize_text, stable_hash, stable_uuid
 from .state import StateStore
 
 
@@ -30,6 +30,15 @@ MAX_LINKS_PER_SOURCE = 25
 MAX_DIRECT_LISTING_DOCUMENTS = 100
 MAX_DIRECT_LISTING_DEPTH = 4
 MAX_DIRECT_LISTING_ITEMS = 1_000
+ARIZONA_SCOPE_TERMS = (
+    "arizona", "phoenix", "tucson", "mesa", "scottsdale", "tempe",
+    "chandler", "gilbert", "glendale", "peoria", "surprise", "goodyear",
+    "avondale", "flagstaff", "prescott", "yuma", "buckeye", "queen creek",
+    "maricopa", "pinal", "casa grande", "lake havasu", "bullhead city",
+    "apache junction", "oro valley", "sierra vista", "fountain hills",
+    "cottonwood", "sedona", "nogales", "kingman", "marana", "sahuarita",
+    "san tan valley",
+)
 COMMON_FEED_PATHS = ("/feed", "/rss", "/rss.xml", "/feed.xml", "/atom.xml")
 ARTICLE_HINTS = (
     "article",
@@ -139,6 +148,7 @@ class DirectListing:
     kind: str
     entries: list[DirectListingEntry]
     children: list[str]
+    truncated: bool = False
 
 
 class _IndexParser(HTMLParser):
@@ -285,12 +295,22 @@ def parse_direct_listing(
             entries = _json_listing_entries(
                 value, base_url, source_url, max_items=max_items, wordpress=True
             )
-            return DirectListing(kind="wordpress", entries=entries, children=[])
+            return DirectListing(
+                kind="wordpress",
+                entries=entries,
+                children=[],
+                truncated=len(value) > max_items,
+            )
         if isinstance(value, dict) and isinstance(value.get("items"), list):
             entries = _json_listing_entries(
                 value["items"], base_url, source_url, max_items=max_items, wordpress=False
             )
-            return DirectListing(kind="json-feed", entries=entries, children=[])
+            return DirectListing(
+                kind="json-feed",
+                entries=entries,
+                children=[],
+                truncated=len(value["items"]) > max_items,
+            )
         return None
     if stripped[:1] != b"<":
         return None
@@ -313,6 +333,7 @@ def parse_direct_listing(
                 for item in valid
             ],
             children=[],
+            truncated=len(parsed.entries) > max_items,
         )
     if root_name == "sitemapindex":
         children: list[str] = []
@@ -323,7 +344,12 @@ def parse_direct_listing(
                 children.append(url)
                 if len(children) >= max_items:
                     break
-        return DirectListing(kind="sitemapindex", entries=[], children=children)
+        return DirectListing(
+            kind="sitemapindex",
+            entries=[],
+            children=children,
+            truncated=len(root) > max_items,
+        )
     if root_name == "urlset":
         entries: list[DirectListingEntry] = []
         seen: set[str] = set()
@@ -344,7 +370,12 @@ def parse_direct_listing(
             )
             if len(entries) >= max_items:
                 break
-        return DirectListing(kind="urlset", entries=entries, children=[])
+        return DirectListing(
+            kind="urlset",
+            entries=entries,
+            children=[],
+            truncated=len(root) > max_items,
+        )
     return None
 
 
@@ -358,6 +389,29 @@ def listing_query_date(url: str) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def _listing_partition_outside_window(
+    url: str, since: date, until: date | None
+) -> bool:
+    exact = listing_query_date(url)
+    if exact:
+        return exact < since or (until is not None and exact > until)
+    match = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", urlsplit(url).path)
+    if match:
+        month = (int(match.group(1)), int(match.group(2)))
+        return month < (since.year, since.month) or (
+            until is not None and month > (until.year, until.month)
+        )
+    return False
+
+
+def _direct_listing_in_arizona_scope(title: str, url: str, page_html: str) -> bool:
+    value = normalize_text(f"{title} {url} {page_html[:200_000]}")
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value)
+        for term in ARIZONA_SCOPE_TERMS
+    )
 
 
 def _json_listing_entries(
@@ -594,14 +648,15 @@ class CuratedSiteAdapter:
             )
             return batch
         listing_entries: list[DirectListingEntry] = []
+        direct_truncated = False
         if direct is not None:
             listing_entries.extend(direct.entries)
+            direct_truncated = direct.truncated
             queue = [(url, 1) for url in direct.children]
             seen_docs = {canonicalize_url(source.url)}
             while queue and len(seen_docs) < MAX_DIRECT_LISTING_DOCUMENTS:
                 listing_url, depth = queue.pop(0)
-                partition = listing_query_date(listing_url)
-                if partition and (partition < since or (until is not None and partition > until)):
+                if _listing_partition_outside_window(listing_url, since, until):
                     continue
                 if listing_url in seen_docs or depth > MAX_DIRECT_LISTING_DEPTH:
                     continue
@@ -616,6 +671,7 @@ class CuratedSiteAdapter:
                     )
                     if child is None:
                         continue
+                    direct_truncated = direct_truncated or child.truncated
                     listing_entries.extend(child.entries)
                     queue.extend((url, depth + 1) for url in child.children)
                 except Exception as error:
@@ -623,7 +679,24 @@ class CuratedSiteAdapter:
                         {"source_id": source.source_id, "url": listing_url, "error": repr(error)}
                     )
                 if len(listing_entries) >= MAX_DIRECT_LISTING_ITEMS:
+                    direct_truncated = direct_truncated or bool(queue)
                     break
+            if queue:
+                batch.source_errors.append(
+                    {
+                        "source_id": source.source_id,
+                        "url": source.url,
+                        "error": "direct_listing_document_cap_reached",
+                    }
+                )
+            if direct_truncated:
+                batch.source_errors.append(
+                    {
+                        "source_id": source.source_id,
+                        "url": source.url,
+                        "error": "direct_listing_item_cap_reached",
+                    }
+                )
             links = [(item.url, item.title, item.published_at) for item in listing_entries]
         else:
             links = [(url, title, None) for url, title in parsed.article_links]
@@ -646,6 +719,7 @@ class CuratedSiteAdapter:
                     "discover", f"article-{stable_hash(canonical)[:20]}.html", page.text
                 )
                 published = publication_date(page.text, canonical) or listing_published
+                page_html = page.text
                 errors: list[str] = []
             except Exception as error:
                 canonical = canonicalize_url(link)
@@ -657,6 +731,7 @@ class CuratedSiteAdapter:
                 )
                 artifact = index_artifact
                 errors = [f"article_fetch_failed:{type(error).__name__}"]
+                page_html = ""
             if published and (
                 published.date() < since
                 or (until is not None and published.date() > until)
@@ -664,6 +739,10 @@ class CuratedSiteAdapter:
                 continue
             if published is None:
                 errors.append("publication_date_missing")
+            if direct is not None and not _direct_listing_in_arizona_scope(
+                title, canonical, page_html
+            ):
+                errors.append("direct_listing_arizona_scope_unverified")
             record_status = RecordStatus.REVIEW if errors else RecordStatus.VALID
             cid = candidate_id(self.name, "", canonical)
             candidate = DiscoveryCandidate(
