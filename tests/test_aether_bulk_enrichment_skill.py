@@ -1213,9 +1213,10 @@ def test_bulk_qualification_enforces_window_and_business_grounding(tmp_path):
     def model_call(model, prompt, tools):
         assert "2026-07-24 through 2026-08-28" in prompt
         rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        by_id = {row["candidate_id"]: row for row in rows}
         return json.dumps(
             {
-                rows[0]["candidate_id"]: {
+                by_id["ungrounded"]["candidate_id"]: {
                     "qualified": True,
                     "business_name": "Unrelated Hotels",
                     "event": "Opened a hotel",
@@ -1226,7 +1227,7 @@ def test_bulk_qualification_enforces_window_and_business_grounding(tmp_path):
                     "priority": "high",
                     "confidence": "high",
                 },
-                rows[1]["candidate_id"]: {
+                by_id["outside"]["candidate_id"]: {
                     "qualified": True,
                     "business_name": "Acme Warehouse",
                     "event": "Opened a warehouse",
@@ -1283,6 +1284,250 @@ def test_bulk_qualification_enforces_window_and_business_grounding(tmp_path):
     assert not runner.state.events_for_run("bulk-run")
 
 
+def test_bulk_qualification_excludes_wordpress_related_embed_from_grounding(tmp_path):
+    article_path = tmp_path / "generic-restaurant-story.html"
+    article_path.write_text(
+        """<!doctype html>
+        <html><head><title>New restaurant opens in downtown Phoenix</title></head>
+        <body>
+          <header>Local news, weather, and newsletters</header>
+          <main><article>
+            <h1>New restaurant opens in downtown Phoenix</h1>
+            <div class="entry-content">
+              <p>Quiches &amp; Things opened its first Arizona restaurant in
+              downtown Phoenix on Friday. The restaurant occupies a four
+              thousand square foot storefront and employs twenty five people.</p>
+              <p>The family owned operator said the opening follows months of
+              construction and brings a new dining concept to the neighborhood.
+              It plans to serve breakfast and lunch every day.</p>
+              <figure class="wp-block-embed is-type-wp-embed">
+                <blockquote class="wp-embedded-content">
+                  <a href="https://example.com/diversified-related">
+                    Diversified Partners breaks ground on industrial project
+                  </a>
+                </blockquote>
+              </figure>
+            </div>
+          </article></main>
+          <aside class="related-posts">More from Diversified Partners</aside>
+        </body></html>""",
+        encoding="utf-8",
+    )
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        assert "Quiches" in rows[0]["saved_article_excerpt"]
+        assert "Diversified" not in rows[0]["saved_article_excerpt"]
+        return json.dumps(
+            {
+                rows[0]["candidate_id"]: {
+                    "qualified": True,
+                    "business_name": "Diversified Partners",
+                    "event": "Opened a restaurant",
+                    "date_posted": "2026-08-01",
+                    "location": "Phoenix, Arizona",
+                    "summary": "A restaurant opened.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "confidence": "high",
+                }
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    url = "https://example.com/generic-restaurant-story"
+    runner.state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-wp-related-embed",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=url,
+            resolved_url=url,
+            canonical_url=url,
+            title="New restaurant opens in downtown Phoenix",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+            published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            raw_artifact_path=str(article_path),
+            metadata={"selected_for_qualification": True},
+        )
+    )
+
+    counters = runner._qualify()
+
+    assert counters == {
+        "submitted": 1,
+        "batches": 1,
+        "qualified": 0,
+        "rejected": 0,
+        "reviews": 1,
+    }
+    assert not runner.state.events_for_run("bulk-run")
+
+
+def test_candidate_excerpt_fails_closed_when_main_article_extraction_fails(
+    tmp_path, monkeypatch
+):
+    article_path = tmp_path / "broken-article.html"
+    article_path.write_text(
+        "<html><body><footer>Diversified Partners related story</footer></body></html>",
+        encoding="utf-8",
+    )
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate-extraction-failure",
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url="https://example.com/broken",
+        resolved_url="https://example.com/broken",
+        canonical_url="https://example.com/broken",
+        title="Generic development update",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        raw_artifact_path=str(article_path),
+    )
+
+    def fail_extraction(*args, **kwargs):
+        raise RuntimeError("extractor failed")
+
+    monkeypatch.setattr(bulk_lib, "extract_main_text", fail_extraction)
+
+    assert bulk_lib._candidate_excerpt(candidate, 2_500) == ""
+
+
+def test_bulk_qualification_grounds_generic_headline_from_clean_main_body(tmp_path):
+    article_path = tmp_path / "clean-generic-restaurant-story.html"
+    article_path.write_text(
+        """<!doctype html><html><body><main><article>
+        <h1>New restaurant opens in downtown Phoenix</h1>
+        <div class="entry-content">
+          <p>Quiches &amp; Things opened its first Arizona restaurant in downtown
+          Phoenix on Friday. The four thousand square foot location creates
+          twenty five jobs and follows several months of interior construction.</p>
+          <p>The family owned operator will serve breakfast and lunch every day.
+          Its new dining room and kitchen are now open to the public.</p>
+        </div>
+        </article></main></body></html>""",
+        encoding="utf-8",
+    )
+
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        assert "Quiches" in rows[0]["saved_article_excerpt"]
+        return json.dumps(
+            {
+                rows[0]["candidate_id"]: {
+                    "qualified": True,
+                    "business_name": "Quiches & Things",
+                    "event": "Opened its first Arizona restaurant",
+                    "date_posted": "2026-08-01",
+                    "location": "Phoenix, Arizona",
+                    "summary": "The restaurant opened in downtown Phoenix.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "confidence": "high",
+                }
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    url = "https://example.com/clean-generic-restaurant-story"
+    runner.state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-clean-main-body",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=url,
+            resolved_url=url,
+            canonical_url=url,
+            title="New restaurant opens in downtown Phoenix",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+            published_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            raw_artifact_path=str(article_path),
+            metadata={"selected_for_qualification": True},
+        )
+    )
+
+    counters = runner._qualify()
+
+    assert counters["qualified"] == 1
+    assert counters["reviews"] == 0
+    assert runner.state.events_for_run("bulk-run")[0].date_posted.isoformat() == "2026-08-01"
+
+
+def test_bulk_qualification_quarantines_model_candidate_date_mismatch(tmp_path):
+    def model_call(model, prompt, tools):
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        return json.dumps(
+            {
+                rows[0]["candidate_id"]: {
+                    "qualified": True,
+                    "business_name": "Quiches & Things",
+                    "event": "Opened a restaurant",
+                    "date_posted": "2026-06-24",
+                    "location": "Phoenix, Arizona",
+                    "summary": "A restaurant opened.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "confidence": "high",
+                }
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path, since="2026-06-01", until="2026-07-31"),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    url = "https://example.com/quiches-opens"
+    runner.state.save_candidate(
+        DiscoveryCandidate(
+            candidate_id="candidate-date-mismatch",
+            run_id="bulk-run",
+            provider="archive",
+            discovered_url=url,
+            resolved_url=url,
+            canonical_url=url,
+            title="Quiches & Things opens a Phoenix restaurant",
+            source_id="source-1",
+            source_name="Example",
+            source_domain="example.com",
+            published_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+            metadata={"selected_for_qualification": True},
+        )
+    )
+
+    counters = runner._qualify()
+
+    assert counters["qualified"] == 0
+    assert counters["reviews"] == 1
+    assert not runner.state.events_for_run("bulk-run")
+    candidate = runner.state.candidates_for_run("bulk-run")[0]
+    assert candidate.record_status == RecordStatus.REVIEW
+    assert "candidate=2026-07-10, model=2026-06-24" in candidate.validation_errors[0]
+
+
 def test_qualification_audit_quarantines_persisted_out_of_window_event(tmp_path):
     runner = BulkRunner(
         options(tmp_path),
@@ -1328,6 +1573,57 @@ def test_qualification_audit_quarantines_persisted_out_of_window_event(tmp_path)
 
     assert counters == {"submitted": 1, "valid": 0, "reviews": 1}
     assert not runner.state.active_events_for_run("bulk-run")
+
+
+def test_qualification_audit_quarantines_persisted_candidate_date_mismatch(tmp_path):
+    runner = BulkRunner(
+        options(tmp_path, since="2026-06-01", until="2026-07-31"),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate-date-audit",
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url="https://example.com/quiches",
+        resolved_url="https://example.com/quiches",
+        canonical_url="https://example.com/quiches",
+        title="Quiches & Things opens a Phoenix restaurant",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    runner.state.save_candidate(candidate)
+    runner.state.save_organization(
+        Organization(organization_id="org-quiches", canonical_name="Quiches & Things")
+    )
+    runner.state.save_lead_event(
+        LeadEvent(
+            lead_event_id="event-date-audit",
+            run_id="bulk-run",
+            organization_id="org-quiches",
+            primary_candidate_id=candidate.candidate_id,
+            supporting_candidate_ids=[candidate.candidate_id],
+            event="Opened a restaurant",
+            location="Phoenix",
+            date_posted=datetime(2026, 6, 24).date(),
+            priority="high",
+            evidence=[Evidence(url=candidate.canonical_url, supports="Opening")],
+        )
+    )
+
+    counters = runner._qualification_audit()
+
+    assert counters == {"submitted": 1, "valid": 0, "reviews": 1}
+    event = runner.state.events_for_run("bulk-run")[0]
+    assert event.record_status == RecordStatus.REVIEW
+    assert "bulk_event_candidate_date_mismatch" in event.validation_errors
+    review = runner.state.reviews_for_run("bulk-run")[0]
+    assert review.reason_code == "bulk_event_candidate_date_mismatch"
 
 
 def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):
