@@ -64,7 +64,7 @@
   lawsuits, stalled or abandoned projects route to `skip_negative`; general market or
   portfolio signals without a property trigger route to `skip_general`.
 - The model never writes the final sentence. Deterministic code renders the approved
-  `Hi [first name] just wanted to reach out since I saw on the news that ...` wording
+  `Hi [first name], I wanted to reach out after seeing on the news that ...` wording
   from the returned slots, followed by one approved question. All templates use the
   future-needs question except renovation/conversion, which uses the review question,
   and expansion, which uses the additional-space question. Validation requires one sourced event

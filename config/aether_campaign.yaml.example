@@ -34,7 +34,7 @@ steps:
     subject: TODO_APPROVED_COPY_DAY_7_SUBJECT
     bodyHtml: "<p>TODO_APPROVED_COPY_DAY_7_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
     bodyText: "TODO_APPROVED_COPY_DAY_7_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
-    delayDays: 7
+    delayDays: 4
     delayHours: 0
     isActive: true
   - stepIndex: 3
@@ -42,6 +42,6 @@ steps:
     subject: TODO_APPROVED_COPY_DAY_14_SUBJECT
     bodyHtml: "<p>TODO_APPROVED_COPY_DAY_14_HTML</p><p><a href=\"{{unsubscribeUrl}}\">Unsubscribe</a></p><p>{{AETHER_POSTAL_ADDRESS}}</p>"
     bodyText: "TODO_APPROVED_COPY_DAY_14_TEXT\n\nUnsubscribe: {{unsubscribeUrl}}\n{{AETHER_POSTAL_ADDRESS}}"
-    delayDays: 14
+    delayDays: 7
     delayHours: 0
     isActive: true

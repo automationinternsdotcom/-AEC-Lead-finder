@@ -479,7 +479,7 @@ class SalesWorkflows:
             raise WorkflowRetry("Warmy prospect has not been created")
         self.settings.require_campaign_enrollment()
         campaign = self.warmy.get_campaign(self.settings.warmy_campaign_id)
-        self._validate_live_campaign(campaign)
+        self._validate_live_campaign(campaign, for_enrollment=True)
         self._operation(
             "warmy",
             f"enroll:{self.settings.warmy_campaign_id}:{sequence_id}:{prospect_id}",
@@ -1473,7 +1473,9 @@ class SalesWorkflows:
                 {"custom_fields": fields},
             )
 
-    def _validate_live_campaign(self, response: dict[str, Any]) -> None:
+    def _validate_live_campaign(
+        self, response: dict[str, Any], *, for_enrollment: bool = False
+    ) -> None:
         campaign = response.get("data") if isinstance(response, dict) else None
         if not isinstance(campaign, dict):
             campaign = response
@@ -1481,7 +1483,10 @@ class SalesWorkflows:
         if str(campaign.get("id") or "") != self.settings.warmy_campaign_id:
             errors.append("campaign ID mismatch")
         status = str(campaign.get("status") or "").casefold()
-        if status not in {"draft", "paused", "scheduled", "running"}:
+        allowed_statuses = {"draft", "paused", "scheduled", "running"}
+        if for_enrollment and not self.settings.campaign_start_enabled:
+            allowed_statuses = {"draft", "paused"}
+        if status not in allowed_statuses:
             errors.append(f"unsafe campaign status {status or '(missing)'}")
         mailbox_values = campaign.get("mailboxIds") or campaign.get("mailboxes") or []
         mailbox_ids = {

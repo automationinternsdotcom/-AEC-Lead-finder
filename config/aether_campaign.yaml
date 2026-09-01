@@ -88,7 +88,7 @@ steps:
 
       Unsubscribe: {{unsubscribeUrl}}
       {{AETHER_POSTAL_ADDRESS}}
-    delayDays: 7
+    delayDays: 4
     delayHours: 0
     isActive: true
   - stepIndex: 3
@@ -116,6 +116,6 @@ steps:
 
       Unsubscribe: {{unsubscribeUrl}}
       {{AETHER_POSTAL_ADDRESS}}
-    delayDays: 14
+    delayDays: 7
     delayHours: 0
     isActive: true

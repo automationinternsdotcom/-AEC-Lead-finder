@@ -460,6 +460,26 @@ def test_approval_batch_releases_only_the_named_sequence(tmp_path):
     assert ("enroll", "prospect-2") not in warmy.calls
 
 
+@pytest.mark.parametrize("status", ["scheduled", "running"])
+def test_sequence_enrollment_rejects_sendable_campaign_status_without_start(
+    tmp_path, status
+):
+    campaign = _campaign()
+    campaign["status"] = status
+    settings = replace(_activation_settings(campaign), campaign_start_enabled=False)
+    workflows = SalesWorkflows(
+        settings,
+        Database(tmp_path / f"{status}.sqlite"),
+        warmy=FakeWarmy(campaign=campaign),
+        pipedrive=FakePipedrive(),
+    )
+
+    with pytest.raises(ActivationBlocked, match=f"unsafe campaign status {status}"):
+        workflows._validate_live_campaign(
+            {"data": campaign}, for_enrollment=True
+        )
+
+
 def test_typed_sequence_reply_forwards_original_message_to_jordan(tmp_path):
     db = Database(tmp_path / "sales.sqlite")
     _seed(db)

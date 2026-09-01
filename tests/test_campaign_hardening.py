@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from itertools import accumulate
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ def test_approved_campaign_copy_has_disclosure_and_safe_step_invariants():
     manifest = load_campaign(CAMPAIGN, _settings())
 
     assert all(step.isActive and step.delayHours == 0 for step in manifest.steps)
+    assert list(accumulate(step.delayDays for step in manifest.steps)) == [0, 3, 7, 14]
     assert len(manifest.mailboxIds) == len(set(manifest.mailboxIds)) == 6
     assert all(
         "commercial message from aether facility services" in body.lower()
@@ -65,12 +67,24 @@ def test_campaign_manifest_rejects_duplicate_mailbox_ids():
         CampaignManifest.model_validate(payload)
 
 
-def test_campaign_loader_rejects_unsupported_subject_merge_variable(tmp_path):
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ("A facilities idea for {{company}}", "Hello {{whyLine}}"),
+        ("{{whyLine}}", "{{company_name}}"),
+        ("{{whyLine}}", "{{company | upper}}"),
+        ("{{whyLine}}", "{{company}"),
+        ("{{whyLine}}", "company}}"),
+    ],
+)
+def test_campaign_loader_rejects_unsupported_or_malformed_merge_variables(
+    tmp_path, needle, replacement
+):
     source = CAMPAIGN.read_text(encoding="utf-8")
     path = tmp_path / "campaign.yaml"
-    path.write_text(source.replace("A facilities idea for {{company}}", "Hello {{whyLine}}"), encoding="utf-8")
+    path.write_text(source.replace(needle, replacement, 1), encoding="utf-8")
 
-    with pytest.raises(ActivationBlocked, match="subject has unsupported merge variables"):
+    with pytest.raises(ActivationBlocked):
         load_campaign(path, _settings())
 
 
