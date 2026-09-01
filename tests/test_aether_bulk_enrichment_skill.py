@@ -23,6 +23,7 @@ from bulk_lib import (  # noqa: E402
     CompanyProfile,
     WhyVariant,
     _archive_url_in_scope,
+    _block_duplicate_primary_emails,
     _bulk_sales_handoff,
     _first_name,
     _likely_duplicate_event,
@@ -45,7 +46,15 @@ from v2.contracts import (  # noqa: E402
     VerificationStatus,
 )
 from integration.handoff import handoff_content_hash  # noqa: E402
-from integration.models import EligibilityStatus  # noqa: E402
+from integration.models import (  # noqa: E402
+    CompanySync,
+    EligibilityStatus,
+    EventRole,
+    LeadEventSync,
+    OutreachSequenceSync,
+    RecipientSync,
+    SalesHandoff,
+)
 from v2.http import FetchResponse  # noqa: E402
 from v2.discovery import load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
@@ -209,6 +218,145 @@ def test_bulk_sales_handoff_ranks_and_gates_recipients():
     assert len(handoff.sequences) == 1
     assert handoff.sequences[0].eligibility_status == EligibilityStatus.READY
     assert handoff.content_hash == handoff_content_hash(handoff)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_primary_email_keeps_desert_ridge_independent_of_order(reverse):
+    trader_sequence_id = "22f60a30-8ea8-5d66-ba93-cd9408d17f46"
+    desert_ridge_sequence_id = "d2e25a31-0429-517f-8257-09d8ee7d3c68"
+    companies = [
+        CompanySync(
+            company_id="trader-joes",
+            canonical_name="Trader Joe's",
+            domain="traderjoes.com",
+        ),
+        CompanySync(
+            company_id="desert-ridge",
+            canonical_name="Desert Ridge Marketplace",
+            domain="shopdesertridge.com",
+        ),
+    ]
+    events = [
+        LeadEventSync(
+            run_id="bulk-run",
+            lead_event_id="trader-event",
+            company_id="trader-joes",
+            organization_name="Trader Joe's",
+            event_role=EventRole.ANCHOR,
+            event="Trader Joe's opens a new store",
+            location="Phoenix",
+            date_posted="2026-06-16",
+            score=80,
+            confidence="high",
+            record_status="valid",
+            actionable_route=True,
+            crm_eligible=True,
+        ),
+        LeadEventSync(
+            run_id="bulk-run",
+            lead_event_id="desert-ridge-event",
+            company_id="desert-ridge",
+            organization_name="Desert Ridge Marketplace",
+            event_role=EventRole.ANCHOR,
+            event="Desert Ridge Marketplace announces a new tenant",
+            location="Phoenix",
+            date_posted="2026-08-27",
+            score=75,
+            confidence="high",
+            record_status="valid",
+            actionable_route=True,
+            crm_eligible=True,
+        ),
+    ]
+    recipients = [
+        RecipientSync(
+            recipient_id="trader-recipient",
+            company_id="trader-joes",
+            person_id="tim-ray-trader",
+            full_name="Tim Ray",
+            first_name="Tim",
+            title="Vice President",
+            scope="Desert Ridge Marketplace / Vestar",
+            email="tray@vestar.com",
+            role_score=107,
+            rank=1,
+            primary=True,
+        ),
+        RecipientSync(
+            recipient_id="desert-ridge-recipient",
+            company_id="desert-ridge",
+            person_id="tim-ray-desert-ridge",
+            full_name="Tim Ray",
+            first_name="Tim",
+            title="Vice President",
+            scope="Desert Ridge Marketplace / Vestar",
+            email="TRAY@VESTAR.COM",
+            role_score=102,
+            rank=1,
+            primary=True,
+        ),
+    ]
+
+    def sequence(sequence_id, company_id, event_id, recipient_id):
+        return OutreachSequenceSync(
+            sequence_id=sequence_id,
+            run_id="bulk-run",
+            company_id=company_id,
+            campaign_protocol="recipient-outreach-v4",
+            anchor_lead_event_id=event_id,
+            primary_recipient_id=recipient_id,
+            why_template_key="opening",
+            why_slots={"property": company_id},
+            why_sources=["https://example.com/source"],
+            why_confidence="high",
+            company_why_line="Hi [first name] — Saw the opening in Phoenix.",
+            personalized_why_line="Hi Tim — Saw the opening in Phoenix.",
+            merge_snapshot={"firstName": "Tim"},
+            merge_hash=f"merge-{sequence_id}",
+            eligibility_status=EligibilityStatus.READY,
+        )
+
+    sequences = [
+        sequence(
+            trader_sequence_id,
+            "trader-joes",
+            "trader-event",
+            "trader-recipient",
+        ),
+        sequence(
+            desert_ridge_sequence_id,
+            "desert-ridge",
+            "desert-ridge-event",
+            "desert-ridge-recipient",
+        ),
+    ]
+    if reverse:
+        companies.reverse()
+        events.reverse()
+        recipients.reverse()
+        sequences.reverse()
+    value = SalesHandoff(
+        schema_version=1,
+        protocol_version="aether-sales-handoff-v1",
+        run_id="bulk-run",
+        companies=companies,
+        lead_events=events,
+        recipients=recipients,
+        sequences=sequences,
+        content_hash="pending",
+    )
+    handoff = value.model_copy(update={"content_hash": handoff_content_hash(value)})
+
+    updated, blocked_count = _block_duplicate_primary_emails(handoff)
+
+    by_id = {item.sequence_id: item for item in updated.sequences}
+    assert blocked_count == 1
+    assert by_id[desert_ridge_sequence_id].eligibility_status == EligibilityStatus.READY
+    assert by_id[trader_sequence_id].eligibility_status == EligibilityStatus.BLOCKED
+    assert by_id[trader_sequence_id].eligibility_reasons == [
+        f"duplicate_primary_email:{desert_ridge_sequence_id}"
+    ]
+    assert updated.content_hash == handoff_content_hash(updated)
 
 
 @pytest.mark.parametrize(
