@@ -32,6 +32,13 @@ daily V2 run, monitoring, email delivery, or ordinary contact enrichment.
 3. Preflight the local Grok endpoint and any requested seed run. Do not request
    NewsAPI or Apollo credentials; sitemap/archive discovery and bounded Grok search
    fallback are built in.
+   To process a bounded date slice from a previously completed archive discovery
+   without crawling again, start a new run with `--corpus-db PATH
+   --corpus-run-id ID`. The source run must have a completed discovery stage;
+   every imported page must still exist and match its recorded hash or pass the
+   dynamic-page canonical-URL and publication-date identity check. Accepted bytes
+   are copied and re-hashed in the child run. This mode resets prior
+   screening/qualification state and filters by page publication date.
 4. Start or resume the backfill:
 
    ```bash
@@ -120,3 +127,23 @@ Cached Apollo results do not consume the cap. Report local request/billable acco
 as an upper bound and use Apollo's account ledger for exact credits or dollar charges.
 Recipient outputs are written beneath
 `final/recipient-outreach-v4/recipients-v1/`.
+
+## Local sales handoff
+
+After recipient enrichment, build the typed, content-hashed provider boundary as a
+separate local-only action:
+
+```bash
+uv run python skills/aether-bulk-enrichment/scripts/bulk_enrich.py \
+  --since YYYY-MM-DD --until YYYY-MM-DD \
+  --output results/backfills/YYYY-MM-DD_YYYY-MM-DD \
+  --run-id RUN_ID --resume --build-sales-handoff
+```
+
+This action makes zero provider calls and writes `sales_handoff.json` under the
+recipient revision. It includes only valid single-company routes. Recipient ranking,
+the role-score threshold, authoritative-verification precheck, open-review blockers,
+and immutable merge snapshot match the daily production handoff. Enqueuing that file
+into the integration database and running the worker are distinct operator actions.
+The worker may create Pipedrive organizations/leads/people and Warmy prospects, but
+campaign enrollment remains protected by the immutable approval and activation gates.

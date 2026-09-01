@@ -51,6 +51,14 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     value.add_argument(
+        "--build-sales-handoff",
+        action="store_true",
+        help=(
+            "build and validate the hashed local sales_handoff.json from a "
+            "completed recipient revision; makes no provider calls"
+        ),
+    )
+    value.add_argument(
         "--apollo-go",
         action="store_true",
         help="authorize email-only Apollo fallback for people with no public email or phone",
@@ -75,6 +83,16 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--seed-db", type=Path)
     value.add_argument("--seed-run-id", default="")
     value.add_argument(
+        "--corpus-db",
+        type=Path,
+        help="reuse verified saved article artifacts from an earlier bulk discovery database",
+    )
+    value.add_argument(
+        "--corpus-run-id",
+        default="",
+        help="source run ID paired with --corpus-db",
+    )
+    value.add_argument(
         "--no-search-fallback",
         action="store_true",
         help="disable Grok search fallback for uncovered/incomplete sources",
@@ -93,9 +111,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.enrich_recipients and not args.resume:
         print("ERROR: --enrich-recipients requires --resume", file=sys.stderr)
         return 2
-    if args.refresh_why_lines and args.enrich_recipients:
+    if args.build_sales_handoff and not args.resume:
+        print("ERROR: --build-sales-handoff requires --resume", file=sys.stderr)
+        return 2
+    actions = sum(
+        bool(value)
+        for value in (
+            args.refresh_why_lines,
+            args.enrich_recipients,
+            args.build_sales_handoff,
+        )
+    )
+    if actions > 1:
         print(
-            "ERROR: --refresh-why-lines and --enrich-recipients are mutually exclusive",
+            "ERROR: revision actions are mutually exclusive",
             file=sys.stderr,
         )
         return 2
@@ -114,6 +143,15 @@ def main(argv: list[str] | None = None) -> int:
     if bool(args.seed_db) != bool(args.seed_run_id):
         print("ERROR: --seed-db and --seed-run-id must be supplied together", file=sys.stderr)
         return 2
+    if bool(args.corpus_db) != bool(args.corpus_run_id):
+        print("ERROR: --corpus-db and --corpus-run-id must be supplied together", file=sys.stderr)
+        return 2
+    if args.corpus_db and args.reuse_discovery_corpus:
+        print(
+            "ERROR: --corpus-db and --reuse-discovery-corpus are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
     options = BulkOptions(
         since=args.since,
         until=args.until,
@@ -126,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
         seed_db=args.seed_db.resolve() if args.seed_db else None,
         seed_run_id=args.seed_run_id,
+        corpus_db=args.corpus_db.resolve() if args.corpus_db else None,
+        corpus_run_id=args.corpus_run_id,
         search_fallback=not args.no_search_fallback,
         reuse_discovery_corpus=args.reuse_discovery_corpus,
         batch_size=max(1, min(args.batch_size, 25)),
@@ -139,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
                 apollo_go=args.apollo_go,
                 apollo_cap=args.apollo_cap,
             )
+        elif args.build_sales_handoff:
+            result = runner.build_sales_handoff()
         else:
             result = runner.run()
     except Exception as exc:

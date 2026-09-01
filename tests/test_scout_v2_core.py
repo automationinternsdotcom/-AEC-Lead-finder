@@ -89,7 +89,7 @@ def test_state_migration_is_idempotent_and_tracks_resume(tmp_path):
         ).fetchone()[0] == 2
 
 
-def test_completed_qualifications_are_scoped_to_the_requested_window(tmp_path):
+def test_only_rejected_qualifications_are_reused_across_runs(tmp_path):
     store = StateStore(tmp_path / "scout.db")
     store.migrate()
     store.create_run("run-a", "2026-01-14", "2026-01-01")
@@ -120,9 +120,11 @@ def test_completed_qualifications_are_scoped_to_the_requested_window(tmp_path):
         status="completed",
     )
 
-    assert store.completed_qualification_candidate_ids(
+    # A legacy completed provider attempt has no outcome record and cannot be
+    # reused safely: it may have created a run-scoped qualified LeadEvent.
+    assert not store.completed_qualification_candidate_ids(
         since_date="2026-01-01", stamp="2026-01-14"
-    ) == {"candidate-1"}
+    )
     assert not store.completed_qualification_candidate_ids(
         since_date="2026-01-15", stamp="2026-01-31"
     )
@@ -136,6 +138,16 @@ def test_completed_qualifications_are_scoped_to_the_requested_window(tmp_path):
     assert store.completed_qualification_candidate_ids(
         since_date="2026-01-15", stamp="2026-01-31"
     ) == {"candidate-1"}
+    store.record_qualification_completion(
+        candidate_id="candidate-1",
+        since_date="2026-01-01",
+        stamp="2026-01-14",
+        run_id="run-a",
+        outcome="qualified",
+    )
+    assert not store.completed_qualification_candidate_ids(
+        since_date="2026-01-01", stamp="2026-01-14"
+    )
     with pytest.raises(ValueError, match="supplied together"):
         store.completed_qualification_candidate_ids(since_date="2026-01-01")
 

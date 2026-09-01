@@ -649,41 +649,29 @@ class StateStore:
     def completed_qualification_candidate_ids(
         self, *, since_date: str | None = None, stamp: str | None = None
     ) -> set[str]:
-        """Candidates with a terminal prior qualification outcome.
+        """Candidates with a safely reusable prior qualification rejection.
 
         Qualification depends on the requested publication window, so a
-        terminal outcome is reusable only for the same window. A deferred or
-        quarantined candidate has no completed attempt and remains eligible.
+        rejection is reusable only for the same window. Qualified outcomes
+        are deliberately excluded because their LeadEvent rows are scoped to
+        the originating run; skipping them in a later run would silently drop
+        valid events unless those rows were also hydrated. Deferred, review,
+        and legacy provider-attempt-only outcomes remain eligible.
         """
         if bool(since_date) != bool(stamp):
             raise ValueError("since_date and stamp must be supplied together")
-        sql = """SELECT DISTINCT p.target_id
-                 FROM v2_provider_attempts p"""
-        params: list[object] = []
-        if since_date and stamp:
-            sql += " JOIN v2_runs r ON r.run_id=p.run_id"
-        sql += """ WHERE p.stage='qualify'
-                    AND p.target_type='discovery_candidate'
-                    AND p.status='completed'"""
-        if since_date and stamp:
-            sql += " AND r.since_date=? AND r.stamp=?"
-            params.extend((since_date, stamp))
+        if not since_date or not stamp:
+            return set()
         with self.connect() as conn:
-            completed = {
-                row["target_id"]
-                for row in conn.execute(sql, params)
-            }
-            if since_date and stamp:
-                completed.update(
-                    row["candidate_id"]
-                    for row in conn.execute(
-                        """SELECT candidate_id
-                           FROM v2_qualification_completions
-                           WHERE since_date=? AND stamp=?""",
-                        (since_date, stamp),
-                    )
+            return {
+                row["candidate_id"]
+                for row in conn.execute(
+                    """SELECT candidate_id
+                       FROM v2_qualification_completions
+                       WHERE since_date=? AND stamp=? AND outcome='rejected'""",
+                    (since_date, stamp),
                 )
-            return completed
+            }
 
     def record_qualification_completion(
         self,

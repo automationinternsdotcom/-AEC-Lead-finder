@@ -23,20 +23,28 @@ from bulk_lib import (  # noqa: E402
     CompanyProfile,
     WhyVariant,
     _archive_url_in_scope,
+    _bulk_sales_handoff,
     _first_name,
     _offline_screen,
     _personalize_why_line,
+    _single_sendable_company_name,
     _template_catalog,
     _uses_sentence_case_only,
     _why_line_from_payload,
 )
 from v2.contracts import (  # noqa: E402
+    ContactCandidate,
     DiscoveryCandidate,
     Evidence,
     LeadEvent,
     Organization,
+    Person,
+    RecordStatus,
     StageStatus,
+    VerificationStatus,
 )
+from integration.handoff import handoff_content_hash  # noqa: E402
+from integration.models import EligibilityStatus  # noqa: E402
 from v2.http import FetchResponse  # noqa: E402
 from v2.discovery import load_curated_sources  # noqa: E402
 from v2.state import StateStore  # noqa: E402
@@ -81,6 +89,125 @@ def test_recipient_first_name_personalization_strips_honorifics():
     assert _first_name("Ana Garcia") == "Ana"
     assert _personalize_why_line(line, "Michael").startswith("Hi Michael ")
     assert "[first name]" not in _personalize_why_line(line, "Michael")
+    assert _single_sendable_company_name("Gorman & Company")
+    assert not _single_sendable_company_name("Costco and Sprouts")
+
+
+def test_bulk_sales_handoff_ranks_and_gates_recipients():
+    run_id = "bulk-handoff-run"
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate-1",
+        run_id=run_id,
+        provider="archive",
+        discovered_url="https://example.com/acme-opens",
+        resolved_url="https://example.com/acme-opens",
+        canonical_url="https://example.com/acme-opens",
+        title="Acme opens Phoenix warehouse",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    event = LeadEvent(
+        lead_event_id="event-1",
+        run_id=run_id,
+        organization_id="legacy-org",
+        primary_candidate_id=candidate.candidate_id,
+        supporting_candidate_ids=[candidate.candidate_id],
+        event="Acme opened a warehouse",
+        location="Phoenix",
+        date_posted=datetime(2026, 1, 5, tzinfo=timezone.utc).date(),
+        summary="Acme opened a warehouse in Phoenix.",
+        priority="high",
+        confidence="high",
+    )
+    why = WhyVariant(
+        text=(
+            "Hi [first name] just wanted to reach out since I saw on the news that "
+            "the new warehouse is opening in phoenix. Is there any chance we could "
+            "stay in touch regarding your future janitorial needs?"
+        ),
+        template_key="opening",
+        lead_event_id=event.lead_event_id,
+        slots={"property": "the new warehouse", "location": "phoenix"},
+        confidence="high",
+        source_urls=[candidate.canonical_url],
+        status="valid",
+    )
+    profile = CompanyProfile(
+        profile_key="acme",
+        company_id="company-1",
+        canonical_name="Acme",
+        organization_ids=["legacy-org"],
+        lead_event_ids=[event.lead_event_id],
+        anchor_lead_event_id=event.lead_event_id,
+        variants={"primary": why},
+        record_status="valid",
+    )
+    operator = Person(
+        person_id="person-operator",
+        organization_id=profile.company_id,
+        name="Olivia Operator",
+        title="Regional Operations Manager",
+        scope="Arizona operations",
+        evidence=[Evidence(url="https://acme.example/team", supports="role")],
+    )
+    owner = Person(
+        person_id="person-owner",
+        organization_id=profile.company_id,
+        name="Owen Owner",
+        title="Owner",
+        evidence=[Evidence(url="https://acme.example/about", supports="role")],
+    )
+    weak = Person(
+        person_id="person-weak",
+        organization_id=profile.company_id,
+        name="Wendy Weak",
+        title="Analyst",
+        evidence=[Evidence(url="https://acme.example/team", supports="role")],
+    )
+
+    def contact(person, email, reason="domain_mx_valid_mailbox_unverified"):
+        return ContactCandidate(
+            contact_candidate_id=f"contact-{person.person_id}",
+            run_id=run_id,
+            lead_event_id=event.lead_event_id,
+            organization_id=profile.company_id,
+            person_id=person.person_id,
+            person_name=person.name,
+            title=person.title,
+            email=email,
+            provider="model",
+            verification_status=VerificationStatus.UNKNOWN,
+            verification_reason=reason,
+            selected=True,
+            evidence=[Evidence(url="https://acme.example/team", supports="email")],
+        )
+
+    handoff = _bulk_sales_handoff(
+        run_id=run_id,
+        profiles=[profile],
+        events=[event],
+        candidates={candidate.candidate_id: candidate},
+        scores={event.lead_event_id: 90},
+        people=[operator, owner, weak],
+        contacts=[
+            contact(operator, "olivia@acme.example"),
+            contact(owner, "owen@acme.example"),
+            contact(weak, "wendy@acme.example", reason="mailbox_unverified"),
+        ],
+        open_review_ids=set(),
+    )
+
+    assert len(handoff.companies) == 1
+    assert len(handoff.lead_events) == 1
+    assert handoff.lead_events[0].crm_eligible
+    assert len(handoff.recipients) == 2
+    assert handoff.recipients[0].person_id == operator.person_id
+    assert handoff.recipients[0].primary and handoff.recipients[0].rank == 1
+    assert len(handoff.sequences) == 1
+    assert handoff.sequences[0].eligibility_status == EligibilityStatus.READY
+    assert handoff.content_hash == handoff_content_hash(handoff)
 
 
 def test_resume_rejects_changed_source_snapshot(tmp_path):
@@ -267,6 +394,89 @@ def test_legacy_interrupted_run_reuses_saved_corpus_without_fetching(tmp_path):
     counters = runner._discover()
 
     assert counters["corpus_reused"] == 1
+
+
+def test_external_corpus_reuse_clones_only_hash_verified_window_candidates(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    corpus_options = options(corpus_dir, run_id="corpus-run")
+    corpus_runner = BulkRunner(
+        corpus_options,
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    source = corpus_runner.sources[0]
+    corpus_runner.state.upsert_source(
+        source.source_id, source.name, source.url, source.domain
+    )
+    corpus_runner.state.set_stage_status(
+        "corpus-run", "discover", StageStatus.COMPLETED
+    )
+    corpus_runner.coverage = [
+        bulk_lib.SourceCoverage(
+            source_id=source.source_id,
+            source_name=source.name,
+            source_url=source.url,
+        )
+    ]
+    corpus_runner._write_coverage()
+    for candidate_id_value, published_at in (
+        ("inside", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+        ("outside", datetime(2026, 7, 1, tzinfo=timezone.utc)),
+    ):
+        artifact = corpus_runner.artifacts.raw_dir / f"{candidate_id_value}.html"
+        artifact.write_text(
+            f'<title>{candidate_id_value} Acme Warehouse</title>'
+            f'<link rel="canonical" href="https://example.com/{candidate_id_value}">'
+            f'<meta property="article:published_time" content="{published_at.isoformat()}">',
+            encoding="utf-8",
+        )
+        corpus_runner.state.save_candidate(
+            DiscoveryCandidate(
+                candidate_id=candidate_id_value,
+                run_id="corpus-run",
+                provider="archive",
+                discovered_url=f"https://example.com/{candidate_id_value}",
+                resolved_url=f"https://example.com/{candidate_id_value}",
+                canonical_url=f"https://example.com/{candidate_id_value}",
+                title=f"{candidate_id_value} Acme Warehouse",
+                source_id=source.source_id,
+                source_name=source.name,
+                source_domain=source.domain,
+                published_at=published_at,
+                record_status=RecordStatus.REJECTED,
+                raw_artifact_path=str(artifact),
+                raw_artifact_hash=(
+                    "0" * 64
+                    if candidate_id_value == "inside"
+                    else bulk_lib.hashlib.sha256(artifact.read_bytes()).hexdigest()
+                ),
+                metadata={"bulk_qualified": True},
+            )
+        )
+
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    child = BulkRunner(
+        options(
+            child_dir,
+            run_id="child-run",
+            corpus_db=corpus_options.output_dir / "state.sqlite",
+            corpus_run_id="corpus-run",
+        ),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+
+    counters = child._discover()
+
+    assert counters["corpus_reused"] == 1
+    imported = child.state.candidates_for_run("child-run")
+    assert [item.candidate_id for item in imported] == ["inside"]
+    assert imported[0].record_status == RecordStatus.VALID
+    assert "bulk_qualified" not in imported[0].metadata
+    assert imported[0].metadata["corpus_hash_revalidated"] is True
+    assert Path(imported[0].raw_artifact_path).is_relative_to(child.artifacts.raw_dir)
     assert counters["distinct_urls"] == 1
 
 
@@ -655,7 +865,7 @@ def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_p
                 discovered_url=url,
                 resolved_url=url,
                 canonical_url=url,
-                title=f"Phoenix warehouse {index}",
+                title=f"Acme Warehouse opens in Phoenix {index}",
                 source_id="source-1",
                 source_name="Example",
                 source_domain="example.com",
@@ -678,6 +888,127 @@ def test_bulk_qualification_normalizes_timestamp_and_isolates_invalid_item(tmp_p
         "candidate-isolated-0": "valid",
         "candidate-isolated-1": "review",
     }
+
+
+def test_bulk_qualification_enforces_window_and_business_grounding(tmp_path):
+    def model_call(model, prompt, tools):
+        assert "2026-07-24 through 2026-08-28" in prompt
+        rows = json.loads(prompt.split("Candidates:\n", 1)[1])
+        return json.dumps(
+            {
+                rows[0]["candidate_id"]: {
+                    "qualified": True,
+                    "business_name": "Unrelated Hotels",
+                    "event": "Opened a hotel",
+                    "date_posted": "2026-08-01",
+                    "location": "Phoenix",
+                    "summary": "A hotel opened.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "confidence": "high",
+                },
+                rows[1]["candidate_id"]: {
+                    "qualified": True,
+                    "business_name": "Acme Warehouse",
+                    "event": "Opened a warehouse",
+                    "date_posted": "2026-09-01",
+                    "location": "Phoenix",
+                    "summary": "A warehouse opened.",
+                    "state": "Arizona",
+                    "priority": "high",
+                    "confidence": "high",
+                },
+            }
+        ), {}
+
+    runner = BulkRunner(
+        options(tmp_path, batch_size=2),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=model_call,
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    rows = (
+        ("ungrounded", "Hospital capacity update", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+        ("outside", "Acme Warehouse opens", datetime(2026, 9, 1, tzinfo=timezone.utc)),
+    )
+    for candidate_id_value, title, published_at in rows:
+        url = f"https://example.com/{candidate_id_value}"
+        runner.state.save_candidate(
+            DiscoveryCandidate(
+                candidate_id=candidate_id_value,
+                run_id="bulk-run",
+                provider="archive",
+                discovered_url=url,
+                resolved_url=url,
+                canonical_url=url,
+                title=title,
+                source_id="source-1",
+                source_name="Example",
+                source_domain="example.com",
+                published_at=published_at,
+                metadata={"selected_for_qualification": True},
+            )
+        )
+
+    counters = runner._qualify()
+
+    assert counters == {
+        "submitted": 2,
+        "batches": 1,
+        "qualified": 0,
+        "rejected": 1,
+        "reviews": 1,
+    }
+    assert not runner.state.events_for_run("bulk-run")
+
+
+def test_qualification_audit_quarantines_persisted_out_of_window_event(tmp_path):
+    runner = BulkRunner(
+        options(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)),
+        model_call=lambda *args: ("{}", {}),
+    )
+    runner.state.upsert_source(
+        "source-1", "Example", "https://example.com/", "example.com"
+    )
+    candidate = DiscoveryCandidate(
+        candidate_id="candidate-old",
+        run_id="bulk-run",
+        provider="archive",
+        discovered_url="https://example.com/acme",
+        resolved_url="https://example.com/acme",
+        canonical_url="https://example.com/acme",
+        title="Acme Warehouse opens",
+        source_id="source-1",
+        source_name="Example",
+        source_domain="example.com",
+        published_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    runner.state.save_candidate(candidate)
+    runner.state.save_organization(
+        Organization(organization_id="org-acme", canonical_name="Acme Warehouse")
+    )
+    runner.state.save_lead_event(
+        LeadEvent(
+            lead_event_id="event-old",
+            run_id="bulk-run",
+            organization_id="org-acme",
+            primary_candidate_id=candidate.candidate_id,
+            supporting_candidate_ids=[candidate.candidate_id],
+            event="Opened a warehouse",
+            location="Phoenix",
+            date_posted=datetime(2026, 7, 1).date(),
+            priority="high",
+            evidence=[Evidence(url=candidate.canonical_url, supports="Opening")],
+        )
+    )
+
+    counters = runner._qualification_audit()
+
+    assert counters == {"submitted": 1, "valid": 0, "reviews": 1}
+    assert not runner.state.active_events_for_run("bulk-run")
 
 
 def test_recipient_why_refresh_is_one_call_per_business_and_resumable(tmp_path):

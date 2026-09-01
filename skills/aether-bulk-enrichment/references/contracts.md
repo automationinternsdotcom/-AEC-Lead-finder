@@ -32,6 +32,22 @@
 - If seed integrity fails, stop. The operator may omit the seed and cover that date in
   archive discovery instead.
 
+## Saved discovery corpus
+
+- A new bounded run may reuse candidates from an earlier bulk run only when that
+  source run completed discovery.
+- Filter imported candidates by their saved page publication date before screening;
+  omit undated and out-of-window pages.
+- Verify every imported raw article against its recorded hash. When a dynamic page
+  was overwritten at the same run-scoped path, accept it only if the saved HTML still
+  contains the exact canonical URL and its parsed publication date matches the
+  candidate. Copy the accepted bytes into the child run and record their current
+  hash. Missing evidence or failed identity checks stop the import; never refetch.
+- Reset prior screening and qualification state. Corpus reuse saves archive crawling,
+  not model judgments or downstream events.
+- Carry the parent run's per-source incomplete-coverage state into the child run and
+  identify the source corpus run in coverage errors and manifest configuration.
+
 ## Company profile and why line
 
 - Resolve preliminary organizations to final companies by canonical website host,
@@ -92,6 +108,8 @@
 - Recipient enrichment is a separate, explicit-only resume mode over the completed
   `recipient-outreach-v4` company revision. Only companies with a valid why line enter
   the recipient stage.
+- A recipient row must map to one company. Combined model labels using `and` for two
+  organizations enter review before person research and never reach the handoff.
 - Research up to three sourced current decision makers per company with one Grok 4.3
   request per company, then make one public-contact request per identified person.
   Persist stable `Person` and `ContactCandidate` records so resume does not repeat
@@ -109,3 +127,23 @@
 - Write `recipients.csv`, recipient-level `companies.csv`, `people.jsonl`,
   `contacts.jsonl`, `reviews.jsonl`, and `summary.json` under
   `final/recipient-outreach-v4/recipients-v1/` without changing the v4 source files.
+
+## Sales handoff add-on
+
+- `--build-sales-handoff` is a local projection only: it performs no Pipedrive,
+  Warmy, Gmail, Apollo, or model call.
+- Accept only valid v4 single-company profiles. Preserve event-level Pipedrive Lead
+  identity, and fail closed on invalid events, zero scores, non-high event confidence,
+  or blocking open reviews.
+- A contact may reach Warmy's authoritative verification only when locally verified,
+  or when its status is `unknown` with reason exactly
+  `domain_mx_valid_mailbox_unverified`. This precheck is not mailbox verification.
+- Rank recipients with the daily production role scorer. Only rank 1 with score 70+
+  can yield a ready sequence; retain lower-ranked or lower-score candidates as blocked
+  audit records when they otherwise pass the source precheck.
+- Write and reload-validate a schema-versioned, protocol-versioned, content-hashed
+  `sales_handoff.json`. Set the unsubscribe merge value to
+  `__integration_generated__`; the integration worker creates the real signed URL.
+- Handoff generation does not enqueue work. Provider synchronization and campaign
+  enrollment are separate actions, and enrollment still requires a matching immutable
+  approval batch plus every activation flag.

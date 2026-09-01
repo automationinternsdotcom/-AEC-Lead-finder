@@ -62,6 +62,22 @@ from v2.research import ContactResearchService, DecisionMakerService
 from v2.scoring import parse_scores
 from v2.state import SCHEMA_VERSION, StateStore
 from v2.verification import ContactVerifier, select_best
+from v2.outreach import ROLE_AUTO_SEND_THRESHOLD, score_recipient_role
+from integration.handoff import (
+    HANDOFF_PROTOCOL_VERSION,
+    HANDOFF_SCHEMA_VERSION,
+    handoff_content_hash,
+    load_handoff,
+)
+from integration.models import (
+    CompanySync,
+    EligibilityStatus,
+    EventRole,
+    LeadEventSync,
+    OutreachSequenceSync,
+    RecipientSync,
+    SalesHandoff,
+)
 
 
 ModelCall = Callable[[str, str, list[dict]], tuple[str, dict]]
@@ -79,6 +95,7 @@ WHY_LINE_REVISION_STAGE = "why_lines_recipient_outreach_v4"
 WHY_LINE_MIGRATION_PROTOCOLS = ("recipient-outreach-v3",)
 RECIPIENT_PROTOCOL_VERSION = "recipients-v1"
 RECIPIENT_STAGE = "bulk_recipient_enrichment_v1"
+SALES_HANDOFF_STAGE = "bulk_sales_handoff_v1"
 RECIPIENT_DECISION_STAGE = "decision-makers"
 RECIPIENT_CONTACT_STAGE = "contacts"
 RECIPIENT_APOLLO_STAGE = "apollo"
@@ -210,6 +227,8 @@ class BulkOptions:
     resume: bool = False
     seed_db: Path | None = None
     seed_run_id: str = ""
+    corpus_db: Path | None = None
+    corpus_run_id: str = ""
     search_fallback: bool = True
     reuse_discovery_corpus: bool = False
     batch_size: int = 20
@@ -306,7 +325,9 @@ Return strict JSON only as {{"canonical_name":"","domain":"","employee_count":""
 
 BULK_QUALIFICATION_PROMPT = """Qualify this bounded batch using only the supplied saved article evidence. Do not search the web and do not identify people. For every exact candidate_id, decide whether the article reports a specific Arizona commercial-property event that creates a facilities-services opportunity.
 
-Return strict JSON only as one object mapping every exact candidate_id to an object with keys: qualified, business_name, event, date_posted, location, summary, state, priority, property_type, service_angle, filter_reason, confidence. date_posted must be YYYY-MM-DD or an empty string, never a timestamp. Include every submitted ID exactly once and invent no IDs. A rejection requires a specific filter_reason. A qualification requires state Arizona, priority high or medium, and nonempty business_name, event, and location.
+Requested article publication window: {since} through {until}, inclusive.
+
+Return strict JSON only as one object mapping every exact candidate_id to an object with keys: qualified, business_name, event, date_posted, location, summary, state, priority, property_type, service_angle, filter_reason, confidence. date_posted must be the article's exact YYYY-MM-DD publication date or an empty string, never a timestamp. Include every submitted ID exactly once and invent no IDs. A rejection requires a specific filter_reason. Reject articles outside the requested publication window. A qualification requires state Arizona, priority high or medium, and nonempty business_name, event, and location. The named business must appear in that candidate's supplied title or saved article evidence; never carry a business or event from another candidate in the batch.
 
 Candidates:
 {candidates}"""
@@ -322,7 +343,7 @@ Events:
 
 class BulkRunner:
     STAGES = (
-        "discover", "screen", "qualify", "seed", "dedup", "score",
+        "discover", "screen", "qualify", "qualification-audit", "seed", "dedup", "score",
         "companies", "export",
     )
 
@@ -355,7 +376,7 @@ class BulkRunner:
         )
         configuration = {
             "kind": "explicit_bulk_enrichment",
-            "workflow_version": 2,
+            "workflow_version": 3,
             "schema_version": SCHEMA_VERSION,
             "since": options.since,
             "until": options.until,
@@ -367,6 +388,8 @@ class BulkRunner:
             "email_delivery": False,
             "seed_db": str(options.seed_db or ""),
             "seed_run_id": options.seed_run_id,
+            "corpus_db": str(options.corpus_db or ""),
+            "corpus_run_id": options.corpus_run_id,
             "sources_sha256": self.sources_sha256,
             "reuse_discovery_corpus": options.reuse_discovery_corpus,
             "batch_size": options.batch_size,
@@ -414,6 +437,7 @@ class BulkRunner:
         prior = json.loads(row["configuration_json"] or "{}")
         immutable = (
             "kind", "model", "archive_until", "seed_db", "seed_run_id",
+            "corpus_db", "corpus_run_id",
             "apollo", "email_delivery", "search_fallback", "workflow_version",
             "reuse_discovery_corpus", "batch_size",
         )
@@ -436,6 +460,7 @@ class BulkRunner:
             self._stage("discover", self._discover)
             self._stage("screen", self._screen)
             self._stage("qualify", self._qualify)
+            self._stage("qualification-audit", self._qualification_audit)
             self._stage("seed", self._seed)
             self._stage("dedup", self._dedup)
             self._stage("score", self._score)
@@ -558,8 +583,40 @@ class BulkRunner:
             for line in profiles_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        valid_profiles = [
+            profile
+            for profile in profiles
+            if _profile_why_line(profile).status == "valid"
+        ]
+        combined_profiles = [
+            profile
+            for profile in valid_profiles
+            if not _single_sendable_company_name(profile.canonical_name)
+        ]
+        for profile in combined_profiles:
+            self.state.add_review(
+                ReviewItem(
+                    review_id=stable_uuid(
+                        "review",
+                        self.options.run_id,
+                        RECIPIENT_STAGE,
+                        profile.company_id,
+                        "combined-company",
+                    ),
+                    run_id=self.options.run_id,
+                    stage=RECIPIENT_STAGE,
+                    record_type="company_profile",
+                    record_id=profile.company_id,
+                    reason_code="combined_company_not_sendable",
+                    validation_errors=["combined_company_not_sendable"],
+                )
+            )
         profiles = sorted(
-            (profile for profile in profiles if _profile_why_line(profile).status == "valid"),
+            (
+                profile
+                for profile in valid_profiles
+                if _single_sendable_company_name(profile.canonical_name)
+            ),
             key=lambda profile: profile.company_id,
         )
         if not profiles:
@@ -573,6 +630,7 @@ class BulkRunner:
             "run_id": self.options.run_id,
             "source_protocol": WHY_LINE_PROTOCOL_VERSION,
             "sendable_companies_only": True,
+            "single_company_required": True,
             "max_people_per_company": MAX_PEOPLE_PER_COMPANY,
             "decision_maker_attempts": 1,
             "public_contact_attempts": 1,
@@ -744,6 +802,117 @@ class BulkRunner:
         )
         self._refresh_manifest()
         return summary
+
+    def build_sales_handoff(self) -> dict:
+        """Build the immutable local provider boundary without calling providers."""
+        if not self.options.resume:
+            raise ValueError("sales handoff requires --resume and an existing run ID")
+        if self.manifest.status != StageStatus.COMPLETED:
+            raise ValueError("sales handoff requires a completed source run")
+        if RECIPIENT_STAGE not in self.state.completed_stages(self.options.run_id):
+            raise ValueError("sales handoff requires completed recipient enrichment")
+
+        source_dir = self.artifacts.final_dir / WHY_LINE_PROTOCOL_VERSION
+        recipient_dir = source_dir / RECIPIENT_PROTOCOL_VERSION
+        profiles_path = source_dir / "company_profiles.jsonl"
+        people_path = recipient_dir / "people.jsonl"
+        contacts_path = recipient_dir / "contacts.jsonl"
+        required = (profiles_path, people_path, contacts_path)
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise ValueError("sales handoff inputs are missing: " + ", ".join(missing))
+
+        profiles = [
+            CompanyProfile.model_validate_json(line)
+            for line in profiles_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        profiles = sorted(
+            (
+                profile
+                for profile in profiles
+                if _profile_why_line(profile).status == "valid"
+                and _single_sendable_company_name(profile.canonical_name)
+            ),
+            key=lambda profile: profile.company_id,
+        )
+        people = [
+            Person.model_validate_json(line)
+            for line in people_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        contacts = [
+            ContactCandidate.model_validate_json(line)
+            for line in contacts_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        events = self.state.active_events_for_run(self.options.run_id)
+        candidates = {
+            item.candidate_id: item
+            for item in self.state.candidates_for_run(self.options.run_id)
+        }
+        scores = {
+            item.lead_event_id: item.score
+            for item in self.state.scores_for_run(self.options.run_id)
+        }
+        open_review_ids = {
+            item.record_id
+            for item in self.state.reviews_for_run(self.options.run_id, state="open")
+        }
+        handoff = _bulk_sales_handoff(
+            run_id=self.options.run_id,
+            profiles=profiles,
+            events=events,
+            candidates=candidates,
+            scores=scores,
+            people=people,
+            contacts=contacts,
+            open_review_ids=open_review_ids,
+        )
+        relative_name = (
+            f"{WHY_LINE_PROTOCOL_VERSION}/{RECIPIENT_PROTOCOL_VERSION}/sales_handoff.json"
+        )
+        artifact = self.artifacts.write_json(
+            SALES_HANDOFF_STAGE,
+            relative_name,
+            handoff.model_dump(mode="json"),
+        )
+        validated = load_handoff(artifact["path"])
+        counters = {
+            "companies": len(validated.companies),
+            "lead_events": len(validated.lead_events),
+            "crm_eligible_events": sum(item.crm_eligible for item in validated.lead_events),
+            "recipients": len(validated.recipients),
+            "sequences": len(validated.sequences),
+            "ready_sequences": sum(
+                item.eligibility_status == EligibilityStatus.READY
+                for item in validated.sequences
+            ),
+        }
+        self.state.set_stage_status(
+            self.options.run_id,
+            SALES_HANDOFF_STAGE,
+            StageStatus.COMPLETED,
+            counters=counters,
+        )
+        self.manifest.stages[SALES_HANDOFF_STAGE] = {
+            "status": StageStatus.COMPLETED.value,
+            "counters": counters,
+        }
+        self.manifest.counts.update(
+            {f"{SALES_HANDOFF_STAGE}.{key}": int(value) for key, value in counters.items()}
+        )
+        self._refresh_manifest()
+        return {
+            "run_id": self.options.run_id,
+            "status": "completed",
+            "content_hash": validated.content_hash,
+            "counts": counters,
+            "sales_handoff": artifact["path"],
+            "provider_calls": 0,
+            "email_delivery": False,
+            "campaign_enrollment": False,
+        }
 
     def _recipient_organizations(
         self, profiles: list[CompanyProfile]
@@ -1658,6 +1827,8 @@ class BulkRunner:
                 source.state,
                 source.enabled,
             )
+        if self.options.corpus_db:
+            return self._discover_from_external_corpus()
         if self.options.reuse_discovery_corpus:
             persisted = [
                 item
@@ -1764,6 +1935,131 @@ class BulkRunner:
             "selected": len(selected),
             "incomplete_sources": sum(item.incomplete for item in self.coverage),
             "uncovered_sources": sum(item.dated_candidates == 0 for item in self.coverage),
+        }
+
+    def _discover_from_external_corpus(self) -> dict:
+        """Clone a bounded, hash-verified date slice from saved archive evidence."""
+        if not self.options.corpus_db or not self.options.corpus_run_id:
+            raise ValueError("external corpus reuse requires a database and run ID")
+        corpus = StateStore(self.options.corpus_db)
+        with corpus.connect() as conn:
+            source_run = conn.execute(
+                "SELECT manifest_path FROM v2_runs WHERE run_id=?",
+                (self.options.corpus_run_id,),
+            ).fetchone()
+            discover = conn.execute(
+                """SELECT status FROM v2_stage_runs
+                   WHERE run_id=? AND stage='discover'""",
+                (self.options.corpus_run_id,),
+            ).fetchone()
+        if not source_run or not discover or discover["status"] != "completed":
+            raise ValueError("corpus source run must have completed discovery")
+        current_source_ids = {item.source_id for item in self.sources}
+        selected: list[DiscoveryCandidate] = []
+        omitted_undated = omitted_outside = 0
+        for candidate in corpus.candidates_for_run(self.options.corpus_run_id):
+            if candidate.source_id not in current_source_ids:
+                continue
+            if candidate.published_at is None:
+                omitted_undated += 1
+                continue
+            published = candidate.published_at.date()
+            if published < self.since or published > self.archive_until:
+                omitted_outside += 1
+                continue
+            artifact = Path(candidate.raw_artifact_path)
+            if not candidate.raw_artifact_path or not artifact.is_file():
+                raise ValueError(
+                    f"corpus candidate artifact is missing: {candidate.candidate_id}"
+                )
+            payload = artifact.read_bytes()
+            actual = hashlib.sha256(payload).hexdigest()
+            hash_revalidated = False
+            if candidate.raw_artifact_hash:
+                if actual != candidate.raw_artifact_hash:
+                    if not _corpus_artifact_identity_matches(candidate, payload):
+                        raise ValueError(
+                            "corpus candidate artifact hash and page identity mismatch: "
+                            f"{candidate.candidate_id}"
+                        )
+                    hash_revalidated = True
+            imported_artifact = self.artifacts.write_raw_text(
+                "corpus-import",
+                f"article-{stable_hash(candidate.canonical_url)[:20]}.html",
+                payload.decode("utf-8", errors="replace"),
+            )
+            metadata = {
+                key: value
+                for key, value in candidate.metadata.items()
+                if key
+                not in {
+                    "bulk_qualified",
+                    "bulk_rejection_reason",
+                    "exact_duplicate_candidate_ids",
+                    "selected_for_qualification",
+                }
+            }
+            cloned = candidate.model_copy(
+                update={
+                    "run_id": self.options.run_id,
+                    "record_status": RecordStatus.VALID,
+                    "validation_errors": [],
+                    "metadata": {
+                        **metadata,
+                        "external_corpus_run_id": self.options.corpus_run_id,
+                        "corpus_hash_revalidated": hash_revalidated,
+                    },
+                    "raw_artifact_path": imported_artifact["path"],
+                    "raw_artifact_hash": imported_artifact["sha256"],
+                }
+            )
+            self.state.save_candidate(cloned)
+            selected.append(cloned)
+        if not selected:
+            raise ValueError("external corpus contains no dated candidates in the requested window")
+
+        original_coverage: dict[str, SourceCoverage] = {}
+        coverage_path = Path(source_run["manifest_path"]).parent / "final" / "coverage.json"
+        if coverage_path.is_file():
+            original_coverage = {
+                item.source_id: item
+                for item in (
+                    SourceCoverage.model_validate(value)
+                    for value in json.loads(coverage_path.read_text(encoding="utf-8"))
+                )
+            }
+        counts: dict[str, int] = defaultdict(int)
+        fallback_counts: dict[str, int] = defaultdict(int)
+        for candidate in selected:
+            counts[candidate.source_id] += 1
+            if candidate.provider == "archive-search":
+                fallback_counts[candidate.source_id] += 1
+        self.coverage = []
+        for source in self.sources:
+            prior = original_coverage.get(source.source_id)
+            self.coverage.append(
+                SourceCoverage(
+                    source_id=source.source_id,
+                    source_name=source.name,
+                    source_url=source.url,
+                    dated_candidates=counts.get(source.source_id, 0),
+                    fallback_used=bool(fallback_counts.get(source.source_id, 0)),
+                    fallback_candidates=fallback_counts.get(source.source_id, 0),
+                    incomplete=prior.incomplete if prior else True,
+                    errors=[
+                        *(prior.errors if prior else ["source_coverage_unavailable"]),
+                        f"reused_from_corpus_run:{self.options.corpus_run_id}",
+                    ],
+                )
+            )
+        self._write_coverage()
+        return {
+            "sources": len(self.sources),
+            "corpus_reused": len(selected),
+            "distinct_urls": len({item.canonical_url for item in selected}),
+            "omitted_undated": omitted_undated,
+            "omitted_outside_window": omitted_outside,
+            "incomplete_sources": sum(item.incomplete for item in self.coverage),
         }
 
     def _discover_source_archive(
@@ -2103,6 +2399,8 @@ class BulkRunner:
             for item in candidates
         ]
         prompt = BULK_QUALIFICATION_PROMPT.format(
+            since=self.since.isoformat(),
+            until=self.until.isoformat(),
             candidates=json.dumps(payload, sort_keys=True, ensure_ascii=False)
         )
         attempt_id = stable_uuid(
@@ -2173,6 +2471,42 @@ class BulkRunner:
                 )
                 rejected += 1
                 continue
+            effective_date = (
+                candidate.published_at.date()
+                if candidate.published_at is not None
+                else judgment.date_posted
+            )
+            if effective_date is None:
+                self._quarantine_bulk_candidate(
+                    candidate,
+                    response_path,
+                    ValueError("qualified article publication date is missing"),
+                )
+                reviews += 1
+                continue
+            if effective_date < self.since or effective_date > self.until:
+                self.state.save_candidate(
+                    candidate.model_copy(
+                        update={
+                            "metadata": {
+                                **metadata,
+                                "bulk_rejection_reason": "outside_requested_publication_window",
+                            },
+                            "record_status": RecordStatus.REJECTED,
+                        }
+                    )
+                )
+                rejected += 1
+                continue
+            if not _business_is_grounded(candidate, judgment.business_name):
+                self._quarantine_bulk_candidate(
+                    candidate,
+                    response_path,
+                    ValueError("qualified business is not grounded in saved article evidence"),
+                )
+                reviews += 1
+                continue
+            judgment = judgment.model_copy(update={"date_posted": effective_date})
             self._save_bulk_event(candidate, judgment)
             self.state.save_candidate(candidate.model_copy(update={"metadata": metadata}))
             qualified += 1
@@ -2197,6 +2531,85 @@ class BulkRunner:
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
         return {"qualified": qualified, "rejected": rejected, "reviews": reviews}
+
+    def _qualification_audit(self) -> dict:
+        """Fail closed before dedup when persisted qualified events are ungrounded."""
+        candidates = {
+            item.candidate_id: item
+            for item in self.state.candidates_for_run(self.options.run_id)
+        }
+        organizations = {
+            item.organization_id: item for item in self.state.organizations()
+        }
+        events = self.state.events_for_run(self.options.run_id)
+        invalid_ids: list[str] = []
+        for event in events:
+            if event.record_status != RecordStatus.VALID:
+                continue
+            candidate = candidates.get(event.primary_candidate_id)
+            organization = organizations.get(event.organization_id)
+            errors: list[str] = []
+            if event.date_posted is None:
+                errors.append("bulk_event_date_missing")
+            elif event.date_posted < self.since or event.date_posted > self.until:
+                errors.append("bulk_event_outside_requested_window")
+            if candidate is None:
+                errors.append("bulk_event_primary_candidate_missing")
+            elif organization is None or not _business_is_grounded(
+                candidate, organization.canonical_name
+            ):
+                errors.append("bulk_event_business_not_grounded")
+            if not errors:
+                continue
+            invalid_ids.append(event.lead_event_id)
+            updated = event.model_copy(
+                update={
+                    "record_status": RecordStatus.REVIEW,
+                    "validation_errors": list(
+                        dict.fromkeys([*event.validation_errors, *errors])
+                    ),
+                }
+            )
+            self.state.save_lead_event(updated)
+            self.state.add_review(
+                ReviewItem(
+                    review_id=stable_uuid(
+                        "review",
+                        self.options.run_id,
+                        "qualification-audit",
+                        event.lead_event_id,
+                    ),
+                    run_id=self.options.run_id,
+                    stage="qualification-audit",
+                    record_type="lead_event",
+                    record_id=event.lead_event_id,
+                    reason_code=errors[0],
+                    validation_errors=errors,
+                )
+            )
+        invalid_kept: list[str] = []
+        if invalid_ids:
+            placeholders = ",".join("?" for _ in invalid_ids)
+            with self.state.connect() as conn:
+                invalid_kept = [
+                    row["kept_event_id"]
+                    for row in conn.execute(
+                        f"""SELECT DISTINCT kept_event_id FROM v2_event_merges
+                            WHERE run_id=? AND kept_event_id IN ({placeholders})""",
+                        (self.options.run_id, *invalid_ids),
+                    )
+                ]
+        if invalid_kept:
+            raise ValueError(
+                "qualification audit found invalid deduplication anchors; "
+                "start a clean run from the saved discovery corpus: "
+                + ", ".join(sorted(invalid_kept))
+            )
+        return {
+            "submitted": len(events),
+            "valid": len(events) - len(invalid_ids),
+            "reviews": len(invalid_ids),
+        }
 
     def _save_bulk_event(
         self, candidate: DiscoveryCandidate, payload: JudgmentPayload
@@ -3050,6 +3463,59 @@ def _normalize_judgment(value: object) -> object:
     return normalized
 
 
+_BUSINESS_GROUNDING_STOPWORDS = {
+    "and", "asset", "assets", "buyer", "city", "company", "companies",
+    "corp", "corporation", "development", "developments", "group", "inc",
+    "llc", "multiple", "owner", "project", "projects", "properties",
+    "property", "seller", "site", "the", "undisclosed", "unknown",
+    "unnamed", "various",
+}
+
+
+def _business_is_grounded(
+    candidate: DiscoveryCandidate, business_name: str
+) -> bool:
+    """Require one distinctive business token in that candidate's saved evidence."""
+    business_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", normalize_text(business_name))
+        if len(token) > 2 and token not in _BUSINESS_GROUNDING_STOPWORDS
+    }
+    if not business_tokens:
+        return False
+    evidence_tokens = set(
+        re.findall(
+            r"[a-z0-9]+",
+            normalize_text(
+                f"{candidate.title} {_candidate_excerpt(candidate, 2_500)}"
+            ),
+        )
+    )
+    return bool(business_tokens & evidence_tokens)
+
+
+def _single_sendable_company_name(value: str) -> bool:
+    """One outreach sequence must resolve to one operating company."""
+    return " and " not in f" {normalize_text(value)} "
+
+
+def _corpus_artifact_identity_matches(
+    candidate: DiscoveryCandidate, payload: bytes
+) -> bool:
+    """Revalidate dynamic HTML by canonical URL and exact publication date."""
+    if candidate.published_at is None:
+        return False
+    text = payload.decode("utf-8", errors="replace")
+    published = publication_date(text, candidate.canonical_url)
+    if published is None or published.date() != candidate.published_at.date():
+        return False
+    canonical_forms = {
+        candidate.canonical_url,
+        candidate.canonical_url.replace("https://", "http://", 1),
+    }
+    return any(value in text for value in canonical_forms)
+
+
 def _chunks(items: list, size: int) -> Iterable[list]:
     for start in range(0, len(items), max(1, size)):
         yield items[start : start + max(1, size)]
@@ -3401,6 +3867,258 @@ def _first_name(full_name: str) -> str:
 
 def _personalize_why_line(text: str, first_name: str) -> str:
     return shared_outreach.personalize_why_line(text, first_name)
+
+
+def _bulk_sales_handoff(
+    *,
+    run_id: str,
+    profiles: list[CompanyProfile],
+    events: list[LeadEvent],
+    candidates: dict[str, DiscoveryCandidate],
+    scores: dict[str, int],
+    people: list[Person],
+    contacts: list[ContactCandidate],
+    open_review_ids: set[str],
+) -> SalesHandoff:
+    """Project a completed bulk revision into the production handoff contract."""
+    events_by_id = {item.lead_event_id: item for item in events}
+    profiles_by_id = {item.company_id: item for item in profiles}
+    company_models = [
+        CompanySync(
+            company_id=profile.company_id,
+            canonical_name=profile.canonical_name,
+            domain=profile.domain,
+            aliases=profile.aliases,
+            legacy_ids=profile.organization_ids,
+        )
+        for profile in profiles
+    ]
+
+    event_models: list[LeadEventSync] = []
+    for profile in profiles:
+        if profile.anchor_lead_event_id not in events_by_id:
+            raise ValueError(
+                f"company {profile.company_id} is missing anchor event "
+                f"{profile.anchor_lead_event_id}"
+            )
+        for lead_event_id in profile.lead_event_ids:
+            event = events_by_id.get(lead_event_id)
+            if event is None:
+                raise ValueError(
+                    f"company {profile.company_id} is missing event {lead_event_id}"
+                )
+            reasons: list[str] = []
+            if event.record_status != RecordStatus.VALID:
+                reasons.append("event_record_not_valid")
+            if event.confidence != "high":
+                reasons.append("event_confidence_not_high")
+            if scores.get(event.lead_event_id, 0) <= 0:
+                reasons.append("event_score_zero")
+            if profile.company_id in open_review_ids or event.lead_event_id in open_review_ids:
+                reasons.append("blocking_open_review")
+            primary = candidates.get(event.primary_candidate_id)
+            event_models.append(
+                LeadEventSync(
+                    run_id=run_id,
+                    lead_event_id=event.lead_event_id,
+                    company_id=profile.company_id,
+                    organization_name=profile.canonical_name,
+                    event_role=(
+                        EventRole.ANCHOR
+                        if event.lead_event_id == profile.anchor_lead_event_id
+                        else EventRole.SUPPORTING
+                    ),
+                    event=event.event,
+                    location=event.location,
+                    date_posted=str(event.date_posted or ""),
+                    summary=event.summary,
+                    article_url=primary.canonical_url if primary else "",
+                    score=scores.get(event.lead_event_id, 0),
+                    confidence=event.confidence,
+                    record_status=event.record_status.value,
+                    actionable_route=True,
+                    supporting_event_ids=[
+                        item for item in profile.lead_event_ids if item != event.lead_event_id
+                    ],
+                    crm_eligible=not reasons,
+                    crm_exclusion_reasons=reasons,
+                )
+            )
+
+    people_by_id = {
+        item.person_id: item
+        for item in people
+        if item.organization_id in profiles_by_id
+    }
+    preferred_contacts: dict[tuple[str, str], ContactCandidate] = {}
+    for contact in contacts:
+        if (
+            not contact.selected
+            or not contact.email
+            or contact.person_id not in people_by_id
+            or contact.organization_id not in profiles_by_id
+            or not _contact_can_reach_warmy_verification(contact)
+        ):
+            continue
+        key = (contact.organization_id, contact.person_id)
+        prior = preferred_contacts.get(key)
+        if prior is None or _bulk_contact_preference(contact) > _bulk_contact_preference(prior):
+            preferred_contacts[key] = contact
+
+    ranked: dict[str, list[tuple[int, list[str], ContactCandidate, Person]]] = defaultdict(list)
+    for (company_id, person_id), contact in preferred_contacts.items():
+        person = people_by_id[person_id]
+        role_score, rationale = score_recipient_role(person.title, person.scope)
+        if contact.provider.casefold() != "apollo":
+            role_score += 2
+            rationale = [*rationale, "non_apollo_source_contact_candidate"]
+        ranked[company_id].append((role_score, rationale, contact, person))
+
+    recipient_models: list[RecipientSync] = []
+    recipient_reasons: dict[str, list[str]] = {}
+    recipients_by_company: dict[str, list[RecipientSync]] = defaultdict(list)
+    for company_id, rows in sorted(ranked.items()):
+        rows.sort(
+            key=lambda row: (
+                -row[0],
+                int(row[2].provider.casefold() == "apollo"),
+                row[3].person_id,
+            )
+        )
+        profile = profiles_by_id[company_id]
+        anchor = events_by_id[profile.anchor_lead_event_id]
+        why_line = _profile_why_line(profile)
+        for rank, (role_score, rationale, contact, person) in enumerate(rows, start=1):
+            reasons: list[str] = []
+            if rank != 1:
+                reasons.append("recipient_not_primary")
+            if role_score < ROLE_AUTO_SEND_THRESHOLD:
+                reasons.append("recipient_role_score_below_70")
+            if why_line.status != "valid":
+                reasons.append(f"why_line_status_{why_line.status}")
+            if why_line.confidence not in {"high", "medium"}:
+                reasons.append("why_line_confidence_low")
+            if anchor.record_status != RecordStatus.VALID:
+                reasons.append("anchor_record_not_valid")
+            if anchor.confidence != "high":
+                reasons.append("anchor_confidence_not_high")
+            if scores.get(anchor.lead_event_id, 0) <= 0:
+                reasons.append("anchor_score_zero")
+            if {
+                company_id,
+                anchor.lead_event_id,
+                person.person_id,
+                contact.contact_candidate_id,
+            } & open_review_ids:
+                reasons.append("blocking_open_review")
+            first_name = _first_name(person.name)
+            if not first_name:
+                reasons.append("recipient_first_name_missing")
+                first_name = "unknown"
+            recipient = RecipientSync(
+                recipient_id=stable_uuid("recipient", company_id, person.person_id),
+                company_id=company_id,
+                person_id=person.person_id,
+                contact_candidate_id=contact.contact_candidate_id,
+                full_name=person.name,
+                first_name=first_name,
+                title=person.title,
+                scope=person.scope,
+                email=contact.email,
+                source_provider=contact.provider,
+                source_verification_status=contact.verification_status.value,
+                source_verification_reason=contact.verification_reason,
+                role_score=role_score,
+                rank=rank,
+                primary=rank == 1,
+                selection_rationale=rationale,
+            )
+            recipient_models.append(recipient)
+            recipients_by_company[company_id].append(recipient)
+            recipient_reasons[recipient.recipient_id] = reasons
+
+    sequences: list[OutreachSequenceSync] = []
+    for profile in profiles:
+        primary = next(
+            (item for item in recipients_by_company.get(profile.company_id, []) if item.primary),
+            None,
+        )
+        if primary is None:
+            continue
+        why_line = _profile_why_line(profile)
+        personalized = _personalize_why_line(why_line.text, primary.first_name)
+        merge_snapshot = {
+            "firstName": primary.first_name,
+            "company": profile.canonical_name,
+            "whyLine": personalized,
+            "unsubscribeUrl": "__integration_generated__",
+        }
+        merge_hash = hashlib.sha256(
+            json.dumps(
+                merge_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        reasons = recipient_reasons[primary.recipient_id]
+        sequences.append(
+            OutreachSequenceSync(
+                sequence_id=stable_uuid(
+                    "outreach-sequence",
+                    profile.company_id,
+                    HANDOFF_PROTOCOL_VERSION,
+                ),
+                run_id=run_id,
+                company_id=profile.company_id,
+                campaign_protocol=HANDOFF_PROTOCOL_VERSION,
+                anchor_lead_event_id=profile.anchor_lead_event_id,
+                supporting_event_ids=[
+                    item
+                    for item in profile.lead_event_ids
+                    if item != profile.anchor_lead_event_id
+                ],
+                primary_recipient_id=primary.recipient_id,
+                why_template_key=why_line.template_key,
+                why_slots=why_line.slots,
+                why_sources=why_line.source_urls,
+                why_confidence=why_line.confidence,
+                company_why_line=why_line.text,
+                personalized_why_line=personalized,
+                merge_snapshot=merge_snapshot,
+                merge_hash=merge_hash,
+                eligibility_status=(
+                    EligibilityStatus.READY if not reasons else EligibilityStatus.BLOCKED
+                ),
+                eligibility_reasons=reasons,
+            )
+        )
+
+    value = SalesHandoff(
+        schema_version=HANDOFF_SCHEMA_VERSION,
+        protocol_version=HANDOFF_PROTOCOL_VERSION,
+        run_id=run_id,
+        companies=company_models,
+        lead_events=event_models,
+        recipients=recipient_models,
+        sequences=sequences,
+        content_hash="pending",
+    )
+    return value.model_copy(update={"content_hash": handoff_content_hash(value)})
+
+
+def _contact_can_reach_warmy_verification(contact: ContactCandidate) -> bool:
+    return contact.verification_status == VerificationStatus.VERIFIED or (
+        contact.verification_status == VerificationStatus.UNKNOWN
+        and contact.verification_reason == "domain_mx_valid_mailbox_unverified"
+    )
+
+
+def _bulk_contact_preference(contact: ContactCandidate) -> tuple[int, int, str]:
+    return (
+        int(contact.provider.casefold() != "apollo"),
+        len(contact.evidence),
+        contact.contact_candidate_id,
+    )
 
 
 def _domain(value: str) -> str:
