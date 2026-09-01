@@ -62,7 +62,6 @@ from v2.ids import (
 )
 from v2.qualification import JudgmentPayload
 from v2.research import ContactResearchService, DecisionMakerService
-from v2.scoring import parse_scores
 from v2.state import SCHEMA_VERSION, StateStore
 from v2.verification import ContactVerifier, select_best
 from v2.outreach import ROLE_AUTO_SEND_THRESHOLD, score_recipient_role
@@ -105,6 +104,7 @@ RECIPIENT_APOLLO_STAGE = "apollo"
 MAX_PEOPLE_PER_COMPANY = 3
 APOLLO_MIN_REQUEST_INTERVAL_SECONDS = 1.25
 MAX_QUALIFICATION_RECOVERY_CALLS = 49
+MAX_SCORE_RECOVERY_CALLS = 79
 ARTICLE_PRUNE_XPATHS = (
     '//*[contains(concat(" ", normalize-space(@class), " "), " wp-block-embed ")]',
     '//*[contains(concat(" ", normalize-space(@class), " "), " wp-embedded-content ")]',
@@ -246,7 +246,7 @@ class BulkOptions:
 
 
 @dataclass(slots=True)
-class _QualificationRecoveryBudget:
+class _BatchRecoveryBudget:
     remaining_calls: int
 
     def claim(self) -> bool:
@@ -258,6 +258,10 @@ class _QualificationRecoveryBudget:
 
 class _QualificationBatchContractError(ValueError):
     """A response cannot be assigned safely to every candidate in its batch."""
+
+
+class _ScoreBatchContractError(ValueError):
+    """A response cannot be assigned safely to every event in its score batch."""
 
 
 class SourceCoverage(BaseModel):
@@ -2513,7 +2517,7 @@ class BulkRunner:
     def _qualify_batch(self, candidates: list[DiscoveryCandidate]) -> dict[str, int]:
         # A complete binary split needs at most 2n-1 calls. The absolute ceiling
         # also protects direct callers that bypass the CLI's 25-candidate limit.
-        budget = _QualificationRecoveryBudget(
+        budget = _BatchRecoveryBudget(
             min(
                 MAX_QUALIFICATION_RECOVERY_CALLS,
                 max(1, (2 * len(candidates)) - 1),
@@ -2524,7 +2528,7 @@ class BulkRunner:
     def _qualify_batch_attempt(
         self,
         candidates: list[DiscoveryCandidate],
-        budget: _QualificationRecoveryBudget,
+        budget: _BatchRecoveryBudget,
     ) -> dict[str, int]:
         if not candidates:
             return {"qualified": 0, "rejected": 0, "reviews": 0}
@@ -3094,6 +3098,27 @@ class BulkRunner:
         }
 
     def _score_batch(self, events: list[LeadEvent]) -> dict[str, int]:
+        budget = _BatchRecoveryBudget(
+            min(
+                MAX_SCORE_RECOVERY_CALLS,
+                max(1, (2 * len(events)) - 1),
+            )
+        )
+        return self._score_batch_attempt(events, budget)
+
+    def _score_batch_attempt(
+        self,
+        events: list[LeadEvent],
+        budget: _BatchRecoveryBudget,
+    ) -> dict[str, int]:
+        if not events:
+            return {"scored": 0, "reviews": 0}
+        if not budget.claim():
+            exc = _ScoreBatchContractError("score recovery call budget exhausted")
+            for event in events:
+                self._quarantine_bulk_score(event, "", exc)
+            return {"scored": 0, "reviews": len(events)}
+
         batch_id = stable_hash(*(item.lead_event_id for item in events))[:20]
         inputs = [
             {
@@ -3116,56 +3141,116 @@ class BulkRunner:
         )
         started = datetime.now(timezone.utc).isoformat()
         response_path = ""
+        usage: dict = {}
         try:
             text, usage = self.model_call(self.options.model, prompt, [])
             response = self.artifacts.write_raw_text(
                 "score", f"{attempt_id}-response.txt", text
             )
             response_path = response["path"]
-            parsed = parse_scores(text, {item.lead_event_id for item in events})
-        except Exception as exc:
-            for event in events:
-                self.state.add_review(
-                    ReviewItem(
-                        review_id=stable_uuid(
-                            "review", self.options.run_id, "bulk-score", event.lead_event_id
-                        ),
-                        run_id=self.options.run_id,
-                        stage="score",
-                        record_type="lead_event",
-                        record_id=event.lead_event_id,
-                        reason_code="bulk_score_contract_invalid",
-                        validation_errors=[f"{type(exc).__name__}:{exc}"],
-                    )
+            try:
+                parsed = _parse_object(text)
+            except (TypeError, ValueError) as exc:
+                raise _ScoreBatchContractError(str(exc)) from exc
+            expected = {item.lead_event_id for item in events}
+            actual = set(parsed)
+            if actual != expected:
+                raise _ScoreBatchContractError(
+                    "score IDs must match exactly; "
+                    f"missing={sorted(expected - actual)}, "
+                    f"unknown={sorted(actual - expected)}"
                 )
+        except _ScoreBatchContractError as exc:
             self.state.record_provider_attempt(
                 attempt_id=attempt_id, run_id=self.options.run_id, stage="score",
                 provider="model", target_type="lead_event_batch", target_id=batch_id,
-                status="review", request_artifact_path=request["path"],
+                status="review", token_usage=usage,
+                request_artifact_path=request["path"],
+                response_artifact_path=response_path,
+                error={"type": type(exc).__name__, "message": str(exc)},
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if len(events) > 1 and budget.remaining_calls > 0:
+                midpoint = len(events) // 2
+                left = self._score_batch_attempt(events[:midpoint], budget)
+                right = self._score_batch_attempt(events[midpoint:], budget)
+                return {
+                    key: left[key] + right[key]
+                    for key in ("scored", "reviews")
+                }
+            for event in events:
+                self._quarantine_bulk_score(event, response_path, exc)
+            return {"scored": 0, "reviews": len(events)}
+        except Exception as exc:
+            for event in events:
+                self._quarantine_bulk_score(event, response_path, exc)
+            self.state.record_provider_attempt(
+                attempt_id=attempt_id, run_id=self.options.run_id, stage="score",
+                provider="model", target_type="lead_event_batch", target_id=batch_id,
+                status="review", token_usage=usage,
+                request_artifact_path=request["path"],
                 response_artifact_path=response_path,
                 error={"type": type(exc).__name__, "message": str(exc)},
                 started_at=started,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
             return {"scored": 0, "reviews": len(events)}
+        scored = reviews = 0
         for event in events:
+            try:
+                score = _validate_bulk_score(
+                    event.lead_event_id, parsed[event.lead_event_id]
+                )
+            except Exception as exc:
+                self._quarantine_bulk_score(event, response_path, exc)
+                reviews += 1
+                continue
             self.state.save_score(
                 LeadScore(
                     run_id=self.options.run_id,
                     lead_event_id=event.lead_event_id,
-                    score=parsed[event.lead_event_id],
+                    score=score,
                     model=self.options.model,
                     attempt_id=attempt_id,
                 )
             )
+            scored += 1
+        attempt_status = "review" if reviews else "completed"
+        attempt_error = {
+            "type": "PartialValidationError",
+            "message": f"{reviews} event scores were invalid",
+        } if reviews else {}
         self.state.record_provider_attempt(
             attempt_id=attempt_id, run_id=self.options.run_id, stage="score",
             provider="model", target_type="lead_event_batch", target_id=batch_id,
-            status="completed", token_usage=usage,
+            status=attempt_status, token_usage=usage,
             request_artifact_path=request["path"], response_artifact_path=response_path,
+            error=attempt_error,
             started_at=started, completed_at=datetime.now(timezone.utc).isoformat(),
         )
-        return {"scored": len(events), "reviews": 0}
+        return {"scored": scored, "reviews": reviews}
+
+    def _quarantine_bulk_score(
+        self,
+        event: LeadEvent,
+        response_path: str,
+        exc: Exception,
+    ) -> None:
+        self.state.add_review(
+            ReviewItem(
+                review_id=stable_uuid(
+                    "review", self.options.run_id, "bulk-score", event.lead_event_id
+                ),
+                run_id=self.options.run_id,
+                stage="score",
+                record_type="lead_event",
+                record_id=event.lead_event_id,
+                reason_code="bulk_score_contract_invalid",
+                validation_errors=[f"{type(exc).__name__}:{exc}"],
+                raw_artifact_path=response_path,
+            )
+        )
 
     def _companies(self) -> dict:
         events = self.state.active_events_for_run(self.options.run_id)
@@ -3676,6 +3761,19 @@ def _normalize_judgment(value: object) -> object:
         if parsed:
             normalized["date_posted"] = parsed.date().isoformat()
     return normalized
+
+
+def _validate_bulk_score(event_id: str, value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or int(value) != value
+    ):
+        raise ValueError(f"score for {event_id} must be an integer")
+    score = int(value)
+    if not 0 <= score <= 100:
+        raise ValueError(f"score for {event_id} is outside 0-100")
+    return score
 
 
 _BUSINESS_GROUNDING_STOPWORDS = {
