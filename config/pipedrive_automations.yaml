@@ -30,7 +30,7 @@ automations:
     required_sender: jw@aetherclean.com
     guards:
       - Aether Outreach State equals qualified_reply
-      - Aether Suppressed does not equal yes
+      - Aether Outreach State does not equal suppressed
     steps:
       - delay_business_days: 2
         condition: Aether Outreach State is not replied or suppressed
