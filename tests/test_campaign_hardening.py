@@ -29,6 +29,13 @@ def _settings(**changes) -> Settings:
 
 def test_approved_campaign_copy_has_disclosure_and_safe_step_invariants():
     manifest = load_campaign(CAMPAIGN, _settings())
+    signature_parts = (
+        "Jordan Whitehurst, Partner",
+        "Aether Facility Services, LLC",
+        "O: (602) 612-6393",
+        "M: (813) 992-0858",
+        "2120 W Encanto Blvd, Phoenix, AZ 85009",
+    )
 
     assert all(step.isActive and step.delayHours == 0 for step in manifest.steps)
     assert list(accumulate(step.delayDays for step in manifest.steps)) == [0, 3, 7, 14]
@@ -40,6 +47,11 @@ def test_approved_campaign_copy_has_disclosure_and_safe_step_invariants():
     )
     assert not any(step.subject.casefold().startswith("re:") for step in manifest.steps)
     assert "Phoenix area" not in manifest.steps[1].bodyText
+    assert all(
+        all(part in body for part in signature_parts)
+        for step in manifest.steps
+        for body in (step.bodyHtml, step.bodyText)
+    )
 
 
 @pytest.mark.parametrize(
