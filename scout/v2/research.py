@@ -56,10 +56,14 @@ DECISION_PROMPT = """Build one bounded web-research dossier for up to three curr
 Organization ID: {organization_id}
 Organization: {name}
 Known aliases: {aliases}
+Known domain: {domain}
 Location: {location}
 Date: {today}
 
-Use one research path. Prefer local or regional authority over facilities, property/asset management, development, leasing, ownership, or operations. For each verified person, also return any public professional LinkedIn, email, and phone details found during the same research. Never guess. Each person's sources must support the current role and any returned contact fields. Return strict JSON:
+Use one research path. Prefer official company/property pages, management pages, press releases, LinkedIn profiles, public filings, broker pages, chambers, and credible local sources.
+Prioritize people with buying authority or influence for cleaning/facilities work: owner, founder, COO, VP/director of operations, regional/property/community manager, asset manager, facilities manager, general manager, or leasing/tenant operations lead. Avoid article authors, brokers, architects, GCs, PR contacts, and sellers unless they are also the operator/owner/manager.
+For each verified person, also return any public professional LinkedIn, email, and phone details found during the same research. Never guess names, titles, emails, or phones. Avoid generic role mailboxes such as info@, leasing@, sales@, support@, and contact@.
+Each person's sources must support the current role and any returned contact fields. Return strict JSON:
 {{"canonical_domain":"","aliases":[],"decision_makers":[{{"name":"","title":"","scope":"","linkedin":"","email":"","phone":"","sources":[{{"url":"","supports":""}}]}}],"employee_count":{{"value":"","scope":"company|location","as_of":"","confidence":"high|medium|low"}},"sources":[{{"url":"","supports":""}}]}}
 Use an empty decision_makers list and null employee_count when nothing is verified."""
 
@@ -68,9 +72,10 @@ CONTACT_PROMPT = """Use web search to research this exact person and organizatio
 Person ID: {person_id}
 Name: {name}
 Organization: {organization}
+Known domain: {domain}
 Location: {location}
 
-Find sourced professional LinkedIn, email, and phone details. Verify the identity and organization; never guess. Return strict JSON:
+Find sourced professional LinkedIn, direct professional email, and direct phone details. Search official pages, LinkedIn, credible directories, public filings, press releases, and broker/property pages. Verify the identity and organization; never guess. Do not return generic role mailboxes such as info@, leasing@, sales@, support@, and contact@. Return strict JSON:
 {{"name":"{name}","organization":"{organization}","linkedin":"","email":"","phone":"","sources":[{{"url":"","supports":""}}]}}
 Use empty strings when a field cannot be verified."""
 
@@ -138,6 +143,7 @@ class DecisionMakerService:
             organization_id=organization.organization_id,
             name=organization.canonical_name,
             aliases=json.dumps(organization.aliases),
+            domain=organization.domain,
             location=organization.location,
             today=date.today().isoformat(),
         )
@@ -401,6 +407,7 @@ class ContactResearchService:
             person_id=person.person_id,
             name=person.name,
             organization=organization.canonical_name,
+            domain=organization.domain,
             location=organization.location,
         )
         request = self.artifacts.write_raw(
