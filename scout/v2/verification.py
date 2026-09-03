@@ -25,6 +25,20 @@ DISPOSABLE_DOMAINS = {
     "tempmail.com",
     "yopmail.com",
 }
+GENERIC_EMAIL_LOCALS = {
+    "admin",
+    "careers",
+    "contact",
+    "hello",
+    "help",
+    "info",
+    "leasing",
+    "marketing",
+    "office",
+    "press",
+    "sales",
+    "support",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +174,10 @@ def email_rejection_reason(
     domain = email.rsplit("@", 1)[1].casefold()
     if domain in DISPOSABLE_DOMAINS:
         return "email_domain_disposable"
+    local = email.split("@", 1)[0].split("+", 1)[0].casefold()
+    local_key = re.sub(r"[^a-z0-9]", "", local)
+    if local_key in GENERIC_EMAIL_LOCALS:
+        return "email_generic_role_mailbox"
     expected = {
         value.casefold().removeprefix("www.")
         for value in (organization_domain, *domain_aliases)
