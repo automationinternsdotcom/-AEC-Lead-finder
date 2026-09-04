@@ -2,7 +2,8 @@
 
 ## Status
 
-Implemented in branch `add-aether-signature-logo`.
+Implemented in branch `add-aether-signature-logo` and reflected in the live
+WarmySender draft on September 4, 2026.
 
 ## Context
 
@@ -41,6 +42,13 @@ tracking for campaign analytics by enabling `trackOpens`.
   or with a non-HTTPS public base URL.
 
 ## WarmySender Sync
+
+Live sync completed for WarmySender campaign
+`92fc58e2-d68f-4c3d-878f-158f89dde5df` (`Aether AEC Evergreen Outreach`). The
+verified draft now has `trackOpens` enabled, six selected mailboxes preserved,
+and all four email steps include the logo plus the full Jordan Whitehurst
+signature. The immediate live sync used this commit-pinned logo URL:
+`https://raw.githubusercontent.com/automationinternsdotcom/AEC-Lead-finder/14a9c18ff211f15f965ae5aa181073592d3e3cae/integration/assets/aether-signature-logo.png`.
 
 After this branch is merged on the persistent Mac with production `.env` values,
 patch the existing Warmy campaign if it is in draft or paused status:
